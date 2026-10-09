@@ -199,6 +199,7 @@ function invocationOptions(batch, call, exec) {
     signal: batch.signal,
     notifyFn: batch.opts.notifyFn,
     toolApprovalHook: batch.opts.onToolApproval,
+    userQuestionHook: batch.opts.onUserQuestion,
     iteration: batch.iterations,
     localSearchTelemetry: exec.localSearchTelemetry || {},
     resultTelemetry: exec.resultTelemetry,

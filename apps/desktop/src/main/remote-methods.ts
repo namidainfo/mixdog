@@ -44,6 +44,7 @@ import {
   requiredSessionMessageCount,
   requiredTranscriptItemLimit,
   requiredToolApprovalDecision,
+  requiredUserQuestionResponse,
   sessionDisplayName,
   requiredGitGlobalConfigKey,
   requiredLspDocumentInput,
@@ -741,6 +742,12 @@ export function createRemoteMethods({
         requiredSessionId(sessionId),
         requiredString(id, 'approval id', 1_024),
         requiredToolApprovalDecision(decision)
+      ),
+    resolveUserQuestionForSession: ([sessionId, id, response]) =>
+      host.resolveUserQuestionForSession(
+        requiredSessionId(sessionId),
+        requiredString(id, 'question id', 1_024),
+        requiredUserQuestionResponse(response)
       ),
     inheritSession: ([sourceSessionId, selection]) =>
       host.inheritSession(

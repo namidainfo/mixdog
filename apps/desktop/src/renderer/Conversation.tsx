@@ -23,6 +23,7 @@ import { approvalInstanceKey, transcriptTurnKeys } from './renderer-logic.mjs';
 import type { CommandSurface as CommandSurfaceName, SettingsSection } from './slash-commands';
 
 import { ApprovalCard } from './ApprovalCard';
+import { UserQuestionCard } from './UserQuestionCard';
 import { Composer, WorkflowSelect, OrchestrationModeSelect } from './Composer';
 import { ProjectContextSelector } from './composer-support';
 import { BrandTile } from './WorkspaceEmptyState';
@@ -782,6 +783,16 @@ export function Conversation({
                   const approvalId = String(snapshot.toolApproval?.id || '');
                   if (!sessionId) return Promise.resolve(false);
                   return host.resolveToolApprovalForSession(sessionId, approvalId, { approved });
+                }}
+              />
+            ) : snapshot.userQuestion ? (
+              <UserQuestionCard
+                key={`${snapshot.userQuestion.sessionId}:${snapshot.userQuestion.id}`}
+                request={snapshot.userQuestion}
+                resolve={(response) => {
+                  const request = snapshot.userQuestion;
+                  if (!request) return Promise.resolve(false);
+                  return window.mixdogDesktop.resolveUserQuestionForSession(request.sessionId, request.id, response);
                 }}
               />
             ) : null

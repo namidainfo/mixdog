@@ -19,6 +19,8 @@ import {
   refreshUsageDashboard,
   subscribeUsageDashboard,
   type UsageApi,
+  type UsageDashboardSnapshot,
+  type UsageRecord,
 } from './usage-dashboard-store';
 import { displayUsagePercent, usageToneClass } from './usage-percent';
 import { ActivityRailNavigation } from './activity-rail-navigation';
@@ -31,23 +33,39 @@ import type { WorkbenchSideViewDescriptor, WorkbenchSideViewId } from './workben
 // throttle then held an empty popup for 300ms+.
 const prefetchSidebarUsage = () => void loadSidebarUsageModule().catch(() => undefined);
 
-function usagePinGlyph(rows: ReturnType<typeof useUsageRailPin>['usagePinRows'], loading: boolean) {
+function usagePinGlyph(
+  rows: ReturnType<typeof useUsageRailPin>['usagePinRows'],
+  loading: boolean,
+  snapshot: UsageDashboardSnapshot
+) {
   if (rows.length) {
+    const accounts = loadedSidebarUsageModule()?.connectedUsageAccounts(snapshot.dashboard) ?? [];
+    const providers = (snapshot.dashboard.rows ?? []) as UsageRecord[];
     return (
       <span className="rail-usage-pin-stack" aria-hidden="true">
         {rows.map((entry) => {
-          const percent = displayUsagePercent(entry.percent) ?? 0;
+          const percent = displayUsagePercent(entry.percent);
           // Glanceable readout (user: 프로그래스 중간에): icon, then the
-          // flyout's meter grammar in miniature, then the number — bar
-          // and number reflect the provider's final quota window.
-          const tone = usageToneClass(entry.percent);
+          // flyout's glow grammar in miniature. Pins still report USED quota;
+          // tone thresholds take used quota too, not the flyout's remaining value.
+          const tone = usageToneClass(percent === null ? null : entry.percent);
+          const source = accounts.find((account) => account.key === entry.key)
+            ?? providers.find((provider) => provider.id === entry.provider);
+          const stale = snapshot.status !== 'ready' || Boolean(source?.stale);
+          const usageTitle = percent === null ? t('Usage unavailable') : t('{{percent}}% used', { percent });
           return (
-            <span className={`rail-usage-pin-brand${tone}`} key={entry.key} data-usage-pin={entry.key}>
+            <span
+              className={`rail-usage-pin-brand${tone}${percent !== null ? ' has-quota' : ''}${percent !== null && entry.percent > 0 ? ' glowing' : ''}${stale ? ' is-stale' : ''}`}
+              style={{ '--quota-value': `${percent ?? 0}%` } as React.CSSProperties}
+              key={entry.key}
+              data-usage-pin={entry.key}
+              title={usageTitle}
+            >
               <ProviderIcon provider={entry.provider} />
               <i>
-                <i style={{ width: `${percent}%` }} />
+                <i style={{ width: `${percent ?? 0}%` }} />
               </i>
-              <small>{percent}%</small>
+              <small>{percent === null ? '—' : `${percent}%`}</small>
             </span>
           );
         })}
@@ -213,7 +231,7 @@ export function ActivityRail({
           {/* Pie-slice glyph: the classic usage/quota mark — gauge, columns and
             gantt bars all read clipped or generic at 20px (user feedback).
             Pinned, the same button becomes the brand stack. */}
-          {usagePinGlyph(usagePinRows, usagePinLoading)}
+          {usagePinGlyph(usagePinRows, usagePinLoading, usageSnapshot)}
         </button>
       )}
       {desktopFeatureEnabled('settings') && (

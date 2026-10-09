@@ -22,6 +22,28 @@ const PREVIOUS_RESPONSE_NOT_FOUND = 'previous_response_not_found';
 export const WEBSOCKET_CONNECTION_LIMIT = 'websocket_connection_limit_reached';
 const RATE_LIMIT_EXCEEDED = 'rate_limit_exceeded';
 const CONTEXT_OVERFLOW_CODES = new Set(['context_length_exceeded', 'context_window_exceeded', 'request_too_large']);
+// Certificate trust/identity failures require caller intervention. Keep this
+// typed and explicit: TLS record corruption and protocol faults remain transient.
+const CERTIFICATE_VERIFICATION_ERROR_CODES = new Set([
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'UNABLE_TO_GET_ISSUER_CERT',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'CERT_HAS_EXPIRED',
+  'CERT_NOT_YET_VALID',
+  'CERT_REVOKED',
+  'CERT_SIGNATURE_FAILURE',
+  'CERT_UNTRUSTED',
+  'CERT_REJECTED',
+  'CERT_CHAIN_TOO_LONG',
+  'INVALID_CA',
+  'INVALID_PURPOSE',
+  'PATH_LENGTH_EXCEEDED',
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+  'ERR_TLS_CERT_SIGNATURE_ALGORITHM_UNSUPPORTED',
+  'ERR_SSL_CERTIFICATE_VERIFY_FAILED',
+]);
 const TRANSIENT_SDK_NAMES = new Set([
   'APIConnectionError',
   'APIConnectionTimeoutError',
@@ -107,7 +129,12 @@ export function classifyError(err) {
   if (chain.some(isExplicitUserAbortError)) return 'permanent';
   // Current typed HTTP status outranks stale stream/connection annotations.
   const status = statusOfError(err);
-  return classifyByStatus(err, status) || classifyByTransport(err, chain, status) || 'unknown';
+  const statusVerdict = classifyByStatus(err, status);
+  if (statusVerdict === 'auth') return statusVerdict;
+  // A fetch/SDK wrapper (or an earlier reset in its cause chain) must not
+  // turn a current certificate verification failure into an automatic retry.
+  if (hasCertificateVerificationError(chain)) return 'permanent';
+  return statusVerdict || classifyByTransport(err, chain, status) || 'unknown';
 }
 
 // A turn that ended on a malformed or unexpected tool call produced no usable
@@ -124,7 +151,8 @@ function isInvalidToolCallFinish(err) {
   return !(Array.isArray(err.partialToolCalls) && err.partialToolCalls.length > 0);
 }
 
-// Transport symptoms, consulted only once no status verdict applied.
+// Transport symptoms, consulted only after cancellation/certificate denials
+// and once no status verdict applied.
 function classifyByTransport(err, chain, status) {
   if (isInvalidToolCallFinish(err)) return 'transient';
   // A stream that closed WITHOUT its terminal frame is a transport symptom,
@@ -405,6 +433,7 @@ export function isServerUnavailable(err) {
  */
 export function canFallbackNonStreaming(err, { signal } = {}) {
   if (!err || signal?.aborted) return false;
+  if (isCertificateVerificationError(err)) return false;
   const outcome = readStreamOutcome(err);
   // A completed turn needs no fallback; a user cancel must never be re-issued.
   if (outcome.terminalObserved || outcome.userAbort) return false;
@@ -427,6 +456,15 @@ export function boundedCauseChain(err) {
     cursor = cursor?.cause;
   }
   return chain;
+}
+
+function hasCertificateVerificationError(chain) {
+  return chain.some((item) => CERTIFICATE_VERIFICATION_ERROR_CODES.has(String(item?.code || '')));
+}
+
+/** True for a typed certificate verification failure, including fetch/SDK causes. */
+export function isCertificateVerificationError(err) {
+  return hasCertificateVerificationError(boundedCauseChain(err));
 }
 
 export function isExplicitUserAbortError(err) {

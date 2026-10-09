@@ -205,7 +205,17 @@ export function createUsageStatsApi({
         inUse: accountsInUse(accountPool),
         label: quotaText(options?.window),
       };
-      if (options?.page != null) return store.quotaWindowsAsync({ ...selection, page: Number(options.page), now });
+      const ownAccount = (answer) => {
+        // The ledger's legacy default selection may fall back to another
+        // account with history. Explicit account questions must never do so.
+        if (selection.account && (!answer.selection ||
+          answer.selection.account !== selection.account ||
+          (selection.provider && answer.selection.provider !== selection.provider))) {
+          throw new Error('Quota history unavailable for this account.');
+        }
+        return answer;
+      };
+      if (options?.page != null) return ownAccount(await store.quotaWindowsAsync({ ...selection, page: Number(options.page), now }));
       const view = options?.view == null || options.view === 'window' ? 'window' : options.view;
       const period = view === 'window' ? null : usagePeriodFor({ ...options, view }, now);
       const history = await store.quotaHistoryAsync({
@@ -216,7 +226,7 @@ export function createUsageStatsApi({
         toMs: period?.toMs ?? null,
         now,
       });
-      return labelQuotaHistory(period ? { ...history, period } : history, accountPool);
+      return labelQuotaHistory(period ? { ...ownAccount(history), period } : ownAccount(history), accountPool);
     },
   };
 }

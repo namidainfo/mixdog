@@ -24,7 +24,10 @@ test('each provider option exposes and hides only its own dev-only OAuth provide
   assert.deepEqual(await oauthIds(), ['openai-oauth', 'anthropic-oauth', 'grok-oauth']);
   for (const id of DEV) {
     assert.equal(isKnownProvider(id), false, id);
-    assert.throws(() => listProviderAccounts(id), /Unknown OAuth provider/);
+    // Disabled providers remain unavailable for setup/login, but an existing
+    // account roster can still be read without enabling the provider.
+    assert.equal(listProviderAccounts(id).provider, id);
+    assert.equal(isKnownProvider(id), false, id);
   }
   assert.equal(isKnownProvider('openai-oauth'), true);
   assert.equal(isKnownProvider('openai'), true);

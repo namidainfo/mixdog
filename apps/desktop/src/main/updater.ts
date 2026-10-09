@@ -71,7 +71,7 @@ export const desktopUpdater = {
 
 export function startAutoUpdater(stop: () => Promise<void> = async () => {}, report?: UpdaterLog): void {
   if (controller || checkInterval || startPromise) return;
-  if (!app.isPackaged || process.env.ELECTRON_RENDERER_URL) {
+  if (!app.isPackaged || process.env.ELECTRON_RENDERER_URL || process.env.MIXDOG_PERSONAL === '1') {
     // Dev/unpackaged builds silently disable updates; the state is already
     // published to the Settings UI. A console.info here leaks into whatever
     // terminal launched the app and reads like an in-app message.

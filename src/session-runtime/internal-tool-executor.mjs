@@ -10,6 +10,7 @@ import { createBridgeToolHandlers } from './internal-tool-executor/bridge-tools.
 import { createFeatureToolHandlers } from './internal-tool-executor/feature-tools.mjs';
 import { createKnowledgeToolHandlers } from './internal-tool-executor/knowledge-tools.mjs';
 import { createWorkspaceToolHandlers } from './internal-tool-executor/workspace-tools.mjs';
+import { executeUserQuestion } from '../runtime/user-questions/tool.mjs';
 
 export function createInternalToolExecutor({
   rt,
@@ -33,6 +34,7 @@ export function createInternalToolExecutor({
   skillToolContent,
 }) {
   const handlers = {
+    request_user_input: (args, { callerCtx }) => executeUserQuestion(args, callerCtx),
     ...createBridgeToolHandlers({ rt }),
     ...createFeatureToolHandlers({ rt, setupTool, officeToolsEnabled, mediaToolEnabled, tidyToolEnabled }),
     ...createKnowledgeToolHandlers({

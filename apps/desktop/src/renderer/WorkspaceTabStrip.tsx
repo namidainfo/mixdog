@@ -296,7 +296,7 @@ function workspaceTabNode({
           selectTab(tab);
         }}
         aria-current={active ? 'page' : undefined}
-        data-tooltip={tab.title}
+        data-tooltip={tab.tooltip || tab.title}
       >
         {/* While the session works, the tab GLYPH becomes the
               progress spinner (user decision) — no extra dot. */}

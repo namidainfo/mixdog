@@ -15,6 +15,7 @@ import type {
   DesktopUpdaterState,
   SessionSnapshot,
   ToolApprovalDecision,
+  UserQuestionResponse,
 } from './contract-session';
 import type {
   DesktopCapabilityReadRequest,
@@ -464,6 +465,7 @@ export interface DesktopApi {
   submitToSession(sessionId: string, prompt: DesktopPromptContent, options?: DesktopSubmitOptions): Promise<boolean>;
   abortSession(sessionId: string, options?: DesktopAbortOptions): Promise<unknown>;
   resolveToolApprovalForSession(sessionId: string, id: string, decision: ToolApprovalDecision): Promise<boolean>;
+  resolveUserQuestionForSession(sessionId: string, id: string, response: UserQuestionResponse): Promise<boolean>;
   /** Per-session live snapshot lane covering every pooled session runtime. */
   subscribeSessionState(listener: (update: DesktopSessionStateUpdate) => void): () => void;
   listProviderModels(options?: DesktopModelCatalogOptions): Promise<DesktopModelOption[]>;

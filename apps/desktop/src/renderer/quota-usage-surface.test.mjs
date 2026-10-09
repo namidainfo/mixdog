@@ -635,3 +635,38 @@ test('subscription usage follows the account in use when it switches', async (co
   await render(props);
   assert.equal(shownAccount(), 'Account 1');
 });
+
+test('explicit inactive-account focus opens its own 5H/7D readings and ignores global selection switches', async (context) => {
+  const render = harness(context);
+  const ledger = new UsageLedger(':memory:');
+  context.after(() => ledger.close());
+  const reading = (account, label, usedPct) => ({ provider: 'anthropic-oauth', account, label, usedPct, ts: at(1), resetAt });
+  ledger.recordQuota([
+    reading('default', '5H', 10), reading('default', '7D', 20),
+    reading('work', '5H', 70), reading('work', '7D', 90),
+  ]);
+  const { calls, pages, api } = usageHost(context, ledger, {
+    accounts: [{ id: 'default', label: 'Selected' }, { id: 'work', label: 'Clicked' }],
+    pool: { selectedId: 'default' },
+  });
+  const props = { surface: 'stats', open: true, onClose() {}, api };
+  for (const [label, expected] of [['5H', '70%'], ['7D', '90%']]) {
+    focusQuotaUsage({ provider: 'anthropic-oauth', account: 'work', window: label });
+    await render(props);
+    assert.deepEqual(calls.at(-1), { provider: 'anthropic-oauth', account: 'work', window: label, view: 'window' });
+    assert.equal(document.querySelector('.quota-account .mx-select-value').textContent, 'Clicked');
+    assert.equal(document.querySelectorAll('.stats-card > b')[0].textContent, expected);
+    assert.equal(pages.at(-1).account, 'work');
+    const count = calls.length;
+    await act(async () => applyAccountUsageWindows('anthropic-oauth', undefined));
+    assert.equal(calls.length, count);
+    assert.equal(document.querySelectorAll('.stats-card > b')[0].textContent, expected);
+    await render({ ...props, open: false });
+  }
+  await assert.rejects(api.invokeCapability({ capability: 'getQuotaHistory', args: [{
+    provider: 'anthropic-oauth', account: 'missing', window: '5H', view: 'window',
+  }] }), /Quota history unavailable for this account/);
+  await assert.rejects(api.invokeCapability({ capability: 'getQuotaHistory', args: [{
+    provider: 'anthropic-oauth', account: 'missing', window: '5H', page: 0,
+  }] }), /Quota history unavailable for this account/);
+});

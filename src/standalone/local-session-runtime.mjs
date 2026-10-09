@@ -13,6 +13,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { bootProfile } from '../tui/session/boot-profile.mjs';
 import { createGoalContinuation } from '../tui/session/goal-continuation.mjs';
 import { createToolApproval } from '../tui/session/tool-approval.mjs';
+import { createUserQuestions } from '../tui/session/user-questions.mjs';
 import { createToolCardResults } from '../tui/session/tool-card-results.mjs';
 import { createAgentJobFeed } from '../tui/session/agent-job-feed.mjs';
 import { createContextState } from '../tui/session/context-state.mjs';
@@ -337,6 +338,11 @@ export async function createLocalSessionRuntime({
       timeoutMs: TOOL_APPROVAL_TIMEOUT_MS,
     }
   );
+  const { requestUserQuestion, finishUserQuestion, cancelAllUserQuestions } = createUserQuestions({
+    getState,
+    set,
+    getDisposed: () => flags.disposed,
+  });
   lifecycle.runtimePulseTimer = setInterval(
     createRuntimePulse({
       flags,
@@ -450,8 +456,15 @@ export async function createLocalSessionRuntime({
     releaseTranscriptSpill: (snapshot) => transcriptSpill.releaseSnapshot(snapshot),
     presentNextToolApproval,
     finishToolApproval,
-    denyAllToolApprovals,
+    // Existing abort, turn-close and dispose boundaries cancel every pending
+    // interaction, but approval decisions and question answers remain separate.
+    denyAllToolApprovals: (reason) => {
+      denyAllToolApprovals(reason);
+      cancelAllUserQuestions(reason);
+    },
     requestToolApproval,
+    requestUserQuestion,
+    finishUserQuestion,
     patchToolCardResult,
     flushToolResults,
     kickExecutionPendingResume,

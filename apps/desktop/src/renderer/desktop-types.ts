@@ -1,4 +1,5 @@
 import type { DesktopSessionSummary } from '../shared/contract';
+import type { UserQuestionRequest } from '../shared/contract';
 
 export type RecordValue = Record<string, unknown>;
 export type Project = string;
@@ -96,6 +97,7 @@ export type Snapshot = RecordValue & {
   commandBusy?: boolean;
   queued?: unknown[];
   toolApproval?: Approval | null;
+  userQuestion?: UserQuestionRequest | null;
   cwd?: string;
   project?: Project | null;
   currentProject?: Project | null;

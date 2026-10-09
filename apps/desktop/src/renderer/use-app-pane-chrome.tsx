@@ -1,18 +1,20 @@
 import type { Dispatch, MutableRefObject, ReactNode, SetStateAction } from 'react';
 
-import type { DesktopSessionSummary } from '../shared/contract';
+import type { DesktopProjectSummary, DesktopSessionSummary } from '../shared/contract';
 import { sessionSummaryTitle } from '../shared/session-title.mjs';
 import { WorkspaceTabStrip, type NavigationSelection, type WorkspaceSelection, type WorkspaceTab } from './navigation';
 import type { PaneLeaf } from './pane-layout';
 import type { usePaneWorkspace } from './pane-workspace-state';
 import { t } from './i18n';
 import { displayProject, navigationKey } from './text-format';
+import { sessionTabProject } from './session-tab-project';
 
 type PaneWorkspace = ReturnType<typeof usePaneWorkspace>;
 
 export function useAppPaneChrome({
   tabs,
   sessions,
+  projects = [],
   paneWorkspace,
   dirtyFileKeys,
   workingSessionIds,
@@ -33,6 +35,7 @@ export function useAppPaneChrome({
 }: {
   tabs: WorkspaceTab[];
   sessions: DesktopSessionSummary[];
+  projects?: readonly DesktopProjectSummary[];
   paneWorkspace: PaneWorkspace;
   dirtyFileKeys: ReadonlySet<string>;
   workingSessionIds: ReadonlySet<string>;
@@ -112,9 +115,13 @@ export function useAppPaneChrome({
     if (leaf.tabs.length === 0) return null;
     const leafTabs = leaf.tabs.map((selection) => {
       const key = navigationKey(selection);
+      const title = stripTitleFor(key, selection);
+      const label = selection.kind === 'session'
+        ? sessionTabProject(title, sessions.find((session) => session.id === selection.id), projects, t('Unclassified'))
+        : { title };
       return {
         key,
-        title: stripTitleFor(key, selection),
+        ...label,
         selection,
         preview: leaf.previewKey === key,
         pinned: leaf.previewKey !== key,

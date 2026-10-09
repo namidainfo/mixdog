@@ -7,11 +7,11 @@
  * idle gap the first request to a provider pays a fresh TLS handshake — a
  * 100-300ms first-byte penalty observed on cold calls.
  *
- * This module exports ONE lazily-created singleton undici `Agent` with a long
- * keep-alive window and a sane connection cap, passed as the `dispatcher`
- * option on those providers' `fetch()` calls so warm sockets survive idle
- * gaps. `preconnect(origin)` opens a socket ahead of the first real request
- * (best-effort, errors swallowed) and is called once at provider construction.
+ * When no global dispatcher is installed, this module creates ONE singleton
+ * undici `Agent` with a long keep-alive window and a sane connection cap and
+ * installs it globally. Preexisting dispatchers (including the default pool)
+ * are preserved. `preconnect(origin)` warms only an app-owned pool
+ * (best-effort, errors swallowed).
  *
  * Scope note: this is deliberately NOT used by src/runtime/web-search/lib/web-tools.mjs,
  * whose per-request Agent pins a pre-validated DNS address for SSRF safety and
@@ -22,6 +22,8 @@
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
+const _globalDispatcherKey = Symbol.for('undici.globalDispatcher.2');
+const _legacyDispatcherKey = Symbol.for('undici.globalDispatcher.1');
 let _undici = null;
 function undici() {
   if (!_undici) _undici = require('undici');
@@ -29,7 +31,8 @@ function undici() {
 }
 
 let _agent = null;
-let _globalInstalled = false;
+// Only pairs captured immediately after OUR setter call are app-owned.
+const _ownedPairs = new WeakMap();
 
 function envInt(name, fallback) {
   const raw = process.env[name];
@@ -44,31 +47,19 @@ function envInt(name, fallback) {
  * per-request `dispatcher` would silently bypass `setGlobalDispatcher(...)` and
  * env-proxy wiring — so callers must fall back to the global dispatcher.
  *
- * What is preserved (we step aside): explicit proxy env vars, undici's built-in
- * `ProxyAgent`, and ANY non-default global dispatcher — i.e. any installed
- * global whose constructor name is not `Agent` (undici's default global is a
- * plain `Agent`). Our own singleton is never installed via
- * `setGlobalDispatcher`, so this never self-detects.
- *
- * Accepted gap: a custom dispatcher deliberately constructed AS a plain undici
- * `Agent` and set as the global is indistinguishable from the default here, so
- * we'd keep using our shared pool. That's tolerable — such a dispatcher is
- * itself a direct-connection pool (no proxy hop), so the bypass risk is minimal.
+ * Any preexisting dispatcher is external, even an unconfigured default Agent.
+ * Only exact global/legacy pairs installed here may be replaced or recycled.
  */
 function proxyConfigured() {
   const env = process.env;
   if (env.HTTP_PROXY || env.HTTPS_PROXY || env.http_proxy || env.https_proxy) return true;
   if (env.NODE_USE_ENV_PROXY) return true;
-  try {
-    const g = undici().getGlobalDispatcher?.();
-    // Any non-default global dispatcher (constructor name other than the plain
-    // `Agent` undici installs by default) is treated as custom — ProxyAgent,
-    // EnvHttpProxyAgent, MockAgent, or a user subclass — and we step aside.
-    if (g?.constructor && g.constructor.name !== 'Agent') return true;
-  } catch {
-    /* getGlobalDispatcher unavailable — treat as no proxy */
-  }
-  return false;
+  // Inspect slots without executing accessors or loading undici: its first
+  // require would overwrite a preexisting v1-only dispatcher.
+  const current = Object.getOwnPropertyDescriptor(globalThis, _globalDispatcherKey);
+  const legacy = Object.getOwnPropertyDescriptor(globalThis, _legacyDispatcherKey);
+  if (!current && !legacy) return false;
+  return !_ownedPairs.has(current?.value) || _ownedPairs.get(current.value) !== legacy?.value;
 }
 
 /**
@@ -78,7 +69,7 @@ function proxyConfigured() {
  * between agent turns; connections caps concurrent sockets per origin so a
  * burst of parallel calls can't open an unbounded number of handshakes.
  *
- * Returns `undefined` when a proxy / any custom (non-default) global dispatcher
+ * Returns `undefined` when a proxy / any preexisting global dispatcher
  * is configured, so `fetch({ dispatcher: undefined })` falls back to that
  * global dispatcher instead of bypassing it. `dispatcher: undefined` is a
  * harmless fetch option, so call sites need no change.
@@ -87,7 +78,6 @@ export function getLlmDispatcher() {
   if (proxyConfigured()) return undefined;
   if (_agent?.destroyed || _agent?.closed) {
     _agent = null;
-    _globalInstalled = false;
   }
   if (!_agent) {
     _agent = new (undici().Agent)({
@@ -110,35 +100,39 @@ export function getLlmDispatcher() {
   // mixdog standalone: separate undici instance from Node's fetch undici, so
   // a per-request dispatcher throws UND_ERR_INVALID_ARG. Install globally once
   // and omit the per-request dispatcher. See port-plan D7.
-  if (!_globalInstalled) {
-    try {
+  try {
+    if (Object.getOwnPropertyDescriptor(globalThis, _globalDispatcherKey)?.value !== _agent) {
+      const previousLegacy = Object.getOwnPropertyDescriptor(globalThis, _legacyDispatcherKey)?.value;
       undici().setGlobalDispatcher(_agent);
-      _globalInstalled = true;
-    } catch {
-      /* fall back */
+      const installed = Object.getOwnPropertyDescriptor(globalThis, _globalDispatcherKey)?.value;
+      const legacy = Object.getOwnPropertyDescriptor(globalThis, _legacyDispatcherKey)?.value;
+      // Our Agent's setter creates a fresh v1 bridge. Do not claim a pair if
+      // either installation failed (undici can silently fall back on frozen globals).
+      if (installed !== _agent || !legacy || legacy === previousLegacy) return _agent;
+      _ownedPairs.set(_agent, legacy);
     }
+    return undefined;
+  } catch {
+    return _agent;
   }
-  return _globalInstalled ? undefined : _agent;
 }
 
 /**
  * Replace the global pool before retiring its old generation. SDK clients
  * use global fetch without calling getLlmDispatcher() on every attempt.
  * Graceful close drains unrelated in-flight requests instead of aborting
- * every provider because one origin failed. No-op under a proxy.
+ * every provider because one origin failed. Never retires an external pool.
  */
 export function recycleLlmDispatcher() {
   if (proxyConfigured()) return false;
   const old = _agent;
   if (!old) return false;
   _agent = null;
-  _globalInstalled = false;
   _preconnectedAt.clear();
   getLlmDispatcher();
-  if (undici().getGlobalDispatcher() !== _agent) {
+  if (proxyConfigured() || Object.getOwnPropertyDescriptor(globalThis, _globalDispatcherKey)?.value !== _agent) {
     const unused = _agent;
     _agent = old;
-    _globalInstalled = false;
     try {
       unused?.close()?.catch?.(() => {});
     } catch {}

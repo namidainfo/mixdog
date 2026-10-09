@@ -529,7 +529,9 @@ export async function beginOAuthProviderLogin(cfgMod, provider, options = {}) {
 }
 
 export function listProviderAccounts(provider) {
-  const oauth = availableOAuthProvider(provider);
+  // A disabled provider can still have connected accounts. Reading their
+  // roster/quota must not silently hide them or enable the provider.
+  const oauth = OAUTH_BY_ID.get(provider);
   if (!oauth) throw new TypeError('Unknown OAuth provider.');
   const pool = readProviderAccountPool(provider);
   const accounts = pool.accounts.length ? pool.accounts : defaultAccountRows(provider, oauth);

@@ -14,6 +14,7 @@ import {
   requiredSubmitOptions,
   requiredSessionMessageCount,
   requiredToolApprovalDecision,
+  requiredUserQuestionResponse,
   sessionDisplayName,
 } from './ipc-validation';
 import type { IpcHandle as Handle } from './ipc';
@@ -95,6 +96,13 @@ export function registerSessionIpc({
       requiredSessionId(sessionId),
       requiredString(id, 'approval id', 1_024),
       requiredToolApprovalDecision(input)
+    )
+  );
+  handle(DESKTOP_IPC.resolveUserQuestionForSession, (_event, sessionId, id, input) =>
+    host.resolveUserQuestionForSession(
+      requiredSessionId(sessionId),
+      requiredString(id, 'question id', 1_024),
+      requiredUserQuestionResponse(input)
     )
   );
   handle(DESKTOP_IPC.inheritSession, (_event, sourceSessionId, selection) =>

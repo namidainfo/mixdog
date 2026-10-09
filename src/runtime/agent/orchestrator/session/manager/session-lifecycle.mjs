@@ -405,6 +405,7 @@ function _attachViewerSession(session, sessionId) {
   const attached = { ...session, remoteAttached: true };
   delete attached.liveTurnMessages;
   delete attached.toolApprovalHook;
+  delete attached.userQuestionHook;
   if (process.env.MIXDOG_DEBUG_SESSION_LOG) {
     try {
       process.stderr.write(`[session] attach-on-resume: ${sessionId} is live elsewhere → viewer attach\n`);

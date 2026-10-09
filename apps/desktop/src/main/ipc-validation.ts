@@ -36,6 +36,7 @@ import {
   MAX_PROMPT_IMAGES,
 } from '../shared/prompt-limits';
 import { requiredSessionId } from './desktop-state';
+export { normalizeUserQuestionResponse as requiredUserQuestionResponse } from '../../../../src/runtime/user-questions/contract.mjs';
 
 const MAX_PROMPT_LENGTH = 1_000_000;
 const MAX_STRUCTURED_STRING_TOTAL = 32_000_000;
@@ -186,6 +187,7 @@ const CAPABILITY_ARITY = {
   getQuotaHistory: [0, 1],
   getSessionUsage: [0, 0],
   consumeCodexRateLimitResetCredit: [1, 1],
+  requestConnectedAccountQuotaWindows: [0, 0],
   getSessionReviewDiff: [0, 0],
   getTurnReviewDiff: [0, 1],
   revertTurnReview: [0, 1],

@@ -140,6 +140,9 @@ export interface DesktopGoalState extends Readonly<Record<string, unknown>> {
   completedAt?: number | null;
 }
 
+import type { UserQuestionRequest } from '../../../../src/runtime/user-questions/contract.mjs';
+export type { UserQuestionRequest, UserQuestionResponse } from '../../../../src/runtime/user-questions/contract.mjs';
+
 export interface DesktopSessionState extends Readonly<Record<string, unknown>> {
   items?: DesktopTranscriptItem[];
   /** `items` is a tail window and older history can be paged in; absent on a
@@ -149,6 +152,7 @@ export interface DesktopSessionState extends Readonly<Record<string, unknown>> {
   queued?: unknown[];
   busy?: boolean;
   commandBusy?: boolean;
+  userQuestion?: UserQuestionRequest | null;
   thinking?: unknown;
   spinner?: DesktopActivityState | null;
   commandStatus?: DesktopActivityState | null;

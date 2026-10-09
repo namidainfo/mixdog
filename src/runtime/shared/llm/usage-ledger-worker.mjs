@@ -8,7 +8,10 @@ import { DatabaseSync } from 'node:sqlite';
 import { serveWorkerRequests } from '../worker-requests.mjs';
 import { UsageLedger } from './usage-ledger.mjs';
 import { readSessionUsage, rollupUsage } from './usage-ledger-rollup.mjs';
-import { readQuotaHistory, readQuotaWindows } from './usage-ledger-quota.mjs';
+import { readQuotaHistory, readQuotaWindows, selectQuotaSeries } from './usage-ledger-quota.mjs';
+import { readCodexQuotaPrior } from './codex-quota-calibration.mjs';
+import { withProviderAccount } from '../provider-auth-binding.mjs';
+import { loadTokens } from '../../agent/orchestrator/providers/openai-oauth-tokens.mjs';
 import { applyUsageRepairIfUnchanged, selectUsageRepairCandidates } from './usage-ledger-repair.mjs';
 import { unpricedCountAfter, unpricedPendingCounts } from './usage-pricing-refresh.mjs';
 
@@ -33,6 +36,19 @@ function write(path, update) {
   } finally {
     ledger.close();
   }
+}
+
+async function readQuota(path, options, query) {
+  const selection = read(path, (db) => selectQuotaSeries(db, options));
+  let calibration = null;
+  if (process.env.MIXDOG_PERSONAL === '1' && selection?.provider === 'openai-oauth') {
+    const accountId = withProviderAccount('openai-oauth', selection.account, () => loadTokens()?.account_id);
+    const intervals = await readCodexQuotaPrior({
+      accountId, label: selection.label, cachePath: `${path}.codex-calibration.sqlite`,
+    });
+    calibration = { ...selection, intervals };
+  }
+  return read(path, (db) => query(db, { ...options, calibration }));
 }
 
 function errorOutcome(error) {
@@ -62,8 +78,8 @@ const operations = {
   sessionUsage: ({ path, sessionIds }) => read(path, (db) => readSessionUsage(db, sessionIds)),
   record: ({ path, rows }) => write(path, (ledger) => recordBatch(ledger, rows)),
   recordQuota: ({ path, samples }) => write(path, (ledger) => ledger.recordQuota(samples)),
-  quotaHistory: ({ path, options }) => read(path, (db) => readQuotaHistory(db, options)),
-  quotaWindows: ({ path, options }) => read(path, (db) => readQuotaWindows(db, options)),
+  quotaHistory: ({ path, options }) => readQuota(path, options, readQuotaHistory),
+  quotaWindows: ({ path, options }) => readQuota(path, options, readQuotaWindows),
   unpricedPending: ({ path, now }) => read(path, (db) => unpricedPendingCounts(db, now)),
   unpricedAfter: ({ path, now, latest }) => read(path, (db) => unpricedCountAfter(db, now, latest)),
   repairCandidates: ({ path, ...options }) => read(path, (db) => selectUsageRepairCandidates(db, options)),

@@ -557,6 +557,7 @@ export function App() {
   const { activatePaneSurface, paneStripFor, stripTitleFor } = useAppPaneChrome({
     tabs,
     sessions,
+    projects,
     paneWorkspace,
     dirtyFileKeys,
     workingSessionIds,

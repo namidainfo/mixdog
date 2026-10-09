@@ -29,6 +29,7 @@ const EXTERNAL_SESSION_ACTIONS = new Set([
   'submitAsync',
   'abort',
   'resolveToolApproval',
+  'resolveUserQuestion',
 ]);
 
 export { sanitizeForWire } from './session-wire-values.mjs';
@@ -259,6 +260,7 @@ export function createSessionService({
       submit: calls.submitSession,
       abort: calls.abortSession,
       approve: calls.approveSession,
+      answer: calls.answerSession,
       configure: calls.configureSession,
     },
     methods: {

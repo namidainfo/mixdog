@@ -68,6 +68,7 @@ export const DESKTOP_IPC = {
   submitToSession: 'mixdog:submit-to-session',
   abortSession: 'mixdog:abort-session',
   resolveToolApprovalForSession: 'mixdog:resolve-tool-approval-for-session',
+  resolveUserQuestionForSession: 'mixdog:resolve-user-question-for-session',
   listProviderModels: 'mixdog:list-provider-models',
   setModelRoute: 'mixdog:set-model-route',
   setFast: 'mixdog:set-fast',

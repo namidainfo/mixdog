@@ -4,6 +4,7 @@
  */
 import { performance } from 'node:perf_hooks';
 import { traceAgentFetch } from '../../agent-trace.mjs';
+import { isCertificateVerificationError } from '../retry-classification.mjs';
 import { _classifyHandshakeError, _mustSurfaceCurrentAttempt, tag } from './policy.mjs';
 
 function handshakeClassifier(err, retry429) {
@@ -66,6 +67,13 @@ export async function resolveHandshakeFailure(
   // direct wrapper distinguish an upgrade rejection from an application
   // error carrying the same HTTP status.
   tag(err, { wsFailurePhase: 'handshake' });
+  // A certificate failure is terminal even if the acquire helper attached a
+  // transient classifier. Do not let provider policy turn it into HTTP
+  // fallback or let retry history replace it with an earlier reset.
+  if (isCertificateVerificationError(err)) {
+    tag(err, { wsHttpFallbackEligible: false });
+    throw ctx.surface(err, err);
+  }
   const classifier = handshakeClassifier(err, retry429);
   const classifiers = [...handshakeRetryClassifiers];
   if (classifier && !classifiers.includes(classifier)) classifiers.push(classifier);

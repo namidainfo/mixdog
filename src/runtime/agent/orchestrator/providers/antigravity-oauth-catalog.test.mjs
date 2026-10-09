@@ -147,7 +147,7 @@ const CLAUDE_GPT_GROUP = {
   description: 'Models within this group: Claude Opus, Claude Sonnet, GPT-OSS',
 };
 
-test('quota windows map Gemini 5-hour and weekly summary buckets to 5H/7D', () => {
+test('quota windows retain every group, with Gemini 5-hour and weekly summary buckets labeled 5H/7D', () => {
   const windows = antigravityQuotaWindows({
     groups: [
       {
@@ -181,6 +181,8 @@ test('quota windows map Gemini 5-hour and weekly summary buckets to 5H/7D', () =
   assert.deepEqual(windows, [
     { label: '5H', usedPct: 50, resetAt: Date.parse('2026-09-04T12:00:00Z'), source: 'antigravity-quota-summary' },
     { label: '7D', usedPct: 12, resetAt: Date.parse(RESET), source: 'antigravity-quota-summary' },
+    { label: 'Claude and GPT models 5H', usedPct: 95, resetAt: Date.parse(RESET), source: 'antigravity-quota-summary' },
+    { label: 'Claude and GPT models 7D', usedPct: 93, resetAt: Date.parse(RESET), source: 'antigravity-quota-summary' },
   ]);
 });
 
@@ -203,7 +205,7 @@ test('quota windows treat remainingFraction 0 as exhausted and omit missing fiel
     ]
   );
 
-  // Reset-only and unknown windows are not guessed into 5H/7D or 100%.
+  // Reset-only and other reported periods remain visible, without guessing a percentage.
   assert.deepEqual(
     antigravityQuotaWindows({
       groups: [
@@ -216,7 +218,10 @@ test('quota windows treat remainingFraction 0 as exhausted and omit missing fiel
         },
       ],
     }),
-    []
+    [
+      { label: '5H', usedPct: null, resetAt: Date.parse(RESET), source: 'antigravity-quota-summary' },
+      { label: 'daily', usedPct: 80, resetAt: Date.parse(RESET), source: 'antigravity-quota-summary' },
+    ]
   );
 
   // A present 5-hour bucket does not invent a weekly row.
@@ -237,7 +242,7 @@ test('quota windows treat remainingFraction 0 as exhausted and omit missing fiel
   assert.deepEqual(antigravityQuotaWindows(RAW), []);
 });
 
-test('quota windows omit lookalike labels and keep usedPct/resetAt on the same selected bucket', () => {
+test('quota windows preserve raw periods and keep every percentage paired with its own reset', () => {
   assert.deepEqual(
     antigravityQuotaWindows({
       groups: [
@@ -283,7 +288,13 @@ test('quota windows omit lookalike labels and keep usedPct/resetAt on the same s
         },
       ],
     }),
-    []
+    [
+      { label: 'Gemini Flash 15h', usedPct: 90, resetAt: Date.parse(RESET), source: 'antigravity-quota-summary' },
+      { label: 'Gemini Flash 7d', usedPct: 80, resetAt: Date.parse(RESET), source: 'antigravity-quota-summary' },
+      { label: 'Gemini Flash week', usedPct: 70, resetAt: Date.parse(RESET), source: 'antigravity-quota-summary' },
+      { label: '15h', usedPct: 60, resetAt: Date.parse(RESET), source: 'antigravity-quota-summary' },
+      { label: '7d', usedPct: 50, resetAt: Date.parse(RESET), source: 'antigravity-quota-summary' },
+    ]
   );
 
   const firstReset = '2026-01-01T00:00:00Z';
@@ -304,7 +315,9 @@ test('quota windows omit lookalike labels and keep usedPct/resetAt on the same s
     }),
     [
       { label: '5H', usedPct: 90, resetAt: Date.parse(firstReset), source: 'antigravity-quota-summary' },
+      { label: '5H', usedPct: 10, resetAt: Date.parse(laterReset), source: 'antigravity-quota-summary' },
       { label: '7D', usedPct: 20, resetAt: Date.parse(firstReset), source: 'antigravity-quota-summary' },
+      { label: '7D', usedPct: 80, resetAt: Date.parse(laterReset), source: 'antigravity-quota-summary' },
     ]
   );
 });

@@ -17,6 +17,7 @@ import type {
   DesktopSubmitOptions,
   SessionSnapshot,
   ToolApprovalDecision,
+  UserQuestionResponse,
 } from '../shared/contract';
 import type {
   DesktopService,
@@ -747,6 +748,9 @@ export class DesktopServiceClient implements DesktopService {
   }
   resolveToolApprovalForSession(sessionId: string, id: string, decision: ToolApprovalDecision): Promise<boolean> {
     return this.invoke('resolveToolApprovalForSession', [sessionId, id, decision]);
+  }
+  resolveUserQuestionForSession(sessionId: string, id: string, response: UserQuestionResponse): Promise<boolean> {
+    return this.invoke('resolveUserQuestionForSession', [sessionId, id, response]);
   }
   listProviderModels(options: DesktopModelCatalogOptions = {}): Promise<DesktopModelOption[]> {
     return this.invokeRead('listProviderModels', [options]);

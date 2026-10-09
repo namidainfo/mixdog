@@ -9,6 +9,7 @@ import {
   MIDSTREAM_RETRY_POLICY,
   sleepWithAbort,
 } from '../retry-classifier.mjs';
+import { isCertificateVerificationError } from '../retry-classification.mjs';
 
 // The official Codex Responses policy has one five-retry stream budget shared
 // by connect/handshake and pre-output stream failures.
@@ -39,12 +40,14 @@ const CURRENT_ATTEMPT_DECISION_STATUSES = new Set([401, 403, 426, 429]);
 export function _mustSurfaceCurrentAttempt(err, externalSignal) {
   return (
     CURRENT_ATTEMPT_DECISION_STATUSES.has(Number(err?.httpStatus || 0)) ||
+    isCertificateVerificationError(err) ||
     externalSignal?.aborted ||
     err?.unsafeToRetry === true
   );
 }
 
 export function _classifyHandshakeError(err, { retry429 = true } = {}) {
+  if (isCertificateVerificationError(err)) return null;
   return classifyHandshakeError(err, { retry429 });
 }
 
@@ -88,6 +91,7 @@ export function _classifyHandshakeError(err, { retry429 = true } = {}) {
  * call sites and any external importer keep resolving the same symbol.
  */
 export function _classifyMidstreamError(err, state) {
+  if (isCertificateVerificationError(err)) return null;
   return classifyMidstreamError(err, state, WS_MIDSTREAM_POLICY);
 }
 

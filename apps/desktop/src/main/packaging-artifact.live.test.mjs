@@ -125,7 +125,9 @@ test('built runtime archive metadata and emitted native sidecar agree', async ()
   await access(runtimeArchive);
 
   const targetBinding = `/bin/napi-v6/${process.platform}/${process.arch}/onnxruntime_binding.node`;
-  const candidates = await findRuntimeArchives(fileURLToPath(new URL('../../dist', import.meta.url)));
+  const candidates = await findRuntimeArchives(
+    process.env.MIXDOG_PACKAGING_OUTPUT_DIR || fileURLToPath(new URL('../../dist', import.meta.url))
+  );
   const built = candidates
     .map((archive) => ({
       archive,

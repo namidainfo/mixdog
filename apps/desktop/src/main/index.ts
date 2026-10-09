@@ -1,3 +1,4 @@
+import './personal-profile';
 import { existsSync, statSync } from 'node:fs';
 import * as nodeModule from 'node:module';
 import { constants as osConstants, freemem, homedir, setPriority, totalmem } from 'node:os';
@@ -133,7 +134,9 @@ if (process.env.MIXDOG_DESKTOP_USER_DATA) {
 
 // Branding must not relocate an existing profile. Development and notification
 // probes must never register electron.exe under the installed sender identity.
-const desktopBrand = desktopIdentity(app.isPackaged ? 'installed' : 'development');
+const desktopBrand = process.env.MIXDOG_PERSONAL === '1'
+  ? { ...desktopIdentity('installed'), name: 'Mixdog Personal', appId: 'io.namidainfo.mixdog.personal' }
+  : desktopIdentity(app.isPackaged ? 'installed' : 'development');
 const desktopUserData = app.getPath('userData');
 app.setName(desktopBrand.name);
 app.setPath('userData', desktopUserData);

@@ -53,7 +53,7 @@ export function createSessionProxyFactory({ attachSession, ensureDaemon, closeId
     const { applyResult, afterPendingTransition } = transitions;
     const proxyView = createProxyView({ binding, projection, pool, resync, recover, log });
     view = proxyView.view;
-    const { remoteCall, submitAsync, submit, abortAsync, abort, resolveToolApproval } = createRemoteActions({
+    const { remoteCall, submitAsync, submit, abortAsync, abort, resolveToolApproval, resolveUserQuestion } = createRemoteActions({
       binding,
       projection,
       openParams,
@@ -88,6 +88,7 @@ export function createSessionProxyFactory({ attachSession, ensureDaemon, closeId
       abortAsync,
       abort,
       resolveToolApproval,
+      resolveUserQuestion,
       dispose: proxyView.dispose,
     };
 

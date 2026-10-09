@@ -143,14 +143,14 @@ test('Usage uses the same diagonal outline-to-filled pin without changing its to
   assert.equal(button.querySelector('svg').style.transform, 'rotate(45deg)');
 });
 
-test('Antigravity meters show distinct server 5H and 7D usage and reset times', async (t) => {
+test('Antigravity meters show distinct server 5H and 7D remaining quota and reset times', async (t) => {
   await renderUsage(t, [
     { label: '5H', usedPct: 4, resetAt: NOW + 4 * HOUR + 16 * 60_000, source: 'antigravity-quota' },
     { label: '7D', usedPct: 18, resetAt: NOW + 3 * DAY + 2 * HOUR, source: 'antigravity-quota' },
   ]);
   assert.deepEqual(meterRows(), [
-    ['5H', '4%', '4h 16m'],
-    ['7D', '18%', '3d 2h'],
+    ['5H', '96%', '4h 16m'],
+    ['7D', '82%', '3d 2h'],
   ]);
 });
 
@@ -158,7 +158,7 @@ test('Antigravity meters never invent a missing weekly window', async (t) => {
   await renderUsage(t, [
     { label: '5H', usedPct: 4, resetAt: NOW + 4 * HOUR + 16 * 60_000, source: 'antigravity-quota' },
   ]);
-  assert.deepEqual(meterRows(), [['5H', '4%', '4h 16m']]);
+  assert.deepEqual(meterRows(), [['5H', '96%', '4h 16m']]);
 });
 
 function connectedRowText() {
@@ -171,7 +171,7 @@ function connectedRowText() {
 
 test('a connected provider without quota windows reads as connected with no current window', async (t) => {
   await renderUsage(t, []);
-  assert.deepEqual(connectedRowText(), { state: 'Connected', meters: ['No current quota window'] });
+  assert.deepEqual(connectedRowText(), { state: 'Connected', meters: ['Quota unavailable from provider'] });
 });
 
 test('a connected provider still checking its quota shows only the usage loader', async (t) => {

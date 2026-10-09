@@ -277,6 +277,7 @@ function providerAuthApiFor(boot) {
     cachedProviderSetup: boot.cachedProviderSetup,
     getUsageDashboard: boot.getUsageDashboard,
     consumeCodexRateLimitResetCredit: boot.consumeCodexRateLimitResetCredit,
+    requestConnectedAccountQuotaWindows: boot.requestConnectedAccountQuotaWindows,
     collectProviderModels: boot.collectProviderModels,
     // A deleted custom provider must not stay reachable through the live route
     // or the registry; stored routes naming it are filtered by the picker.

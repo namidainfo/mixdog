@@ -10,6 +10,7 @@ import {
 } from '../../../runtime/attachments/store.mjs';
 import { providerNativePdf } from '../../../runtime/agent/orchestrator/providers/registry.mjs';
 import { cancelBackgroundTasks } from '../../../runtime/shared/background-tasks.mjs';
+import { normalizeUserQuestionResponse } from '../../../runtime/user-questions/contract.mjs';
 
 /** Whether an abort on this session is an Agent cancelling its own turn: the
  *  catalog knows it, the runtime declares agent-only visibility, or it is a
@@ -132,5 +133,20 @@ export function createSessionTurnCalls(ctx) {
     return sessionResult(entry, step, baseRevision, { approved: approved === true });
   }
 
-  return { submitSession, materializeSession, recoverActiveGoals, abortSession, approveSession };
+  async function answerSession({ sessionId, questionId, response, open: openHints = {}, baseRevision = null } = {}) {
+    const id = String(sessionId || '');
+    if (!id) throw new TypeError('sessionId is required');
+    if (typeof questionId !== 'string' || !questionId || questionId.length > 1_024) {
+      throw new TypeError('questionId is required');
+    }
+    const decision = normalizeUserQuestionResponse(response);
+    const entry = await entryForSession(id, openHints || {});
+    const target = entry.runtime.resolveUserQuestion;
+    if (typeof target !== 'function') throw new TypeError('session action resolveUserQuestion is unavailable');
+    const accepted = await target.call(entry.runtime, questionId, decision);
+    const step = settleAction(entry, 'headless session answer');
+    return sessionResult(entry, step, baseRevision, { accepted: accepted === true });
+  }
+
+  return { submitSession, materializeSession, recoverActiveGoals, abortSession, approveSession, answerSession };
 }

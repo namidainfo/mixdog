@@ -91,6 +91,62 @@ test('handshakeFailed: HTTP 401 is surfaced to the caller immediately', async ()
   assert.deepEqual(h.spanEvents, [['error', err]]);
 });
 
+for (const [label, wrap] of [
+  ['direct', (cause) => cause],
+  ['fetch', (cause) => new TypeError('fetch failed', { cause })],
+  ['SDK', (cause) => Object.assign(new Error('connection error', { cause }), { name: 'APIConnectionError' })],
+]) {
+  for (const attemptIndex of [0, 1, MIDSTREAM_WS_TRANSIENT_RETRY_LIMIT]) {
+    test(`handshakeFailed: ${label} certificate failure surfaces attempt ${attemptIndex} without fallback`, async () => {
+      let policyCalls = 0;
+      const h = harness({
+        handshakeErrorPolicy: () => {
+          policyCalls += 1;
+          return { retry: false, httpFallback: true };
+        },
+      });
+      if (attemptIndex > 0) {
+        h.attempts.state.firstAttemptError = Object.assign(new Error('earlier reset'), { code: 'ECONNRESET' });
+        h.attempts.state.firstAttemptClassifier = 'reset';
+      }
+      const certificate = Object.assign(new Error('certificate verification failed'), {
+        code: 'SELF_SIGNED_CERT_IN_CHAIN',
+      });
+      const current = wrap(certificate);
+      current.retryClassifier = 'reset';
+      const originalCause = current.cause;
+      await assert.rejects(
+        () => h.attempts.handshakeFailed(current, handshakeInfo(attemptIndex)),
+        (error) => error === current
+      );
+      assert.equal(current.cause, originalCause);
+      assert.equal(current.wsFailurePhase, 'handshake');
+      assert.equal(current.wsHttpFallbackEligible, false);
+      assert.notEqual(current.wsRetriesExhausted, true);
+      assert.equal(policyCalls, 0);
+      assert.deepEqual(h.progress, []);
+      assert.deepEqual(h.sleeps, []);
+      assert.deepEqual(h.spanEvents, [['error', current]]);
+    });
+  }
+}
+
+test('handshakeFailed: a certificate failure after a real ECONNRESET retry remains the latest error', async () => {
+  const h = harness();
+  const first = Object.assign(new Error('reset'), { code: 'ECONNRESET' });
+  assert.equal(await h.attempts.handshakeFailed(first, handshakeInfo(0)), true);
+  const certificate = Object.assign(new Error('certificate verification failed'), { code: 'SELF_SIGNED_CERT_IN_CHAIN' });
+  const current = new TypeError('fetch failed', { cause: certificate });
+  await assert.rejects(
+    () => h.attempts.handshakeFailed(current, handshakeInfo(1)),
+    (error) => error === current && error.cause === certificate
+  );
+  assert.equal(h.progress.length, 1);
+  assert.equal(h.sleeps.length, 1);
+  assert.notEqual(first.wsRetriesExhausted, true);
+  assert.deepEqual(h.spanEvents, [['error', current]]);
+});
+
 test('handshakeFailed: a policy veto surfaces the error tagged for HTTP fallback', async () => {
   const h = harness({
     handshakeErrorPolicy: ({ classifier }) => ({ retry: false, httpFallback: classifier === 'http_503' }),
@@ -145,6 +201,32 @@ test('streamFailed: a cut while a tool input streams surfaces instead of re-send
   );
   assert.deepEqual(h.progress, []);
   assert.equal(h.sleeps.length, 0);
+});
+
+test('streamFailed: a wrapped certificate failure outranks a previous transient close', async () => {
+  const h = harness();
+  const first = Object.assign(new Error('gone'), { wsCloseCode: 1006 });
+  assert.equal(await h.attempts.streamFailed(first, {
+    attemptIndex: 0,
+    entry: fakeEntry(),
+    midState: midState(),
+  }), true);
+  const certificate = Object.assign(new Error('certificate verification failed'), { code: 'SELF_SIGNED_CERT_IN_CHAIN' });
+  const current = Object.assign(new Error('connection error', { cause: certificate }), {
+    name: 'APIConnectionError',
+    wsCloseCode: 1006,
+  });
+  await assert.rejects(
+    () => h.attempts.streamFailed(current, {
+      attemptIndex: 1,
+      entry: fakeEntry(),
+      midState: midState({ attemptIndex: 1 }),
+    }),
+    (error) => error === current && error.cause === certificate
+  );
+  assert.equal(h.progress.length, 1);
+  assert.equal(h.sleeps.length, 1);
+  assert.notEqual(first.wsRetriesExhausted, true);
 });
 
 test('streamFailed: a rate-limited response.failed waits the server-advised time', async () => {

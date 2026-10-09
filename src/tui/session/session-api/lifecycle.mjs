@@ -10,13 +10,14 @@ import { createResumeAction } from './lifecycle/resume.mjs';
 import { createDisposeAction } from './lifecycle/dispose.mjs';
 
 export function createSessionLifecycleApi(bag, { restoreTranscriptItems, oauthFlows }) {
-  const { runtime, pushNotice, removeNotice, setProgressHint, finishToolApproval } = bag;
+  const { runtime, pushNotice, removeNotice, setProgressHint, finishToolApproval, finishUserQuestion } = bag;
 
   return {
     resolveToolApproval: (id, decision = {}) => {
       const approved = decision === true || decision?.approved === true;
       return finishToolApproval(id, approved, decision?.reason || (approved ? 'approved by user' : 'denied by user'));
     },
+    resolveUserQuestion: (id, response) => finishUserQuestion(id, response),
     pushNotice,
     removeNotice,
     setProgressHint,

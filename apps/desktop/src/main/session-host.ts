@@ -22,6 +22,7 @@ import type {
   DesktopSubmitOptions,
   SessionSnapshot,
   ToolApprovalDecision,
+  UserQuestionResponse,
 } from '../shared/contract';
 import { desktopSessionSummaries } from './desktop-state';
 import { sessionFinalAnswer, type SessionFinalAnswer } from './session-final-answer';
@@ -595,6 +596,10 @@ export class SessionHost implements DesktopService {
 
   async resolveToolApprovalForSession(sessionId: string, id: string, decision: ToolApprovalDecision): Promise<boolean> {
     return this.lifecycle.resolveToolApprovalForSession(sessionId, id, decision);
+  }
+
+  async resolveUserQuestionForSession(sessionId: string, id: string, response: UserQuestionResponse): Promise<boolean> {
+    return this.lifecycle.resolveUserQuestionForSession(sessionId, id, response);
   }
 
   async listProviderModels(options: DesktopModelCatalogOptions = {}): Promise<DesktopModelOption[]> {

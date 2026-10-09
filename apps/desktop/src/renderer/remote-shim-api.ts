@@ -253,6 +253,8 @@ export const createRemoteApi = (ctx: RemoteShimContext): DesktopApi => {
     abortSession: (sessionId, options = {}) => call('abortSession', [sessionId, options]),
     resolveToolApprovalForSession: (sessionId, id, decision) =>
       call('resolveToolApprovalForSession', [sessionId, id, decision]),
+    resolveUserQuestionForSession: (sessionId, id, response) =>
+      call('resolveUserQuestionForSession', [sessionId, id, response]),
     subscribeSessionState: (listener) => sessionInbox.subscribe(listener),
     inheritSession: (sourceSessionId, selection) => call('inheritSession', [sourceSessionId, selection ?? null]),
     listProviderModels: (options) => call('listProviderModels', [options]),

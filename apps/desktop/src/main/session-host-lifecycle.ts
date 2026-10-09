@@ -18,6 +18,7 @@ import type {
   DesktopSubmitOptions,
   SessionSnapshot,
   ToolApprovalDecision,
+  UserQuestionResponse,
 } from '../shared/contract';
 import { reportTranscriptRead, transcriptReadTraceId } from '../shared/transcript-read-diagnostics';
 import { normalizeSessionTitle, promptTitle } from '../shared/session-title.mjs';
@@ -596,6 +597,22 @@ export class SessionHostLifecycle {
     );
     this.owner.applySessionResult(target, result);
     return result.approved === true;
+  }
+
+  async resolveUserQuestionForSession(sessionId: string, id: string, response: UserQuestionResponse): Promise<boolean> {
+    const target = sessionIdOf(sessionId);
+    const result = await this.owner.client.answer(
+      {
+        sessionId: target,
+        questionId: id,
+        response,
+        open: this.owner.openHints(target),
+        baseRevision: this.owner.publication.projections.get(target)?.revision ?? null,
+      },
+      this.owner.callOptions()
+    );
+    this.owner.applySessionResult(target, result);
+    return result.accepted === true;
   }
 
   async listProviderModels(options: DesktopModelCatalogOptions = {}): Promise<DesktopModelOption[]> {

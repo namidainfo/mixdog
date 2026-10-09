@@ -15,6 +15,7 @@ import {
 } from './usage-dashboard-store.ts';
 import { createRendererClock } from '../../scripts/test-renderer-clock.mjs';
 import { applyStageChange } from '../../../../src/tui/session/turn-stream.mjs';
+import { usageAccountNote } from './usage-status.ts';
 
 function bind(t, clock) {
   const win = Object.getOwnPropertyDescriptor(globalThis, 'window');
@@ -308,6 +309,76 @@ test('known windows belong to the chosen account, but reset credits never carry 
   assert.equal(calls, 1);
   assert.equal(switchedRow().status, 'partial');
   assert.deepEqual(switchedRow().windows, windows);
+});
+
+for (const failure of ['offline', 'timeout', 'empty', 'malformed', 'missing-api']) {
+  test(`nested account switch retains only its own evidence and settles after ${failure}`, async (t) => {
+    const clock = createRendererClock();
+    bind(t, clock);
+    const accounts = [
+      { accountId: 'old', selected: true, authenticated: true, status: 'partial', windows: [{ label: '7D', usedPct: 39 }], updatedAt: 100 },
+      { accountId: 'chosen', selected: false, authenticated: true, status: 'partial', windows: [{ label: '5H', usedPct: 72 }], updatedAt: 200 },
+    ];
+    publishUsageDashboard({ rows: [{ ...oldAccount, accounts }, otherProvider] });
+    const refreshedAt = getUsageDashboardSnapshot().refreshedAt;
+    applyAccountUsageWindows('openai-oauth', undefined, 'chosen');
+    assert.deepEqual(switchedRow().windows, accounts[1].windows);
+    assert.deepEqual(switchedRow().accounts[1].windows, accounts[1].windows);
+    assert.equal(switchedRow().accounts[1].status, 'checking');
+    assert.match(usageAccountNote(switchedRow().accounts[1]), /refresh pending/);
+    let lateResolve;
+    const api = failure === 'missing-api' ? {} : {
+      invokeCapability() {
+        if (failure === 'offline') return Promise.reject(new Error('offline'));
+        if (failure === 'timeout') return new Promise((resolve) => { lateResolve = resolve; });
+        return Promise.resolve({ value: failure === 'empty' ? { rows: [] } : {} });
+      },
+    };
+    const request = refreshUsageDashboardAfterAuth(api, ['openai-oauth']);
+    if (failure === 'timeout') await clock.advance(TIMEOUT);
+    await request;
+    const chosen = switchedRow().accounts[1];
+    assert.equal(chosen.status, 'partial');
+    assert.equal(chosen.stale, true);
+    assert.equal(chosen.updatedAt, 200);
+    assert.deepEqual(chosen.windows, accounts[1].windows);
+    assert.deepEqual(switchedRow().accounts[0], { ...accounts[0], selected: false });
+    assert.equal(getUsageDashboardSnapshot().refreshedAt, refreshedAt);
+    assert.doesNotMatch(usageAccountNote(chosen), /pending/);
+    if (failure === 'offline' || failure === 'timeout') {
+      assert.equal(chosen.refreshState, 'failed');
+      assert.match(chosen.refreshError, failure === 'offline' ? /offline/ : /timed out/);
+      assert.match(usageAccountNote(chosen), /refresh failed/);
+    } else {
+      assert.equal(chosen.refreshState, 'unavailable');
+      assert.equal(chosen.refreshError, undefined);
+    }
+    assert.deepEqual(JSON.parse(clock.storage.get(CACHE_KEY)).rows[0].accounts[1].windows, accounts[1].windows);
+    assert.equal(JSON.parse(clock.storage.get(CACHE_KEY)).rows[0].accounts[1].status, 'partial');
+    if (lateResolve) {
+      lateResolve({ value: { rows: [oldAccount] } });
+      await clock.settle();
+      assert.deepEqual(switchedRow().accounts[1], chosen);
+    }
+    assert.equal(clock.timers.size, 0);
+  });
+}
+
+test('nested-only checks settle on rejection without inventing quota for an unmeasured account', async (t) => {
+  const clock = createRendererClock();
+  bind(t, clock);
+  publishUsageDashboard({ rows: [{
+    ...oldAccount, status: 'partial',
+    accounts: [{ accountId: 'unmeasured', authenticated: true, windows: [], status: 'checking', updatedAt: null }],
+  }] });
+  await refreshUsageDashboard({ invokeCapability: async () => { throw new Error('offline'); } }, { force: true });
+  const account = switchedRow().accounts[0];
+  assert.equal(account.status, 'unavailable');
+  assert.deepEqual(account.windows, []);
+  assert.equal(account.updatedAt, null);
+  assert.equal(account.refreshError, 'offline');
+  assert.equal(usageAccountNote(account), 'Quota refresh failed: offline');
+  assert.equal(switchedRow().status, 'partial');
 });
 
 test('usage polling pauses while hidden, revalidates stale data on return and keeps explicit refresh', async (t) => {

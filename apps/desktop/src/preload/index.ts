@@ -428,6 +428,8 @@ const api: DesktopApi = {
   abortSession: (sessionId, options) => ipcRenderer.invoke(DESKTOP_IPC.abortSession, sessionId, options),
   resolveToolApprovalForSession: (sessionId, id, decision) =>
     ipcRenderer.invoke(DESKTOP_IPC.resolveToolApprovalForSession, sessionId, id, decision),
+  resolveUserQuestionForSession: (sessionId, id, response) =>
+    ipcRenderer.invoke(DESKTOP_IPC.resolveUserQuestionForSession, sessionId, id, response),
   resyncSessionState: (sessionId) => ipcRenderer.send(DESKTOP_IPC.sessionStateResync, sessionId),
   subscribeSessionState: (listener) => {
     const decoders = new Map<string, ReturnType<typeof createSnapshotDeltaDecoder>>();

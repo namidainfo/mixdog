@@ -517,6 +517,66 @@
   color: var(--mx-text);
   background: var(--mx-hover);
 }
+.user-question-card .approval-heading > span {
+  color: var(--mx-text-muted);
+}
+.user-question-body {
+  max-height: min(45vh, 420px);
+  overflow-y: auto;
+}
+.user-question-body fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.user-question-body legend {
+  display: grid;
+  gap: 3px;
+  margin-bottom: 6px;
+  padding: 0;
+  font-size: var(--mx-font-ui);
+  overflow-wrap: anywhere;
+}
+.user-question-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: var(--mx-radius-md);
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.user-question-option:hover,
+.user-question-option:has(input:checked) {
+  background: var(--mx-hover);
+}
+.user-question-option input {
+  flex: none;
+  margin: 3px 0 0;
+}
+.user-question-option > span {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  font-size: var(--mx-font-ui);
+}
+.user-question-option small {
+  color: var(--mx-text-muted);
+  font-size: var(--mx-font-meta);
+}
+.user-question-body textarea {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px;
+  resize: vertical;
+  border: var(--mx-hairline) solid var(--mx-border-muted);
+  border-radius: var(--mx-radius-md);
+  color: var(--mx-text);
+  background: var(--mx-bg-base);
+  font: inherit;
+}
 /* A transcript diff is the same class of object as a fenced code card, so it
    wears that card's chrome: the muted hairline and the shared card surface.
    --mx-border plus a --mx-bg-layer-1 header band made it the brightest box in

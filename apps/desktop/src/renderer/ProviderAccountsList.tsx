@@ -13,7 +13,6 @@ import { t } from './i18n';
 import { record } from './record-utils';
 import {
   applyAccountUsageWindows,
-  refreshUsageDashboard,
   refreshUsageDashboardAfterAuth,
   subscribeUsageDashboard,
   type UsageApi,
@@ -139,12 +138,12 @@ export function ProviderAccountsList({
         // Replace the old account's quota with the chosen account's own last
         // known windows, or a loading placeholder when none are known. Confirm
         // with a refresh that cannot adopt the previous account's request.
-        applyAccountUsageWindows(provider, next.accounts.find((row) => row.id === next.selectedId)?.usage?.windows);
+        applyAccountUsageWindows(provider, next.accounts.find((row) => row.id === next.selectedId)?.usage?.windows, next.selectedId);
         void refreshUsageDashboardAfterAuth(api, [provider]);
       } else {
         // Order / auto-switch / rename change no quota: revalidate only when the
         // shared snapshot is already stale.
-        void refreshUsageDashboard(api);
+        void refreshUsageDashboardAfterAuth(api, [provider]);
       }
       onChange?.();
     } catch (cause) {

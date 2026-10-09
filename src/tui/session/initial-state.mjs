@@ -23,6 +23,7 @@ export function createInitialSessionState({ runtime, runtimeCwd, baseRouteState 
     queued: [],
     thinking: null,
     toolApproval: null,
+    userQuestion: null,
     lastTurn: null,
     stats: createSessionStats(),
     // Incremental derivations published by the session runtime so App does not scan all
