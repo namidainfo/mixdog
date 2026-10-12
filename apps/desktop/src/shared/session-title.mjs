@@ -1,4 +1,5 @@
 import { stripInjectedBlocks } from '../../../../src/runtime/shared/injected-display-text.mjs';
+import { splitSessionTitleDatePrefix } from '../../../../src/runtime/shared/session-title-format.mjs';
 
 const DEFAULT_SESSION_TITLE = 'Untitled session';
 
@@ -168,16 +169,16 @@ export function normalizeSessionTitle(value, fallback = DEFAULT_SESSION_TITLE, m
   return `${head.trimEnd()}…`;
 }
 
-// 32 chars keeps auto-titles scannable in the sidebar/tabs/header (user:
-// long first prompts produced paragraph-length titles). Word-boundary clip
-// with an ellipsis comes from normalizeSessionTitle.
+// Keep the title body within 32 chars; a stored date prefix has its own budget.
+// Word-boundary clipping with an ellipsis comes from normalizeSessionTitle.
 export function generatedSessionTitle(value, fallback = DEFAULT_SESSION_TITLE, maxLength = 32) {
-  if (isSyntheticSessionDisplayText(value)) return String(fallback);
-  const legacyMedia = legacyMediaDisplay(value);
+  const { prefix, title: source } = splitSessionTitleDatePrefix(value);
+  if (isSyntheticSessionDisplayText(source)) return String(fallback);
+  const legacyMedia = legacyMediaDisplay(source);
   const title = legacyMedia
     ? normalizeSessionTitle(legacyMedia.text, legacyMedia.fallback || fallback, maxLength)
-    : normalizeSessionTitle(value, mediaTitleFallback(value) || fallback, maxLength);
-  return hasMeaningfulSessionTitleText(title) ? title : String(fallback);
+    : normalizeSessionTitle(source, mediaTitleFallback(source) || fallback, maxLength);
+  return hasMeaningfulSessionTitleText(title) ? `${prefix}${title}` : String(fallback);
 }
 
 export function sessionSummaryTitle(session, fallback = DEFAULT_SESSION_TITLE) {

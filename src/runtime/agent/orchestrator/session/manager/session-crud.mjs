@@ -25,6 +25,8 @@ import {
 import { getProvider } from '../../providers/registry.mjs';
 import { isSessionCompactionBlocked, getSessionAbortSignal, _runtimeEntries } from './runtime-liveness.mjs';
 import { mintSessionId } from './session-id.mjs';
+import { compactSessionTitle } from '../../runtime-core/session-title.mjs';
+import { sessionTitleDatePrefix, splitSessionTitleDatePrefix } from '../../../../shared/session-title-format.mjs';
 
 /** Force-flush session metrics to disk. Used by watchdog terminal-reap (fix B). */
 export async function flushSessionMetrics(sessionId) {
@@ -71,12 +73,13 @@ function normalizeSessionTitle(title) {
 export async function updateSessionGeneratedTitle(id, title, stage) {
   const session = loadSession(id);
   if (!session || session.closed === true) return false;
-  const normalized = normalizeSessionTitle(title);
+  const body = compactSessionTitle(normalizeSessionTitle(splitSessionTitleDatePrefix(title).title));
   const normalizedStage = stage === 'third' || stage === 'first' ? stage : '';
-  if (!normalized || !normalizedStage) return false;
+  if (!body || !normalizedStage) return false;
   if (session.titleLocked === true) return false;
   if (session.generatedTitleStage === 'third') return false;
   if (normalizedStage === 'first' && session.generatedTitleStage === 'first') return false;
+  const normalized = `${sessionTitleDatePrefix(session.createdAt)}${body}`;
   if (session.title === normalized && session.generatedTitleStage === normalizedStage) return false;
   session.title = normalized;
   session.generatedTitleStage = normalizedStage;
