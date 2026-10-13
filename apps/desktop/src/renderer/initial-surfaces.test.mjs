@@ -340,6 +340,7 @@ test('native boot keeps the mounted content inert until its ready frame, with bo
   const { DesktopBootGate } = await import('./PaneSurfaceGate.tsx');
   const { _resetBootMetricsForTest } = await import('./boot-metrics.ts');
   _resetBootMetricsForTest();
+  // biome-ignore lint/a11y/useButtonType: DOM fixture element, never submitted.
   const content = React.createElement('button', null, 'Restored task');
   await view.render(React.createElement(DesktopBootGate, { ready: false }, content));
   const original = view.host.querySelector('button');
@@ -368,6 +369,7 @@ test('remote boot cannot bypass connection or hydration and offers a working ret
   const { _resetBootMetricsForTest } = await import('./boot-metrics.ts');
   const { setRemoteConnectionState, REMOTE_WAKE_EVENT } = await import('./remote-connection-state.ts');
   _resetBootMetricsForTest();
+  // biome-ignore lint/a11y/useButtonType: DOM fixture element, never submitted.
   const content = React.createElement('button', { id: 'task' }, 'Restored task');
   // Even disabling the native cover cannot bypass the remote connection gate.
   await view.render(React.createElement(DesktopBootGate, { ready: true, enabled: false }, content));
@@ -526,15 +528,16 @@ test('usage pin waits for its initial setting and data, without letting a late r
       'aside',
       { ref: rail },
       React.createElement('nav', { ref: nav }),
+      // biome-ignore lint/a11y/useButtonType: DOM fixture element, never submitted.
       React.createElement('button', { ref: button }),
       React.createElement('output', null, usageText)
     );
   }
   const snapshot = { dashboard: {}, status: 'loading', loading: true, refreshedAt: 0 };
-  // Seed an explicit unpin so the toggle below pins.
-  window.localStorage.setItem('mixdog.desktop.usage-rail-pin.v1', '0');
   await view.render(React.createElement(Probe, { snapshot }));
   assert.equal(view.host.querySelector('output').textContent, 'pending');
+  // The code default is pinned: unpin, then pin again.
+  await view.settle(() => toggle());
   await view.settle(() => toggle());
   await view.settle(() => settings.resolve({ usagePinned: false }));
   assert.equal(view.host.querySelector('output').textContent, 'pending');

@@ -1,6 +1,7 @@
 import type { RecordValue, Project } from './desktop-types';
 import { uiTimeUnit } from './ui-format';
 import type { NavigationSelection, WorkspaceSelection } from './navigation';
+import { MAIN_BROWSER_PAGE_PREFIX } from '../shared/contract-browser';
 
 export function asRecord(value: unknown): RecordValue | null {
   return value !== null && typeof value === 'object' ? (value as RecordValue) : null;
@@ -28,6 +29,7 @@ export function navigationKey(selection: WorkspaceSelection) {
   }
   if (selection.kind === 'studio') return `studio:${selection.id}`;
   if (selection.kind === 'terminal') return `terminal:${selection.id}`;
+  if (selection.kind === 'browser') return `browser:${selection.id}`;
   if (selection.kind === 'pull-request') {
     return `pull-request:${selection.project}:${selection.number}:${selection.mode}:${selection.instanceId || 'default'}`;
   }
@@ -49,6 +51,25 @@ function workspaceInstanceId(): string {
 
 export function newStudioSelection(): Extract<WorkspaceSelection, { kind: 'studio' }> {
   return { kind: 'studio', id: workspaceInstanceId() };
+}
+
+export function newBrowserSelection(url: string, title?: string): Extract<WorkspaceSelection, { kind: 'browser' }> {
+  return {
+    kind: 'browser',
+    id: `${MAIN_BROWSER_PAGE_PREFIX}${workspaceInstanceId()}`,
+    url,
+    ...(title ? { title } : {}),
+  };
+}
+
+/** Strip title of a browser tab: the page title, else the page's host. */
+export function browserTabTitle(selection: Extract<WorkspaceSelection, { kind: 'browser' }>): string {
+  if (selection.title) return selection.title;
+  try {
+    return new URL(selection.url).host || selection.url;
+  } catch {
+    return selection.url;
+  }
 }
 
 export function textOf(value: unknown): string {
@@ -88,17 +109,19 @@ export function formatElapsed(value: unknown): string {
   if (seconds < 60) return uiTimeUnit(seconds, 'second');
   const minutes = Math.floor(seconds / 60);
   const remainder = seconds % 60;
+  // Compact: a zero tail is dropped, and every unit after the first is
+  // zero-padded so a running timer keeps its width (`1m 05s`, `2h 03m 09s`).
   if (minutes >= 60) {
     return [
       uiTimeUnit(Math.floor(minutes / 60), 'hour'),
-      minutes % 60 ? uiTimeUnit(minutes % 60, 'minute') : '',
-      remainder ? uiTimeUnit(remainder, 'second') : '',
+      minutes % 60 || remainder ? uiTimeUnit(minutes % 60, 'minute', true) : '',
+      remainder ? uiTimeUnit(remainder, 'second', true) : '',
     ]
       .filter(Boolean)
       .join(' ');
   }
   const text = uiTimeUnit(minutes, 'minute');
-  return remainder ? `${text} ${uiTimeUnit(remainder, 'second')}` : text;
+  return remainder ? `${text} ${uiTimeUnit(remainder, 'second', true)}` : text;
 }
 
 export const TURN_LOCKED_SLASH_COMMANDS = new Set(['clear', 'resume', 'outputstyle', 'effort', 'fast', 'inherit']);

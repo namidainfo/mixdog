@@ -30,7 +30,7 @@ export const TASK_WAIT_TIMEOUT_MIN_MS = 10_000;
 export const TASK_WAIT_TIMEOUT_MAX_MS = 600_000;
 const _shellSyntaxCheat =
   process.platform === 'win32'
-    ? ' PowerShell: ; between independent commands, if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } between dependent ones; single-quote inline scripts (no nested double quotes); a literal here-string for multiline input; /c/→C:\\; $PID is reserved.'
+    ? " PowerShell: ; between independent commands, if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } between dependent ones; no heredoc, </dev/null or | head/tail/wc (Select-Object -First/-Last); multiline python/node via @'…'@ | python - (node -); 2>$null; /c/→C:\\; $PID is reserved."
     : ' Bash: chain dependent commands with &&; multiline input via a quoted heredoc delimiter, not extra quoting/escape layers.';
 // Process-stable switch used to describe foreground-only execution accurately.
 const _shellBackgroundDisabled = envFlag('MIXDOG_SHELL_DISABLE_BACKGROUND_TASKS');
@@ -146,7 +146,7 @@ export const BUILTIN_TOOLS = [
       openWorldHint: true,
       compressible: true,
     },
-    description: `Run programs, builds, tests and computation. Never use shell commands or scripts for work covered by dedicated tools: cat/head/tail→read, ls→list, find→glob, filename lookup→find, grep/rg→grep, code structure→code_graph, file edits/writes (sed/awk/redirection)→edit/apply_patch, Git→git when that tool is on the surface. Tool names are not shell commands. ${_shellBackgroundDisabled ? 'Commands run in the foreground until completion.' : 'After a 15s foreground window (not a timeout; wait_ms extends it up to 120s for one call, e.g. a test suite), unfinished work continues under task_id; use task wait, not read polling. If no execution slot frees within the admission wait, the command is queued as a background task with a task_id.'}`,
+    description: `Run programs, builds, tests and computation. Never use shell commands or scripts for work covered by dedicated tools: cat/head/tail→read, ls→list, find→glob, filename lookup→find, grep/rg→grep, code structure→code_graph, file edits/writes (sed/awk/redirection)→edit/apply_patch, Git→git when that tool is on the surface. Tool names are not shell commands. ${_shellBackgroundDisabled ? 'Commands run in the foreground until completion.' : 'After a 15s foreground window (not a timeout; wait_ms extends it up to 120s for one call, e.g. a test suite), unfinished work continues under task_id; use task wait, not read polling. If no execution slot frees within the admission wait, the command is queued as a background task with a task_id. Dev servers/watchers: pass timeout_ms or stop them with task cancel when done.'}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -232,8 +232,7 @@ export const BUILTIN_TOOLS = [
       properties: {
         pattern: {
           anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' }, maxItems: 10 }],
-          description:
-            'Ripgrep regex(es); escape literal metacharacters. Invalid regex is reported, never reinterpreted.',
+          description: 'Ripgrep regex(es); escape literal metacharacters.',
         },
         path: {
           anyOf: [
@@ -241,7 +240,7 @@ export const BUILTIN_TOOLS = [
             { type: 'array', minItems: 1, maxItems: PUBLIC_PATH_BATCH_LIMIT, items: { type: 'string' } },
           ],
           description:
-            'Plain file/directory scopes; omit for Project root. Every pattern searches every path; pattern/path pairs need separate calls. Missing scopes are reported, never widened.',
+            'Plain file/directory scopes; omit for Project root. Every pattern searches every path; pattern/path pairs need separate calls.',
         },
         glob: {
           type: 'string',
@@ -331,7 +330,7 @@ export const BUILTIN_TOOLS = [
       compressible: true,
     },
     description:
-      'Fuzzy filename/directory path lookup; returns paths only. Only when the target path is unknown and cannot be directly resolved but a fragment is known; general discovery: glob. Never send an empty query.',
+      'Fuzzy filename/directory path lookup; returns paths only. Only when the target path is unknown and cannot be directly resolved but a fragment is known; general discovery: glob.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -370,7 +369,10 @@ export const BUILTIN_TOOLS = [
           description: 'Known directory; defaults to the current Project.',
         },
         hidden: { type: 'boolean', description: 'Include dotfiles.' },
-        meta: { type: 'boolean', description: 'Per-entry size bytes, UTC mtime, octal mode; text files also get a line count.' },
+        meta: {
+          type: 'boolean',
+          description: 'Per-entry size bytes, UTC mtime, octal mode; text files also get a line count.',
+        },
         limit: {
           type: 'integer',
           minimum: 0,

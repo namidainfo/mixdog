@@ -5,6 +5,8 @@ import React, { useContext, useSyncExternalStore, type ComponentType, type React
 import { Play } from 'lucide-react';
 import { t } from './i18n';
 import { childrenText, MarkdownLink, MarkdownSessionContext } from './MarkdownLink';
+import { LOCAL_IMAGE_TAG } from './markdown-plugins';
+import { MarkdownLocalImage } from './markdown-local-image';
 import {
   onTerminalCommandAvailabilityChanged,
   requestTerminalCommand,
@@ -61,8 +63,11 @@ export function markdownComponents(CopyControl: MarkdownCopyControl): MarkdownCo
 function createMarkdownComponents(CopyControl: MarkdownCopyControl) {
   return {
     a: MarkdownLink,
+    [LOCAL_IMAGE_TAG]: MarkdownLocalImage,
     table({ children }: { children?: ReactNode }) {
       return (
+        // biome-ignore lint/a11y/useSemanticElements: tag must stay a div; <section> would change the table scroller's structure.
+        // biome-ignore lint/a11y/noNoninteractiveTabindex: keyboard users need to focus this scroll region to scroll it.
         <div className="markdown-table" role="region" aria-label={t('Scrollable table')} data-scrollable tabIndex={0}>
           <table>{children}</table>
         </div>

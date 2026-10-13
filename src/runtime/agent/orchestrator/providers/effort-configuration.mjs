@@ -1,19 +1,72 @@
 import { normalizeAnthropicEffortInput } from './anthropic-effort.mjs';
+import { CUSTOM_EFFORT_LEVELS, customEffortLevels, isCustomProviderName } from './custom-reasoning.mjs';
 import { codexModelSupportsEffortUpdates } from './openai-oauth-catalog.mjs';
 
 export const EFFORT_CONFIGURATION_BETA = 'mid-conversation-output-config-2026-07-01';
-const ANTHROPIC_MODELS = new Set([
-  'claude-fable-5-1',
-  'claude-mythos-5-1',
-  'claude-opus-5',
-  'claude-opus-5-5',
-  'claude-sonnet-5-5',
-]);
+// Mid-conversation effort updates by model version: each family from the
+// first version checked on the wire (update accepted, prompt cache kept), and
+// every later version of that family. A model that turns out to reject the
+// update is switched off at runtime (markEffortConfigurationUnsupported).
+const ANTHROPIC_MIN_VERSION = Object.freeze({
+  opus: [5, 0],
+  sonnet: [5, 5],
+  haiku: [5, 5],
+  fable: [5, 1],
+  mythos: [5, 1],
+});
 // https://developers.openai.com/api/docs/guides/reasoning#change-reasoning-mid-conversation
-// — the GPT-6 model family, standard single-agent mode. The public API
-// publishes no per-model flag, so this list is its whole answer; the OAuth
-// backend's catalog carries one and only falls back here without it.
-const OPENAI_MODELS = new Set(['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-6-1-sol']);
+// — GPT-6 and later, standard single-agent mode. The public API publishes no
+// per-model flag, so the version is its whole answer; the OAuth backend's
+// catalog carries one and only falls back to the version without it.
+const OPENAI_MIN_MAJOR = 6;
+const unsupportedModels = new Set();
+
+function versionAtLeast([major, minor], [minMajor, minMinor]) {
+  return major > minMajor || (major === minMajor && minor >= minMinor);
+}
+
+function anthropicVersionSupported(id) {
+  const m = id.match(/^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?$/);
+  const floor = m && ANTHROPIC_MIN_VERSION[m[1]];
+  return Boolean(floor) && versionAtLeast([Number(m[2]), Number(m[3] || 0)], floor);
+}
+
+function openAiVersionSupported(id) {
+  const m = id.match(/^gpt-(\d+)(?:-\d+)?(?:-[a-z]+)?$/);
+  return Boolean(m) && Number(m[1]) >= OPENAI_MIN_MAJOR;
+}
+
+/** A model that rejected a mid-conversation effort update: no updates for it in this process. */
+export function markEffortConfigurationUnsupported(provider, model) {
+  unsupportedModels.add(`${provider}:${modelKey(model)}`);
+}
+
+/** True for a provider error that names the mid-conversation effort update. */
+export function isEffortConfigurationRejection(status, text) {
+  return (
+    status === 400 &&
+    /output_config|mid-conversation|configuration_update|reasoning_effort_update/i.test(String(text || ''))
+  );
+}
+
+/**
+ * Runs `send(opts)`; when the model rejects the mid-conversation effort
+ * update, switches the updates off for it and replays the request once
+ * without them. The rejection happens before any output streams.
+ */
+export async function withEffortConfigurationFallback(provider, model, opts, send) {
+  try {
+    return await send(opts);
+  } catch (error) {
+    const status = error?.status ?? error?.httpStatus;
+    if (opts?._effortConfigurationRetry || !isEffortConfigurationRejection(status, error?.message)) throw error;
+    markEffortConfigurationUnsupported(provider, model);
+    process.stderr.write(
+      `[${provider}] ${model} rejected the mid-conversation effort update; retrying once without it\n`
+    );
+    return send({ ...opts, effortConfigurationEnabled: false, _effortConfigurationRetry: true });
+  }
+}
 const OPENAI_PROVIDERS = new Set(['openai', 'openai-oauth']);
 const ANTHROPIC_PROVIDERS = new Set(['anthropic', 'anthropic-oauth']);
 const EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
@@ -46,13 +99,13 @@ function modelKey(model) {
 
 function openAiSupportsEffortUpdates(provider, model, id) {
   const declared = provider === 'openai-oauth' ? codexModelSupportsEffortUpdates(String(model || '').trim()) : null;
-  return declared ?? OPENAI_MODELS.has(id);
+  return declared ?? openAiVersionSupported(id);
 }
 
-// Explicit protocol capabilities, not a prediction about future model families.
 export function effortConfigurationMode(provider, model, opts = {}) {
   const id = modelKey(model);
   if (opts.effortConfigurationEnabled === false || Number(opts.thinkingBudgetTokens) > 0) return null;
+  if (unsupportedModels.has(`${provider}:${id}`)) return null;
   if (OPENAI_PROVIDERS.has(provider) && openAiSupportsEffortUpdates(provider, model, id)) {
     const parameters = opts.modelParameters || {};
     const mode = opts.reasoning?.mode ?? parameters.reasoning_mode ?? parameters.mode ?? 'standard';
@@ -61,13 +114,49 @@ export function effortConfigurationMode(provider, model, opts = {}) {
   }
   if (
     ANTHROPIC_PROVIDERS.has(provider) &&
-    ANTHROPIC_MODELS.has(id) &&
+    anthropicVersionSupported(id) &&
     opts.disableBetaHeaders !== true &&
     (!opts.baseURL || /^https:\/\/api\.anthropic\.com(?:\/|$)/.test(opts.baseURL))
   )
     return 'anthropic';
   return null;
 }
+
+// Custom providers on the Chat and Responses wires take a fresh effort with
+// every request, so auto effort sends a turn's or step's effort as that
+// request's own effort: no mid-conversation update, no beta header. A custom
+// Anthropic-wire provider keeps auto effort off.
+const CUSTOM_AUTO_EFFORT_PROTOCOLS = new Set(['openai-chat', 'openai-responses']);
+
+/** Auto effort applies to this custom route: a Chat/Responses protocol and a
+ *  model row declaring a non-empty effort level list. */
+export function customAutoEffortCapable(provider, protocol, model) {
+  return (
+    isCustomProviderName(provider) &&
+    CUSTOM_AUTO_EFFORT_PROTOCOLS.has(protocol) &&
+    (customEffortLevels(model)?.length || 0) > 0
+  );
+}
+
+/** The model auto effort reads its effort options from: a custom provider's
+ *  effective row (its declared levels), the bare id for every other route. */
+export function autoEffortModel(providerName, providerImpl, model) {
+  if (!isCustomProviderName(providerName)) return { id: model };
+  return { ...(providerImpl?.getCachedModelInfo?.(model) || {}), id: model };
+}
+
+/** The effort-change mode of a session's route: 'responses' / 'anthropic'
+ *  (mid-conversation update), 'custom' (per-request effort), or null. */
+export function turnEffortConfigurationMode(session, provider) {
+  const opts = { ...(provider?.config || {}), modelParameters: session.modelParameters || {} };
+  const mode = effortConfigurationMode(session.provider, session.model, opts);
+  if (mode) return mode;
+  const model = autoEffortModel(session.provider, provider, session.model);
+  return customAutoEffortCapable(session.provider, provider?.customConfig?.protocol, model) ? 'custom' : null;
+}
+
+const CUSTOM_EFFORTS = new Set(CUSTOM_EFFORT_LEVELS);
+const effortsFor = (mode) => (mode === 'custom' ? CUSTOM_EFFORTS : EFFORTS);
 
 function normalizedEffort(provider, model, effort) {
   if (ANTHROPIC_PROVIDERS.has(provider)) return normalizeAnthropicEffortInput(effort, model) || null;
@@ -83,19 +172,19 @@ function validSnapshot(value, provider, model, mode) {
     value.provider === provider &&
     value.model === modelKey(model) &&
     value.mode === mode &&
-    EFFORTS.has(value.initialEffort) &&
-    EFFORTS.has(value.effort)
+    effortsFor(mode).has(value.initialEffort) &&
+    effortsFor(mode).has(value.effort)
   );
 }
 
 // `turnEffort` overrides the session's saved effort for this turn only (auto
-// effort); the saved default itself is never changed here.
+// effort); the saved default itself is never changed here. A custom route's
+// snapshot only records the turn's effort (per-request effort, never projected
+// into the history).
 export function prepareTurnEffortConfiguration(session, provider, turnEffort) {
-  const config = provider?.config || {};
-  const opts = { ...config, modelParameters: session.modelParameters || {} };
-  const mode = effortConfigurationMode(session.provider, session.model, opts);
+  const mode = turnEffortConfigurationMode(session, provider);
   const effort = normalizedEffort(session.provider, session.model, turnEffort ?? session.effort);
-  if (!mode || !EFFORTS.has(effort)) return null;
+  if (!mode || !effortsFor(mode).has(effort)) return null;
   const first = (session.messages || []).find((message) =>
     validSnapshot(message?.meta?.[META_KEY], session.provider, session.model, mode)
   )?.meta?.[META_KEY];
@@ -113,11 +202,23 @@ export function prepareTurnEffortConfiguration(session, provider, turnEffort) {
   return snapshot;
 }
 
+// The turn's snapshot carrying a tool-result step's effort (auto effort per
+// step), or null when that effort is not valid for the model.
+export function stepEffortConfiguration(snapshot, provider, model, effort) {
+  const value = normalizedEffort(provider, model, effort);
+  if (!snapshot || !EFFORTS.has(value)) return null;
+  return { ...snapshot, effort: value };
+}
+
 export function projectEffortConfiguration(messages, provider, model, opts = {}) {
   const mode = effortConfigurationMode(provider, model, opts);
   if (!mode) return null;
+  // A user message carries a turn's effort; a tool result carries the effort
+  // of the step that follows its tool batch.
   const marked = (messages || []).filter(
-    (message) => message?.role === 'user' && validSnapshot(message?.meta?.[META_KEY], provider, model, mode)
+    (message) =>
+      (message?.role === 'user' || message?.role === 'tool') &&
+      validSnapshot(message?.meta?.[META_KEY], provider, model, mode)
   );
   const seed = marked[0]?.meta?.[META_KEY] || opts.effortConfiguration;
   if (!validSnapshot(seed, provider, model, mode)) return null;
@@ -140,9 +241,11 @@ export function projectEffortConfiguration(messages, provider, model, opts = {})
   return { mode, initialEffort: seed.initialEffort, effort: current, updates };
 }
 
-// Split only at real user-turn boundaries. Sanitizing each segment before
-// inserting the trusted empty system control avoids losing it as empty text,
-// and never separates a tool call from its result.
+// Split only before a user message or after a whole tool-result batch.
+// Sanitizing each segment before inserting the trusted empty system control
+// avoids losing it as empty text, and never separates a tool call from its
+// result. An update after a batch that a user message directly follows is
+// superseded by that message's own update.
 export function lowerAnthropicEffortHistory(messages, lower, projection) {
   if (!projection) return lower(messages);
   // Cache markers otherwise turn a string into a text-block array only on
@@ -154,15 +257,20 @@ export function lowerAnthropicEffortHistory(messages, lower, projection) {
   if (!projection.updates.size) return canonical(lower(messages));
   const result = [];
   let segment = [];
+  let afterBatch = null;
+  const control = (effort) => {
+    if (segment.length) result.push(...lower(segment));
+    result.push({ role: 'system', content: [], output_config: { effort } });
+    segment = [];
+  };
   for (const message of messages) {
     const effort = projection.updates.get(message);
-    if (effort) {
-      if (segment.length) result.push(...lower(segment));
-      result.push({ role: 'system', content: [], output_config: { effort } });
-      segment = [];
-    }
+    if (message.role !== 'tool' && (effort || afterBatch)) control(effort || afterBatch);
+    if (message.role !== 'tool') afterBatch = null;
+    else if (effort) afterBatch = effort;
     segment.push(message);
   }
+  if (afterBatch) control(afterBatch);
   if (segment.length) result.push(...lower(segment));
   return canonical(result);
 }

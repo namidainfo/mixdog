@@ -1,14 +1,26 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from 'react';
 import {
   useConversationComposerActions,
+  collapseSelectionOnPress,
   conversationKeyDownCapture,
+  JumpToLatestButton,
   transcriptRowNode,
-  type ConversationComposerActions,
 } from './conversation-support';
+import { useConversationPaneComposerActions } from './conversation-pane-composer-actions';
+import { useConversationPaintHandoff } from './conversation-pane-paint-handoff';
+import { useComposerUserMessages } from './conversation-pane-user-messages';
 
 // react-markdown and the remark/unified ecosystem are heavy; they load as a
 // separate lazy chunk (MarkdownBody) so the first paint never pays for them.
-import { ArrowDown } from 'lucide-react';
 import type {
   DesktopModelSelection,
   DesktopProjectSummary,
@@ -19,9 +31,18 @@ import type {
   SessionSnapshot,
 } from '../shared/contract';
 import { t } from './i18n';
-import { approvalInstanceKey, transcriptTurnKeys } from './renderer-logic.mjs';
+import { approvalInstanceKey } from './renderer-logic.mjs';
+import { useConversationQueue } from './use-conversation-queue';
+import { useStreamingTail, useTranscriptRows } from './use-conversation-rows';
+import { useConversationFollowEffects } from './use-conversation-follow-effects';
+import { useConversationOptimisticPromptRelease } from './use-conversation-optimistic-prompts';
+import { useConversationTranscriptIdentity } from './use-conversation-transcript-identity';
 import type { CommandSurface as CommandSurfaceName, SettingsSection } from './slash-commands';
 
+import { isOtherDevice, sessionUsesMultipleDevices } from '../shared/session-devices';
+import { TranscriptDevicesContext, TranscriptViewerDeviceContext } from './transcript-row';
+import { useViewerDevice } from './use-viewer-device';
+import { useRetiredApproval } from './use-retired-approval';
 import { ApprovalCard } from './ApprovalCard';
 import { UserQuestionCard } from './UserQuestionCard';
 import { Composer, WorkflowSelect, OrchestrationModeSelect } from './Composer';
@@ -29,37 +50,37 @@ import { ProjectContextSelector } from './composer-support';
 import { BrandTile } from './WorkspaceEmptyState';
 import { EMPTY_TRANSCRIPT_ITEMS, type RecordValue, type Snapshot, type TranscriptItem } from './desktop-types';
 import { ComposerDock } from './ComposerDock';
-import { asRecord } from './text-format';
-import { inheritSessionDirectly, sessionModelSelection } from './session-inheritance';
+import type {
+  ComposerIslandFlash,
+  ComposerIslandModelMismatch,
+  ComposerIslandQuota,
+  ComposerIslandQuotaResume,
+} from './ComposerIsland';
+import { subscribeSetupChanges } from './setup-change-refresh';
+import { modelDisplayName, providerDisplayName } from './provider-display';
+import {
+  beginQuotaContinue,
+  continueAfterQuota,
+  latestQuotaFailure,
+  quotaDismissKey,
+  quotaIslandPlan,
+  quotaPanelVisible,
+} from './quota-continue';
 import { TranscriptList } from './TranscriptList';
 import type { TranscriptAssistantRowProps } from './TranscriptAssistantRow';
-import { MarkdownOpenFileContext, MarkdownProjectContext, MarkdownSessionContext } from './MarkdownLink';
 import {
-  appendLiveTranscriptRows,
-  projectSettledTranscriptRows,
-  turnPromptText,
-  turnSampledOutput,
-  type TranscriptRowModel,
-} from './transcript-rows';
-import {
-  nextDraftTranscriptNamespace,
-  rememberTranscriptRowNamespace,
-  readTranscriptVirtualSnapshot,
-  transcriptRowNamespace,
-} from './transcript-virtual-cache';
+  MarkdownOpenFileContext,
+  MarkdownOpenFolderContext,
+  MarkdownProjectContext,
+  MarkdownSessionContext,
+} from './MarkdownLink';
+import { turnPromptText, turnSampledOutput, type TranscriptRowModel } from './transcript-rows';
 import { TRANSCRIPT_HISTORY_TOP_PX, useTranscriptHistory, useTranscriptHistoryFill } from './use-transcript-history';
 import { commandShowsActivity } from './transcript-status';
-import { resetToolDisclosureScope } from './transcript-tool-ui';
 import { useTranscriptFollow } from './use-transcript-follow';
 import { useTranscriptReveal } from './use-transcript-reveal';
 import { useComposerDockHeight } from './use-composer-dock-height';
-import {
-  pendingPromptTranscriptItems,
-  promptWaitsBehindActiveTurn,
-  settledUserRowCount,
-  unsettledQueueEntries,
-  type PendingPromptItem,
-} from './conversation-prompt-items';
+import { promptWaitsBehindActiveTurn, settledUserRowCount, type PendingPromptItem } from './conversation-prompt-items';
 
 export function Conversation({
   snapshot,
@@ -94,6 +115,10 @@ export function Conversation({
   onOpenCommandSurface,
   onInheritSession,
   onOpenFile,
+  onOpenFolder,
+  onOpenSessionDiff,
+  onOpenAgentSession,
+  onOpenBackgroundJobs,
   renderAssistantRow,
   goalIsland,
   contextIndicator,
@@ -135,7 +160,7 @@ export function Conversation({
   draftWorkflow?: DesktopWorkflowState | null;
   draftOrchestrationMode?: DesktopOrchestrationMode | null;
   onDraftModelSelection?: (selection: DesktopModelSelection) => void;
-  onRoutePreferenceApplied?: (selection: DesktopModelSelection) => void;
+  onRoutePreferenceApplied?: (selection: DesktopModelSelection, options?: { modelChoice?: boolean }) => void;
   onDraftWorkflow?: (workflow: DesktopWorkflowState) => void;
   onDraftOrchestrationMode?: (mode: DesktopOrchestrationMode) => void;
   onOpenCommandSurface: (surface: CommandSurfaceName) => void;
@@ -143,11 +168,20 @@ export function Conversation({
    *  뜨고 바로 진행되게). The pane holds the source session and its route; the
    *  host creates the heir and opens its tab. */
   onInheritSession?: (sourceSessionId: string, route: DesktopModelSelection) => Promise<void>;
-  onOpenFile?: (project: string, rel: string, line?: number, accessToken?: string) => void;
+  onOpenFile?: (project: string, rel: string, line?: number, accessToken?: string, column?: number) => void;
+  /** Reveals a transcript folder link in the pane's side-dock Files tree. */
+  onOpenFolder?: (project: string, rel: string) => void;
+  /** The island's changed-files segment: opens the pane's side dock on the
+   *  session diff; absent where the surface has no dock. */
+  onOpenSessionDiff?: () => void;
+  /** The island's jobs panel opens an agent's session. */
+  onOpenAgentSession?: (sessionId: string, title: string, ownerSessionId: string) => void;
+  /** The island's agent/shell segments: open the pane's side dock on the
+   *  background-jobs list; absent where the surface has no dock. */
+  onOpenBackgroundJobs?: (kind: 'agent' | 'shell') => void;
   /** Selector-driven rows retain their component identity through settlement. */
   renderAssistantRow?: (props: TranscriptAssistantRowProps) => ReactNode;
-  /** Goal capsule routed to the composer unless the pane's visible DIFF owns
-   *  it instead. */
+  /** The Goal segment of the composer island. */
   goalIsland?: ReactNode;
   /** Context gauge seated in the composer footer beside the model trigger
    *  on every surface (user: 컨텍스트는 모델 선택기 옆; 모바일도 PC에 맞춰). */
@@ -211,210 +245,78 @@ export function Conversation({
     scrollToEndRef,
   });
   const [optimisticPrompts, setOptimisticPrompts] = useState<PendingPromptItem[]>([]);
-  // A first submit already replaced the blank watermark with its optimistic
-  // user row. Re-applying the watermark during draft -> session promotion
-  // flashes one full-pane frame; ordinary New task -> warm session navigation
-  // still uses the compositor handoff.
-  const suppressDraftSubmitPaintHandoff = useRef(false);
   const draftModeRef = useRef(draftMode);
   draftModeRef.current = draftMode;
   // Pane-local session runtime addressing: abort and tool approvals always target the
   // session THIS surface renders, never the globally active route.
   const routeSessionIdRef = useRef('');
   routeSessionIdRef.current = String(routeSnapshot.sessionId || '');
-  const visibleWarmPaintHandoff = warmPaintHandoff && !suppressDraftSubmitPaintHandoff.current;
-  useEffect(() => {
-    if (!draftMode && !warmPaintHandoff) {
-      suppressDraftSubmitPaintHandoff.current = false;
-    }
-  }, [draftMode, warmPaintHandoff]);
-  const latestComposerActions: ConversationComposerActions = {
-    submit,
-    invokeResult,
-    applySnapshot,
-    onNewTask,
-    onResumeSession,
-    onOpenSessions,
-    onOpenProjects,
-    onOpenSettings,
-    onOpenCommandSurface,
-    onClearToNewTask,
-    onInherit: async () => {
-      const sourceSessionId = String(sessionAddress || routeSnapshot.sessionId || '');
-      const route = sessionModelSelection(routeSnapshot);
-      if (!onInheritSession || !sourceSessionId || !route) {
-        throw new Error(t('Inheritance is unavailable on this surface.'));
-      }
-      return inheritSessionDirectly(sourceSessionId, route, onInheritSession);
+  // Approvals this device answered itself, and whether the conversation was
+  // used from several devices (only then is a device named).
+  // Bounded to this session, and to the ids the retired-approval check can
+  // still consult: the pending approval and the last published result.
+  const decidedLocally = useRef<{ sessionId: string; ids: Set<string> }>({ sessionId: '', ids: new Set() });
+  const decidedSessionId = String(snapshot.sessionId || '');
+  if (decidedLocally.current.sessionId !== decidedSessionId) {
+    decidedLocally.current = { sessionId: decidedSessionId, ids: new Set() };
+  } else if (decidedLocally.current.ids.size > 0) {
+    const relevant = new Set([String(snapshot.toolApproval?.id ?? ''), String(snapshot.toolApprovalResult?.id ?? '')]);
+    for (const id of decidedLocally.current.ids) if (!relevant.has(id)) decidedLocally.current.ids.delete(id);
+  }
+  const retiredApproval = useRetiredApproval(snapshot, decidedLocally.current.ids);
+  // The approval this device tried to answer after another device already had.
+  const [answeredElsewhere, setAnsweredElsewhere] = useState<{ id: string; device: string } | null>(null);
+  const multiDevice = useMemo(() => sessionUsesMultipleDevices(snapshot.items), [snapshot.items]);
+  const viewerDevice = useViewerDevice();
+  const { suppressDraftSubmitPaintHandoff, visibleWarmPaintHandoff } = useConversationPaintHandoff(
+    draftMode,
+    warmPaintHandoff
+  );
+  const composerActions = useConversationPaneComposerActions({
+    actions: {
+      submit,
+      invokeResult,
+      applySnapshot,
+      onNewTask,
+      onResumeSession,
+      onOpenSessions,
+      onOpenProjects,
+      onOpenSettings,
+      onOpenCommandSurface,
+      onClearToNewTask,
     },
-  };
-  const composerActions = useRef(latestComposerActions);
-  composerActions.current = latestComposerActions;
+    sessionAddress,
+    routeSnapshot,
+    onInheritSession,
+  });
   // TUI parity: a prompt only reads as "Queued" when it actually waits behind
   // an active turn. An idle submit — including a draft's first prompt, whose
   // atomic RPC spans session materialization — renders as a normal user row.
   const queuedBehindTurnAtSubmit = useRef(false);
   queuedBehindTurnAtSubmit.current = promptWaitsBehindActiveTurn(draftMode, snapshot);
   const settledItems = Array.isArray(snapshot.items) ? snapshot.items : EMPTY_TRANSCRIPT_ITEMS;
-  // Esc-Esc message selector source: the most recent rewindable user prompts,
-  // oldest → newest (TUI parity, capped like the terminal picker).
-  const composerUserMessages = useMemo(() => {
-    const rows: Array<{ id: string; text: string }> = [];
-    for (let index = settledItems.length - 1; index >= 0 && rows.length < 20; index -= 1) {
-      const item = settledItems[index];
-      if (item?.kind !== 'user' || item.id == null) continue;
-      const text = String(item.text || '').trim();
-      if (!text) continue;
-      rows.push({ id: String(item.id), text });
-    }
-    return rows.reverse();
-  }, [settledItems]);
-  const streamingTail = snapshot.streamingTail as TranscriptItem | null | undefined;
-  const streamingTailId = streamingTail?.id;
-  // Settled arrays are immutable by identity. Resolve a same-id replacement
-  // only when that identity or the tail id changes; streamed text then uses an
-  // indexed settled+tail view instead of allocating/copying a merged array.
-  const tailSettledIndex = useMemo(() => {
-    if (streamingTailId === undefined || streamingTailId === null) return -1;
-    return settledItems.findIndex((item) => item?.id === streamingTailId);
-  }, [settledItems, streamingTailId]);
-  // A tail whose id already settled before the final item is a delayed lane
-  // publication. It must not reopen old output or leave a synthetic Thinking
-  // row behind after the actual turn has moved on.
-  const activeStreamingTail =
-    streamingTail && (tailSettledIndex < 0 || tailSettledIndex === settledItems.length - 1) ? streamingTail : null;
-  const tailAppended = Boolean(activeStreamingTail) && tailSettledIndex < 0;
-  const liveItemCount = settledItems.length + (tailAppended ? 1 : 0);
+  const composerUserMessages = useComposerUserMessages(settledItems);
+  const { activeStreamingTail, liveItemCount, settledRowItems } = useStreamingTail(
+    snapshot.streamingTail as TranscriptItem | null | undefined,
+    settledItems
+  );
   const requestEarlierTranscript = useTranscriptHistory(
     draftMode ? '' : String(routeSnapshot.sessionId || ''),
     settledItems.length,
     typeof snapshot.transcriptHasOlder === 'boolean' ? snapshot.transcriptHasOlder : undefined
   );
-  const previousTranscriptSessionKey = useRef(transcriptSessionKey);
-  // A pane's OWN draft -> session promotion must NOT rebuild the timeline. The
-  // virtual list AND its row keys are namespaced by this identity, which
-  // survives the promotion; only the geometry cache follows the real session
-  // key. Keying them by the session key remounted the list mid-turn, dropped
-  // every measured row, and repainted the first prompt from the flat estimate
-  // (user: 첫 프롬 입력 후 화면이 툭 튀고 말풍선이 엉뚱한 위치로 튄다).
-  const transcriptIdentity = useRef('');
-  const transcriptIdentitySource = useRef('');
-  // Set on the promotion render, where the submit marker is still armed, and
-  // consumed by the effect below; never cleared in render, so a repeated
-  // render of the same commit cannot lose it.
-  const promotedOwnDraft = useRef(false);
-  // The pending gate below belongs to a COLD session entry. Once this identity
-  // has painted its timeline, it must never be unmounted again — a promotion
-  // whose Markdown-readiness flag lags one tick would otherwise discard every
-  // measured row exactly like a remount.
-  if (transcriptIdentitySource.current !== transcriptSessionKey) {
-    const ownPromotion =
-      transcriptIdentitySource.current === 'new-task' &&
-      transcriptSessionKey !== 'new-task' &&
-      suppressDraftSubmitPaintHandoff.current;
-    transcriptIdentitySource.current = transcriptSessionKey;
-    if (ownPromotion) {
-      promotedOwnDraft.current = true;
-      // Re-entry must still match the geometry cached under the REAL session
-      // key, so the draft's namespace outlives this mount.
-      rememberTranscriptRowNamespace(transcriptSessionKey, transcriptIdentity.current);
-    } else {
-      transcriptIdentity.current =
-        transcriptSessionKey === 'new-task'
-          ? nextDraftTranscriptNamespace()
-          : transcriptRowNamespace(transcriptSessionKey);
-      timelineMounted.current = Boolean(readTranscriptVirtualSnapshot(transcriptSessionKey)?.measurements?.length);
-    }
-  }
-  const showTranscriptTimeline = !transcriptPending || timelineMounted.current;
-  if (showTranscriptTimeline) timelineMounted.current = true;
-  // Session ENTRY resets this visit's tool disclosures before the first row
-  // renders (user: tool cards must always start collapsed; remembered
-  // expansions from an earlier visit reopened them "randomly"). Idempotent
-  // render-time module-map mutation; focus swaps keep the same key and do
-  // not reset.
-  const disclosureVisitKey = useRef('');
-  if (disclosureVisitKey.current !== transcriptSessionKey) {
-    disclosureVisitKey.current = transcriptSessionKey;
-    resetToolDisclosureScope(transcriptSessionKey);
-  }
+  const { transcriptIdentity, promotedOwnDraft, showTranscriptTimeline } = useConversationTranscriptIdentity({
+    transcriptSessionKey,
+    transcriptPending,
+    timelineMounted,
+    suppressDraftSubmitPaintHandoff,
+  });
   // Submit-time baseline for the id-agnostic release path below.
   const settledUsers = useMemo(() => settledUserRowCount(settledItems), [settledItems]);
   const settledUsersRef = useRef(settledUsers);
   settledUsersRef.current = settledUsers;
-  // Cross-surface queue parity: ONE queue owns every prompt waiting behind an
-  // active turn, whatever typed it. The moment the session runtime
-  // publishes this submission in `queued`, the composer's reserved-message
-  // list owns its display — so an app-typed prompt stacks in session runtime order
-  // beside terminal-typed ones and drains on the next turn loop, instead of
-  // hiding inside the transcript as a private "Queued" card. The optimistic
-  // item stays in state: a prompt that leaves the queue before its durable
-  // row lands falls back to the transcript card instead of blinking out.
-  // Only a prompt submitted BEHIND an active turn hands over. EVERY submit
-  // rides the session runtime queue for one drain hop (idle ones included, via
-  // autoClearBeforeSubmit), so keying on the queue publication alone put a
-  // brand-new task's very first prompt into the reserved list with an empty
-  // transcript (user report).
-  const unsettledSessionQueue = useMemo(
-    () => unsettledQueueEntries(snapshot.queued, settledItems),
-    [settledItems, snapshot.queued]
-  );
-  const sessionQueuedIdKey = useMemo(
-    () => unsettledSessionQueue.map((entry) => String(asRecord(entry)?.id ?? '')).join('\u0000'),
-    [unsettledSessionQueue]
-  );
-  const sessionQueuedIds = useMemo(
-    () => new Set(sessionQueuedIdKey.split('\u0000').filter(Boolean)),
-    [sessionQueuedIdKey]
-  );
-  const pendingPromptItems = useMemo(
-    () =>
-      pendingPromptTranscriptItems(optimisticPrompts, settledItems).filter(
-        (item) => item.queuedBehindTurn !== true || !sessionQueuedIds.has(String(item.id))
-      ),
-    [sessionQueuedIds, optimisticPrompts, settledItems]
-  );
-  // A prompt submitted BEHIND an active turn belongs to the reserved list from
-  // its FIRST frame. Keying its transcript row on the session runtime's queue
-  // publication painted it as a real chat row for one RPC round trip
-  // (user: 예약 메시지가 잠깐 채팅창에 찍힌다). The row is withheld here and the
-  // same prompt is handed to the composer's queue below until the session runtime
-  // publishes its own entry — the ids match, because submit mints the id the
-  // session runtime reuses for the queue entry.
-  const transcriptPendingPromptItems = useMemo(
-    () => pendingPromptItems.filter((item) => item.queuedBehindTurn !== true),
-    [pendingPromptItems]
-  );
-  const localQueuedPrompts = useMemo(
-    () => pendingPromptItems.filter((item) => item.queuedBehindTurn === true),
-    [pendingPromptItems]
-  );
-  const pendingPromptIds = useMemo(
-    () => transcriptPendingPromptItems.map((item) => item.id),
-    [transcriptPendingPromptItems]
-  );
-  // The composer's reserved list = the session runtime queue plus the submits it has not
-  // published yet. Local entries carry the submission id, so the session runtime entry
-  // replaces its local twin by id the moment it lands.
-  const composerQueued = useMemo(() => {
-    const sessionQueue = unsettledSessionQueue;
-    if (localQueuedPrompts.length === 0) return sessionQueue;
-    const published = new Set(sessionQueue.map((entry) => String(asRecord(entry)?.id ?? '')).filter(Boolean));
-    const local = localQueuedPrompts
-      .filter((item) => !published.has(String(item.id)))
-      .map((item) => ({
-        id: item.id,
-        displayText: item.text,
-        ...(item.images?.length ? { images: item.images } : {}),
-      }));
-    return local.length === 0 ? sessionQueue : [...sessionQueue, ...local];
-  }, [localQueuedPrompts, unsettledSessionQueue]);
-  const optimisticActivityStartedAt = pendingPromptItems.reduce((earliest, item) => {
-    if (item.queuedBehindTurn === true) return earliest;
-    const startedAt = Number(item.submittedAt || 0);
-    if (!Number.isFinite(startedAt) || startedAt <= 0) return earliest;
-    return earliest > 0 ? Math.min(earliest, startedAt) : startedAt;
-  }, 0);
+  const { composerQueued, optimisticActivityStartedAt, pendingPromptIds, transcriptPendingPromptItems } =
+    useConversationQueue(optimisticPrompts, settledItems, snapshot.queued);
   const itemCount = liveItemCount + transcriptPendingPromptItems.length;
   // An idle submit starts the next review scope on its optimistic user row,
   // not one host round-trip later when that row settles. Otherwise the prior
@@ -431,91 +333,26 @@ export function Conversation({
   goalSubmitScopeRef.current = transcriptSessionKey;
   const goalSubmission = useRef<{ id: string; scope: string } | null>(null);
   const goalSubmissionId = goalSubmission.current?.scope === transcriptSessionKey ? goalSubmission.current.id : '';
-  useEffect(() => {
-    if (previousTranscriptSessionKey.current === transcriptSessionKey) return;
-    previousTranscriptSessionKey.current = transcriptSessionKey;
-    // A promotion is not a navigation: the in-flight prompt stays visible
-    // until its own settled row lands (released by id), instead of blinking
-    // out of the thread for the publication interval after the first submit.
-    if (promotedOwnDraft.current) {
-      promotedOwnDraft.current = false;
-      return;
-    }
-    setOptimisticPrompts([]);
-  }, [transcriptSessionKey]);
-  useEffect(() => {
-    // Neither host acknowledgement nor queue publication is settlement: the
-    // optimistic card is dropped from state only once its own durable row is
-    // in the transcript.
-    const acknowledged = new Set(
-      settledItems
-        .map((item) => item?.id)
-        .filter((id) => id !== undefined && id !== null)
-        .map(String)
-    );
-    if (acknowledged.size === 0) return;
-    setOptimisticPrompts((current) => {
-      const next = current.filter((item) => !acknowledged.has(String(item.id)));
-      return next.length === current.length ? current : next;
-    });
-  }, [settledItems]);
-  // A same-id live item replaces the last settled row in the projection. Its
-  // selector-driven renderer still updates independently, but now occupies the
-  // same virtual row and measurement path as settled output.
-  const tailReplacesLastSettled = Boolean(activeStreamingTail) && tailSettledIndex === settledItems.length - 1;
-  const settledRowItems = useMemo(
-    () => (tailReplacesLastSettled ? settledItems.slice(0, -1) : settledItems),
-    [settledItems, tailReplacesLastSettled]
-  );
-  const failedTurns = useMemo(() => new Set(snapshot.failedTurnKeys || []), [snapshot.failedTurnKeys]);
-  const precomputedTurnKeys = Array.isArray(snapshot.transcriptTurnKeys)
-    ? (snapshot.transcriptTurnKeys as string[])
-    : null;
-  const settledTurnKeys = useMemo(
-    () =>
-      precomputedTurnKeys?.length === settledItems.length ? precomputedTurnKeys : transcriptTurnKeys(settledItems),
-    [precomputedTurnKeys, settledItems]
-  );
-  // ONE projection owns visibility, completion folding, and failed-turn status
-  // rows, so the virtual list never carries invisible or zero-height rows.
-  // The settled half re-runs only when settled items change; each streaming
-  // tick appends the live tail onto the memoized settled rows instead of
-  // re-projecting the whole transcript.
-  const settledProjection = useMemo(
-    () =>
-      projectSettledTranscriptRows({
-        sessionKey: transcriptIdentity.current,
-        items: settledRowItems,
-        turnKeys: settledTurnKeys,
-        failedTurns,
-      }),
-    [failedTurns, settledRowItems, settledTurnKeys, transcriptSessionKey]
-  );
-  const commandActivityVisible = commandShowsActivity(snapshot);
-  const transcriptRows = useMemo(
-    () =>
-      appendLiveTranscriptRows({
-        sessionKey: transcriptIdentity.current,
-        settled: settledProjection,
-        pendingItems: transcriptPendingPromptItems,
-        liveItem: activeStreamingTail,
-        thinking: Boolean(
-          snapshot.busy ||
-            (snapshot.commandBusy && commandActivityVisible) ||
-            activeStreamingTail ||
-            optimisticActivityStartedAt
-        ),
-      }),
-    [
-      optimisticActivityStartedAt,
-      settledProjection,
-      transcriptPendingPromptItems,
-      snapshot.busy,
-      snapshot.commandBusy,
-      commandActivityVisible,
-      activeStreamingTail,
-    ]
-  );
+  useConversationOptimisticPromptRelease({
+    transcriptSessionKey,
+    promotedOwnDraft,
+    settledItems,
+    setOptimisticPrompts,
+  });
+  const { settledTurnKeys, transcriptRows } = useTranscriptRows({
+    identity: transcriptIdentity.current,
+    sessionKey: transcriptSessionKey,
+    settledItems,
+    settledRowItems,
+    failedTurnKeys: snapshot.failedTurnKeys,
+    precomputedTurnKeys: snapshot.transcriptTurnKeys,
+    pendingItems: transcriptPendingPromptItems,
+    liveItem: activeStreamingTail,
+    busy: snapshot.busy,
+    commandBusy: snapshot.commandBusy,
+    commandActivityVisible: commandShowsActivity(snapshot),
+    optimisticActivityStartedAt,
+  });
   const transcriptRevealed = useTranscriptReveal({
     identity: transcriptIdentity.current,
     enabled: showTranscriptTimeline && transcriptRows.length > 0,
@@ -534,46 +371,15 @@ export function Conversation({
   const jumpToLatest = useCallback(() => {
     resumeFollow();
   }, [resumeFollow]);
-  // A session route change resumes at the latest row. Measurement
-  // snapshots survive re-entry, but a stale per-session scroll offset does not.
-  const armedFollowSessionKey = useRef('');
-  useLayoutEffect(() => {
-    if (armedFollowSessionKey.current === transcriptSessionKey) return;
-    armedFollowSessionKey.current = transcriptSessionKey;
-    // Entry re-arms following ONLY. The virtual timeline owns the end
-    // position; writing scrollTop here too made two authorities aim at
-    // different offsets across the first frames (re-entry jump/flicker).
-    armFollow();
-  }, [armFollow, transcriptSessionKey]);
-  // Shrinking the settled transcript — especially during compaction — removes
-  // rows the reader may be anchored to, so return to the live tail. The follow
-  // hook watches viewport size, not content shrinkage. Same-length lane
-  // publications and growing history leave the reading position alone.
-  const transcriptSwapRef = useRef({ sessionKey: '', count: 0 });
-  useLayoutEffect(() => {
-    const count = settledItems.length;
-    const previous = transcriptSwapRef.current;
-    transcriptSwapRef.current = { sessionKey: transcriptSessionKey, count };
-    // Session entry owns its own arm. A same-length head-id change is a lane
-    // republish, not compaction — that used to fire a second scrollToEnd.
-    if (previous.sessionKey !== transcriptSessionKey) return;
-    if (!previous.count || !count || count >= previous.count) return;
-    armFollow();
-    scrollToEndRef.current();
-  }, [armFollow, settledItems, transcriptSessionKey]);
-  // Content growth is watched on the rows commit (without a second
-  // observer): a transcript that no longer OVERFLOWS holds no reading
-  // position, so a shrink that fits inside the viewport re-arms follow instead
-  // of leaving auto-scroll released with nothing left to scroll. Driven by the
-  // rows commit, so virtual-core stays the only content-growth authority.
-  useLayoutEffect(() => {
-    if (following) return;
-    const element = viewport.current;
-    if (!element) return;
-    if (element.scrollHeight - element.clientHeight > 1) return;
-    armFollow();
-  }, [armFollow, following, transcriptRows, viewport]);
-  const shouldAnchorTranscriptBottom = following || armedFollowSessionKey.current !== transcriptSessionKey;
+  const shouldAnchorTranscriptBottom = useConversationFollowEffects({
+    armFollow,
+    following,
+    scrollToEndRef,
+    settledItems,
+    transcriptRows,
+    transcriptSessionKey,
+    viewport,
+  });
   // Submit re-arms follow. The new row is an append, so virtual-core's
   // followOnAppend is the only end write.
   const armFollowOnSubmitRef = useRef(armFollow);
@@ -612,14 +418,38 @@ export function Conversation({
   // Session retry: a failed turn that produced no output resubmits its prompt
   // and the runtime rewinds the unanswered copy, so the model sees the prompt
   // once; a turn that already sampled output continues from where it stopped.
-  const retryTurn = (turnKey: string) => {
+  const retryTurn = async (turnKey: string): Promise<boolean> => {
     const text = turnPromptText(settledItems, settledTurnKeys, turnKey);
-    if (!text) return;
+    if (!text) return false;
     const prompt = turnSampledOutput(settledItems, settledTurnKeys, turnKey)
       ? t('Continue from where you left off.')
       : text;
-    void composerSubmit(prompt, { retryFailedTurn: true });
+    return (await composerSubmit(prompt, { retryFailedTurn: true })) === true;
   };
+  const retryTurnRef = useRef(retryTurn);
+  retryTurnRef.current = retryTurn;
+  const [dismissedQuotaTurn, setDismissedQuotaTurn] = useState('');
+  const [continueFlash, setContinueFlash] = useState<ComposerIslandFlash | null>(null);
+  const continueFlashSequence = useRef(0);
+  const latestCompletion = useMemo(() => {
+    for (let index = settledItems.length - 1; index >= 0; index -= 1) {
+      if (settledItems[index]?.kind === 'turndone') return settledItems[index];
+    }
+    return undefined;
+  }, [settledItems]);
+  // Context consumers (every transcript row and file link) keep their memo:
+  // the providers get a stable opener that calls the latest prop.
+  const openFileRef = useRef(onOpenFile);
+  openFileRef.current = onOpenFile;
+  const stableOpenFile = useCallback<NonNullable<typeof onOpenFile>>((...args) => openFileRef.current?.(...args), []);
+  const openFile = onOpenFile ? stableOpenFile : undefined;
+  const openFolderRef = useRef(onOpenFolder);
+  openFolderRef.current = onOpenFolder;
+  const stableOpenFolder = useCallback<NonNullable<typeof onOpenFolder>>(
+    (...args) => openFolderRef.current?.(...args),
+    []
+  );
+  const openFolder = onOpenFolder ? stableOpenFolder : undefined;
   const renderTranscriptRow = (row: TranscriptRowModel) =>
     transcriptRowNode(row, {
       disclosureScope,
@@ -629,9 +459,194 @@ export function Conversation({
       retryDisabled,
       settledItems,
       settledTurnKeys,
+      latestCompletion,
       snapshot,
       onRetryTurn: retryTurn,
+      onOpenSettings,
     });
+
+  // A pending approval grows the island into its card. An answer from another
+  // device leaves no card: the island flashes it instead.
+  let approvalCard: ReactNode = null;
+  const pendingApproval = snapshot.toolApproval;
+  if (pendingApproval && String(pendingApproval.id ?? '') !== answeredElsewhere?.id) {
+    approvalCard = (
+      <ApprovalCard
+        key={approvalInstanceKey(pendingApproval.id)}
+        approval={pendingApproval}
+        resolve={async (approved) => {
+          const host = window.mixdogDesktop;
+          const sessionId = routeSessionIdRef.current;
+          const approvalId = String(pendingApproval.id ?? '');
+          if (!sessionId) return false;
+          const accepted = await host.resolveToolApprovalForSession(sessionId, approvalId, { approved });
+          if (accepted === true && decidedLocally.current.sessionId === decidedSessionId) {
+            decidedLocally.current.ids.add(approvalId);
+          }
+          if (accepted === false) {
+            const result = snapshot.toolApprovalResult;
+            setAnsweredElsewhere({
+              id: approvalId,
+              device:
+                multiDevice && result?.id === approvalId && isOtherDevice(result.device, viewerDevice)
+                  ? result.device
+                  : '',
+            });
+          }
+          return accepted;
+        }}
+      />
+    );
+  } else if (!pendingApproval && snapshot.userQuestion) {
+    const request = snapshot.userQuestion;
+    approvalCard = (
+      <UserQuestionCard
+        key={`${request.sessionId}:${request.id}`}
+        request={request}
+        resolve={(response) =>
+          window.mixdogDesktop.resolveUserQuestionForSession(request.sessionId, request.id, response)
+        }
+      />
+    );
+  }
+  let islandFlash: ComposerIslandFlash | null = null;
+  if (retiredApproval && isOtherDevice(retiredApproval.outcome.device, viewerDevice)) {
+    const { approval, outcome } = retiredApproval;
+    islandFlash = {
+      key: `retired:${approvalInstanceKey(approval.id)}`,
+      text: outcome.approved
+        ? t('Allowed from {{device}}', { device: outcome.device })
+        : t('Denied from {{device}}', { device: outcome.device }),
+    };
+  } else if (answeredElsewhere) {
+    islandFlash = {
+      key: `elsewhere:${answeredElsewhere.id}`,
+      text: answeredElsewhere.device
+        ? `${t('Resolved on another device')} · ${t('from {{device}}', { device: answeredElsewhere.device })}`
+        : t('Resolved on another device'),
+    };
+  } else if (continueFlash) {
+    islandFlash = continueFlash;
+  }
+  // The latest turn stopped on an exhausted provider quota and nothing has
+  // begun since: offer leaving it stopped or continuing in another model.
+  const quotaFailure = draftMode ? null : latestQuotaFailure(settledItems, settledTurnKeys);
+  const quotaSessionId = String(routeSnapshot.sessionId || '');
+  const [quotaAutoResume, setQuotaAutoResume] = useState<boolean | null>(null);
+  const quotaWatched = Boolean(quotaFailure);
+  useEffect(() => {
+    if (!quotaWatched) return undefined;
+    let live = true;
+    const read = () =>
+      void Promise.resolve(window.mixdogDesktop.getQuotaAutoResume?.())
+        .then((enabled) => live && typeof enabled === 'boolean' && setQuotaAutoResume(enabled))
+        .catch(() => {});
+    read();
+    const unsubscribe = subscribeSetupChanges(read);
+    return () => {
+      live = false;
+      unsubscribe();
+    };
+  }, [quotaWatched]);
+  const continueQuotaInAnotherModel = (turnKey: string) => {
+    // If no picker answers (model controls locked) the panel stays as is.
+    beginQuotaContinue(quotaSessionId, (selection) => {
+      void composerInvokeResult(() =>
+        continueAfterQuota({
+          switchModel: () => window.mixdogDesktop.continueSessionInModel(quotaSessionId, selection),
+          retry: () => retryTurnRef.current(turnKey),
+        })
+      ).then((outcome) => {
+        if (outcome === undefined || outcome === 'failed') return;
+        onRoutePreferenceApplied?.(selection, { modelChoice: true });
+        if (outcome !== 'retried') return;
+        continueFlashSequence.current += 1;
+        setContinueFlash({
+          key: `quota-continue:${continueFlashSequence.current}`,
+          text: t('Continuing this chat in {{model}}', {
+            model: modelDisplayName(selection.model, selection.provider),
+          }),
+        });
+      });
+    });
+  };
+  const waitingResume = draftMode || !quotaSessionId ? null : (snapshot.quotaResume ?? null);
+  const quotaPlan = quotaIslandPlan({
+    resume: waitingResume,
+    failure: quotaFailure,
+    autoResume: quotaAutoResume,
+    panelVisible:
+      transcriptPendingPromptItems.length === 0 &&
+      quotaPanelVisible({
+        failure: quotaFailure,
+        sessionId: quotaSessionId,
+        busy: Boolean(snapshot.busy),
+        dismissedKey: dismissedQuotaTurn,
+      }),
+  });
+  const quotaExhausted: ComposerIslandQuota | null =
+    quotaFailure && (quotaPlan === 'panel' || quotaPlan === 'panel-schedule')
+      ? {
+          provider: providerDisplayName(quotaFailure.quota.provider),
+          resetAt: quotaFailure.quota.resetAt,
+          onDismiss: () => setDismissedQuotaTurn(quotaDismissKey(quotaSessionId, quotaFailure.turnKey)),
+          onContinue: () => continueQuotaInAnotherModel(quotaFailure.turnKey),
+          onSchedule:
+            quotaPlan === 'panel-schedule'
+              ? () => void composerInvokeResult(() => window.mixdogDesktop.scheduleQuotaResume(quotaSessionId))
+              : undefined,
+        }
+      : null;
+  const quotaResume: ComposerIslandQuotaResume | null =
+    quotaPlan === 'resume' && waitingResume
+      ? {
+          model: modelDisplayName(waitingResume.model, waitingResume.provider),
+          resetAt: waitingResume.resetAt,
+          // Cancelling only drops the reservation: the turn stays stopped and
+          // the island closes rather than reopening the quota panel.
+          onCancel: () => {
+            const dismissKey = quotaDismissKey(quotaSessionId, quotaFailure?.turnKey || waitingResume.turnKey);
+            void composerInvokeResult(() => window.mixdogDesktop.cancelQuotaResume(quotaSessionId)).then(
+              (cancelled) => {
+                if (cancelled === true) setDismissedQuotaTurn(dismissKey);
+              }
+            );
+          },
+          onContinue: () => continueQuotaInAnotherModel(waitingResume.turnKey),
+        }
+      : null;
+  // The chat keeps the route it runs on while the composer may already hold
+  // another pick: offer reverting the pick or continuing the chat in it.
+  const sessionProvider = String(routeSnapshot.sessionProvider || '');
+  const sessionModel = String(routeSnapshot.sessionModel || '');
+  const selectedProvider = String(routeSnapshot.provider || '');
+  const selectedModel = String(routeSnapshot.model || '');
+  const modelMismatch: ComposerIslandModelMismatch | null =
+    !draftMode &&
+    sessionProvider &&
+    sessionModel &&
+    selectedModel &&
+    (sessionProvider !== selectedProvider || sessionModel !== selectedModel)
+      ? {
+          sessionModel: modelDisplayName(sessionModel, sessionProvider),
+          selectedModel: modelDisplayName(selectedModel, selectedProvider),
+          onRevert: () => {
+            const sessionId = routeSessionIdRef.current;
+            if (!sessionId) return;
+            void composerInvokeResult(async () => {
+              const next = await window.mixdogDesktop.setModelRoute(
+                { provider: sessionProvider, model: sessionModel },
+                sessionId
+              );
+              composerApplySnapshot(next);
+              return next;
+            });
+          },
+          onContinue: () => {
+            void composerInvokeResult(() => composerOnInherit());
+          },
+        }
+      : null;
 
   return (
     <section
@@ -656,6 +671,7 @@ export function Conversation({
           aria-relevant="additions"
           aria-atomic="false"
           aria-busy={Boolean(snapshot.busy || snapshot.commandBusy)}
+          // biome-ignore lint/a11y/noNoninteractiveTabindex: the scrollable log must take focus for keyboard paging.
           tabIndex={0}
           // The thread is a READING surface: a mouse drag may extend the
           // selection, but it must never pick the text (or a code block, tool
@@ -663,18 +679,7 @@ export function Conversation({
           // (user). Capture refuses the drag for every descendant, so no row
           // needs its own guard.
           onDragStartCapture={(event) => event.preventDefault()}
-          // Chromium defers a press that lands INSIDE the live selection: it
-          // waits for a drag it is no longer allowed to start, so the next
-          // drag-select is swallowed (user: 연속 드래그 시 한 번씩 씹힘).
-          // Collapsing the selection first makes every press begin a fresh
-          // range; shift-extend and the right-click menu keep theirs.
-          onMouseDownCapture={(event) => {
-            if (event.button !== 0 || event.shiftKey) return;
-            const target = event.target as HTMLElement | null;
-            if (target?.closest?.('input, textarea, [contenteditable="true"]')) return;
-            const selection = window.getSelection();
-            if (selection && !selection.isCollapsed) selection.removeAllRanges();
-          }}
+          onMouseDownCapture={collapseSelectionOnPress}
           onScroll={(event) => {
             handleTranscriptScroll();
             if (event.currentTarget.scrollTop <= TRANSCRIPT_HISTORY_TOP_PX) requestEarlierTranscript();
@@ -719,84 +724,53 @@ export function Conversation({
               visible up/down bounce on entering a session. */}
             <MarkdownProjectContext.Provider value={routeProject}>
               <MarkdownSessionContext.Provider value={draftMode ? '' : String(routeSnapshot.sessionId || '')}>
-              <MarkdownOpenFileContext.Provider value={onOpenFile ?? null}>
-                {showTranscriptTimeline && (
-                  <TranscriptList
-                    key={transcriptIdentity.current}
-                    sessionKey={transcriptSessionKey}
-                    rows={transcriptRows}
-                    viewport={viewport}
-                    content={content}
-                    bottomInset={composerDockHeight}
-                    shouldAnchorBottom={shouldAnchorTranscriptBottom}
-                    markProgrammaticScroll={markTranscriptProgrammaticScroll}
-                    hasScrollGesture={hasTranscriptScrollGesture}
-                    onSelectionAutoScroll={handleTranscriptSelectionAutoScroll}
-                    setAnchorBottomRef={setTranscriptAnchorBottomRef}
-                    scrollToEndRef={scrollToEndRef}
-                    renderRow={renderTranscriptRow}
-                  />
-                )}
-              </MarkdownOpenFileContext.Provider>
+                <MarkdownOpenFileContext.Provider value={openFile ?? null}>
+                  <MarkdownOpenFolderContext.Provider value={openFolder ?? null}>
+                    <TranscriptDevicesContext.Provider value={multiDevice}>
+                      <TranscriptViewerDeviceContext.Provider value={viewerDevice}>
+                        {showTranscriptTimeline && (
+                          <TranscriptList
+                            key={transcriptIdentity.current}
+                            sessionKey={transcriptSessionKey}
+                            rows={transcriptRows}
+                            viewport={viewport}
+                            content={content}
+                            bottomInset={composerDockHeight}
+                            shouldAnchorBottom={shouldAnchorTranscriptBottom}
+                            markProgrammaticScroll={markTranscriptProgrammaticScroll}
+                            hasScrollGesture={hasTranscriptScrollGesture}
+                            onSelectionAutoScroll={handleTranscriptSelectionAutoScroll}
+                            setAnchorBottomRef={setTranscriptAnchorBottomRef}
+                            scrollToEndRef={scrollToEndRef}
+                            renderRow={renderTranscriptRow}
+                          />
+                        )}
+                      </TranscriptViewerDeviceContext.Provider>
+                    </TranscriptDevicesContext.Provider>
+                  </MarkdownOpenFolderContext.Provider>
+                </MarkdownOpenFileContext.Provider>
               </MarkdownSessionContext.Provider>
             </MarkdownProjectContext.Provider>
           </div>
         </div>
-        {showJump && itemCount > 0 && (
-          <button
-            type="button"
-            className="jump-to-latest"
-            onPointerDown={(event) => {
-              if (!event.isPrimary || event.button !== 0) return;
-              // A live wheel/fling can cancel the later click. Take the tail on the
-              // press itself so the jump also stops the remaining scroll frames.
-              event.preventDefault();
-              jumpToLatest();
-            }}
-            // Native keyboard activation has no pointerdown and reports detail 0.
-            onClick={(event) => {
-              if (event.detail === 0) jumpToLatest();
-            }}
-            aria-label={t('Jump to latest message')}
-          >
-            <ArrowDown size={14} />
-            {t('Jump to latest')}
-          </button>
-        )}
+        {itemCount > 0 && <JumpToLatestButton visible={showJump} onJump={jumpToLatest} />}
       </div>
       {/* The measured dock overlays the viewport. Its clearance belongs to
           the same virtual geometry as the rows, not a second scroll writer. */}
       {!readOnly && (
         <ComposerDock
           dockRef={composerDock}
-          onOpenFile={onOpenFile}
+          sessionId={draftMode ? '' : String(snapshot.sessionId || '')}
           goalIsland={goalIsland}
           goalSubmissionId={goalSubmissionId}
-          approval={
-            snapshot.toolApproval ? (
-              <ApprovalCard
-                key={approvalInstanceKey(snapshot.toolApproval.id)}
-                approval={snapshot.toolApproval}
-                resolve={(approved) => {
-                  const host = window.mixdogDesktop;
-                  const sessionId = routeSessionIdRef.current;
-                  const approvalId = String(snapshot.toolApproval?.id || '');
-                  if (!sessionId) return Promise.resolve(false);
-                  return host.resolveToolApprovalForSession(sessionId, approvalId, { approved });
-                }}
-              />
-            ) : snapshot.userQuestion ? (
-              <UserQuestionCard
-                key={`${snapshot.userQuestion.sessionId}:${snapshot.userQuestion.id}`}
-                request={snapshot.userQuestion}
-                resolve={(response) => {
-                  const request = snapshot.userQuestion;
-                  if (!request) return Promise.resolve(false);
-                  return window.mixdogDesktop.resolveUserQuestionForSession(request.sessionId, request.id, response);
-                }}
-              />
-            ) : null
-          }
+          approval={approvalCard}
+          islandFlash={islandFlash}
+          modelMismatch={modelMismatch}
+          quotaExhausted={quotaExhausted}
+          quotaResume={quotaResume}
+          onOpenSessionDiff={onOpenSessionDiff}
+          onOpenAgentSession={onOpenAgentSession}
+          onOpenBackgroundJobs={onOpenBackgroundJobs}
           showProjectSelector={showProjectSelector}
           contextBar={
             <>
@@ -831,6 +805,7 @@ export function Conversation({
           reviewCwd={routeProject}
         >
           <Composer
+            onOpenFile={openFile}
             turnBusy={Boolean(snapshot.busy)}
             commandBusy={!draftMode && Boolean(routeSnapshot.commandBusy)}
             transitioning={transitioning}
@@ -847,6 +822,7 @@ export function Conversation({
             effort={String(draftModelSelection?.effort ?? routeSnapshot.effort ?? '')}
             fast={draftModelSelection?.fast ?? Boolean(routeSnapshot.fast)}
             fastCapable={Boolean(routeSnapshot.fastCapable)}
+            autoEffort={draftModelSelection?.autoEffort ?? routeSnapshot.autoEffort}
             modelParameters={
               draftModelSelection?.modelParameters ||
               (routeSnapshot.modelParameters as Record<string, string> | undefined)
@@ -860,6 +836,7 @@ export function Conversation({
             hiddenQueueIds={pendingPromptIds}
             pendingSubmissionIds={pendingPromptIds}
             onQueuedRestored={composerQueuedRestored}
+            promptRestore={draftMode ? null : (routeSnapshot.promptRestore ?? null)}
             userMessages={composerUserMessages}
             submit={composerSubmit}
             abort={composerAbort}

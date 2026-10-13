@@ -14,8 +14,15 @@
 import { readFileSync, mkdirSync, existsSync, lstatSync, realpathSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { atomicWrite, symlinkWriteTarget } from './atomic-write.mjs';
+import { fileVersion } from './file-version.mjs';
 import { assertPathsReachable } from './fs-reachability.mjs';
-import { normalizeInputPath, resolveAgainstCwd, normalizeOutputPath, toDisplayPath } from './path-utils.mjs';
+import {
+  normalizeInputPath,
+  resolveAgainstCwd,
+  normalizeOutputPath,
+  toDisplayPath,
+  urlAsPathMessage,
+} from './path-utils.mjs';
 import {
   isUncPath,
   isWindowsDevicePath,
@@ -122,6 +129,8 @@ function guardRealTarget(fullPath) {
 async function resolveTargetPath(args, workDir) {
   const raw = args?.path ?? args?.file_path;
   if (typeof raw !== 'string' || raw.length === 0) return null;
+  const urlMessage = urlAsPathMessage(raw);
+  if (urlMessage) return { error: `Error: ${urlMessage}` };
   const norm = normalizeInputPath(raw);
   const guardErr = guardWritePath(norm);
   if (guardErr) return { error: guardErr };
@@ -473,18 +482,24 @@ function readEditTextForDisplay(fullPath, enc) {
 
 // ── str_replace: the edit target record + the steps that mutate it ──────────
 
-const SAME_STRINGS_ERROR = 'Error: old_string and new_string are exactly the same';
+const SAME_STRINGS_ERROR =
+  'Error: old_string and new_string are exactly the same — no change needed; the file may already contain it, re-read before retrying';
+
+// 1-based line numbers where oldStr occurs in content (first 8), for the
+// non-unique-match error.
+function matchLineHint(content, oldStr) {
+  const lines = [];
+  let total = 0;
+  for (let at = content.indexOf(oldStr); at !== -1; at = content.indexOf(oldStr, at + Math.max(1, oldStr.length))) {
+    total += 1;
+    if (lines.length < 8) lines.push(content.slice(0, at).split('\n').length);
+  }
+  if (!lines.length) return '';
+  return ` at lines ${lines.join(', ')}${total > lines.length ? ', …' : ''}`;
+}
 
 function targetSnapshot(statBefore) {
-  return statBefore
-    ? {
-        exists: true,
-        size: statBefore.size,
-        mtimeMs: statBefore.mtimeMs,
-        ctimeMs: statBefore.ctimeMs,
-        ino: statBefore.ino,
-      }
-    : { exists: false };
+  return statBefore ? { exists: true, ...fileVersion(statBefore) } : { exists: false };
 }
 
 /**
@@ -493,12 +508,14 @@ function targetSnapshot(statBefore) {
  * Returns `{ error }` when the bytes cannot be read or are not decidable text.
  */
 function readEditTarget(fullPath) {
-  let statBefore = null;
+  // An unreadable pre-stat is incomplete existing-file evidence, not the
+  // explicit absence used by createEditTarget. Never resurrect a removed file.
+  let statBefore = {};
   let content;
   let fileEnc;
   try {
     try {
-      statBefore = statSync(fullPath);
+      statBefore = { ...fileVersion(statSync(fullPath)) };
     } catch {
       /* readFileSync below surfaces the real error */
     }
@@ -640,7 +657,7 @@ async function applyEditInProcess(edit, oldStr, editPlan, replaceAll) {
   if (occurrences > 1 && !replaceAll) {
     const message = `old_string found ${occurrences} times`;
     return (
-      `Error: edit failed (${message}; pass replace_all:true or extend old_string)` +
+      `Error: edit failed (${message}${matchLineHint(content, oldStr)}; pass replace_all:true or extend old_string)` +
       formatEditFailureExcerpt(content, oldStr, message)
     );
   }
@@ -680,7 +697,10 @@ async function applyEditNative(edit, oldStr, newStr, editPlan, replaceAll) {
     const message = err?.message || String(err);
     if (/old_string (?:not found|found \d+ times)/i.test(message)) {
       const latest = readEditTextForDisplay(fullPath, fileEnc) ?? content;
-      return `Error: edit failed (${message})${formatEditFailureExcerpt(latest, oldStr, message)}`;
+      const hinted = /found \d+ times/i.test(message)
+        ? message.replace(/(found \d+ times)/i, `$1${matchLineHint(latest, oldStr)}`)
+        : message;
+      return `Error: edit failed (${hinted})${formatEditFailureExcerpt(latest, oldStr, message)}`;
     }
     throw err;
   }
@@ -714,10 +734,37 @@ async function requiresInProcessEdit(edit, editPlan) {
   );
 }
 
+// Models trained on other CLIs send `old_str`/`new_str`. An alias is honoured
+// only when the canonical key is absent; both present with different values is
+// ambiguous and rejected.
+const STR_REPLACE_ALIASES = [
+  ['old_string', 'old_str'],
+  ['new_string', 'new_str'],
+];
+
+function resolveStrReplaceArgs(args) {
+  const out = {};
+  for (const [canonical, alias] of STR_REPLACE_ALIASES) {
+    const hasCanonical = args?.[canonical] !== undefined;
+    const hasAlias = args?.[alias] !== undefined;
+    if (hasCanonical && hasAlias && args[canonical] !== args[alias]) {
+      return {
+        error: `Error: edit received both ${canonical} and ${alias} with different values; pass only ${canonical}`,
+      };
+    }
+    out[canonical] = hasCanonical ? args[canonical] : args?.[alias];
+  }
+  return out;
+}
+
 async function adaptStrReplace(args, workDir, options) {
-  let oldStr = args?.old_string;
-  let newStr = args?.new_string;
-  if (typeof oldStr !== 'string' || typeof newStr !== 'string') return null;
+  const resolved = resolveStrReplaceArgs(args);
+  if (resolved.error) return resolved.error;
+  let oldStr = resolved.old_string;
+  let newStr = resolved.new_string;
+  if (typeof oldStr !== 'string' || typeof newStr !== 'string') {
+    return `Error: edit requires string old_string and new_string (got keys: ${Object.keys(args).join(', ')})`;
+  }
   if (oldStr === newStr) return SAME_STRINGS_ERROR;
   const replaceAll = args?.replace_all === true || String(args?.replace_all || '').toLowerCase() === 'true';
   const target = await resolveTargetPath(args, workDir);
@@ -734,7 +781,8 @@ async function adaptStrReplace(args, workDir, options) {
   if (read.error) return read.error;
   const edit = { fullPath, workDir, options, ...read };
   if (oldStr.length === 0) {
-    if (edit.content.length > 0) return `Error: cannot create ${fullPath}: file already exists and is not empty`;
+    if (edit.content.length > 0)
+      return `Error: cannot create ${fullPath}: file exists: to replace it entirely pass its current content as old_string (read it first); to change part, pass that part as old_string with the replacement as new_string`;
     const stale = await commitEdit(edit, {
       bytes: encodeEditContent(newStr, edit.fileEnc),
       after: newStr,

@@ -2,7 +2,8 @@
 // react-markdown chunk and the worker AST processor) so their DOM output
 // stays identical. Keep this module free of DOM and React dependencies: it is
 // pulled into the renderer bundle and the markdown worker alike.
-import { isOsDocumentExtension } from '../shared/local-files';
+import { filePreviewTypeForPath } from '../shared/file-preview';
+import { isOsDocumentExtension, parseLocalFileLocation } from '../shared/local-files';
 import { isLocalMarkdownLink } from './markdown-url';
 
 interface HastLikeNode {
@@ -11,6 +12,8 @@ interface HastLikeNode {
   tagName?: unknown;
   properties?: Record<string, unknown>;
   children?: HastLikeNode[];
+  url?: unknown;
+  position?: { start: { offset?: number } };
 }
 
 const adjacentStrongPunctuation =
@@ -95,6 +98,67 @@ export function repairAdjacentStrongPunctuation() {
         repaired.push(...sliceSpans(spans, cursor, projection.length));
         node.children = repaired;
       }
+    };
+    visit(tree);
+  };
+}
+
+// GFM extends a bare URL through every non-space character, so Korean prose
+// glued to a link (`페이지(https://a.io/x/)와`) ended up inside the href and
+// opened a 404. Cut a literal autolink at its first CJK character, then drop
+// the trailing punctuation and unbalanced `)` that cut exposes, returning the
+// remainder to prose. Only literal autolinks are cut: their label starts where
+// the link starts, while `[..](..)` and `<..>` carry a delimiter first.
+const CJK_CHARACTER =
+  /[\p{Script=Hangul}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\u3000-\u303f\uff00-\uffef]/u;
+const TRAILING_URL_PUNCTUATION = /[?!.,:*_~]$/;
+
+function autolinkCut(label: string): number {
+  const found = label.search(CJK_CHARACTER);
+  if (found <= 0) return -1;
+  let end = found;
+  for (;;) {
+    const head = label.slice(0, end);
+    if (TRAILING_URL_PUNCTUATION.test(head)) end -= 1;
+    else if (head.endsWith(')') && head.split(')').length > head.split('(').length) end -= 1;
+    else return end;
+  }
+}
+
+/** The URL and sole text label of a literal autolink: the label is the URL's
+ *  tail and starts where the link starts. Null for any other node. */
+function literalAutolink(link: HastLikeNode): { url: string; label: HastLikeNode & { value: string } } | null {
+  const url = link.url;
+  const label = link.children?.[0];
+  if (link.type !== 'link' || typeof url !== 'string' || link.children?.length !== 1) return null;
+  if (label?.type !== 'text' || typeof label.value !== 'string' || !url.endsWith(label.value)) return null;
+  const start = link.position?.start.offset;
+  if (start === undefined || start !== label.position?.start.offset) return null;
+  return { url, label: label as HastLikeNode & { value: string } };
+}
+
+export function trimAutolinkCjkSuffix() {
+  return (tree: HastLikeNode) => {
+    const visit = (node: HastLikeNode) => {
+      const children = node.children;
+      if (!children) return;
+      const repaired: HastLikeNode[] = [];
+      for (const child of children) {
+        visit(child);
+        repaired.push(child);
+        const autolink = literalAutolink(child);
+        if (!autolink) continue;
+        const { url, label } = autolink;
+        const end = autolinkCut(label.value);
+        if (end <= 0) continue;
+        const tail = label.value.slice(end);
+        child.url = url.slice(0, url.length - tail.length);
+        label.value = label.value.slice(0, end);
+        delete child.position;
+        delete label.position;
+        repaired.push({ type: 'text', value: tail });
+      }
+      node.children = repaired;
     };
     visit(tree);
   };
@@ -186,6 +250,8 @@ export function trimTrailingCodeNewline() {
 // carries `path:line[:column]` so both pipelines hand MarkdownLink the same
 // target.
 export const PATH_LINK_CLASS = 'markdown-path-link';
+/** Element standing in for a previewable local image (see markdown-local-image). */
+export const LOCAL_IMAGE_TAG = 'mx-local-image';
 const SEGMENT = '[\\p{L}\\p{N}_.@+-]+';
 const PATH_PREFIX = '(?:[A-Za-z]:[\\\\/]|\\.{1,2}[\\\\/]|[\\\\/](?![\\\\/]))';
 const EXTENSION = '\\.[A-Za-z][A-Za-z0-9]{0,11}';
@@ -286,6 +352,39 @@ const BARE_FILE_EXTENSIONS = new Set([
   'svg',
   'mp4',
   'mp3',
+  // Files the OS opens (archives, other documents, media, installers): linked
+  // like the formats above and routed to openLocalFileLink on click.
+  'zip',
+  '7z',
+  'rar',
+  'tar',
+  'gz',
+  'tgz',
+  'iso',
+  'exe',
+  'msi',
+  'dmg',
+  'doc',
+  'ppt',
+  'xls',
+  'rtf',
+  'odt',
+  'ods',
+  'odp',
+  'bmp',
+  'ico',
+  'avif',
+  'tif',
+  'tiff',
+  'jfif',
+  'wav',
+  'ogg',
+  'flac',
+  'm4a',
+  'm4v',
+  'mov',
+  'webm',
+  'mkv',
 ]);
 const BARE_FILE_NAMES = new Set([
   'dockerfile',
@@ -481,7 +580,18 @@ function inlineCodeLink(code: HastLikeNode, next: HastLikeNode | undefined): Has
 function localImageLink(node: HastLikeNode): HastLikeNode | null {
   if (node.type !== 'element' || node.tagName !== 'img') return null;
   const src = String(node.properties?.src || '').trim();
-  return src && isLocalMarkdownLink(src) ? pathLink(src, [{ type: 'text', value: src }]) : null;
+  if (!src || !isLocalMarkdownLink(src)) return null;
+  const link = pathLink(src, [{ type: 'text', value: src }]);
+  if (filePreviewTypeForPath(parseLocalFileLocation(src).path)?.kind !== 'image') return link;
+  // The renderer turns this into a thumbnail and falls back to its child, the
+  // path link. The path travels in a data property: `src` is stripped from
+  // local targets when the tree is sanitized.
+  return {
+    type: 'element',
+    tagName: LOCAL_IMAGE_TAG,
+    properties: { dataSrc: src, alt: String(node.properties?.alt || '') },
+    children: [link],
+  };
 }
 
 export function linkifyLocalPaths() {

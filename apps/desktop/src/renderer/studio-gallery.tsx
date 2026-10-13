@@ -1,6 +1,21 @@
 import { Ban, Check, Trash2 } from 'lucide-react';
 import { ErrorNotice } from './ErrorNotice';
-import { type CSSProperties, type ReactNode, type RefObject, type UIEvent, useMemo } from 'react';
+import {
+  type CSSProperties,
+  type ReactNode,
+  type RefObject,
+  type UIEvent,
+  useCallback,
+  useMemo,
+  useState,
+} from 'react';
+import {
+  elementMenuPoint,
+  isContextMenuKey,
+  pointerMenuPoint,
+  ScmContextMenu,
+  type ScmContextMenuState,
+} from './ScmContextMenu';
 
 import { ProgressSpinner } from './ProgressSpinner';
 import { BrandTile } from './WorkspaceEmptyState';
@@ -133,6 +148,23 @@ export function StudioGallery({
     [visibleAssets]
   );
   const lastRowIndex = layoutRows.length - 1;
+  const [contextMenu, setContextMenu] = useState<ScmContextMenuState | null>(null);
+  const closeContextMenu = useCallback(() => setContextMenu(null), []);
+  const openAssetMenu = (asset: MediaAsset, point: { x: number; y: number }) =>
+    setContextMenu({
+      label: assetLabel(asset),
+      ...point,
+      items: [
+        { id: 'open', label: t('Open'), onSelect: () => onOpen(asset) },
+        {
+          id: 'delete',
+          label: t('Delete asset'),
+          danger: true,
+          separatorBefore: true,
+          onSelect: () => onDelete(asset),
+        },
+      ],
+    });
 
   return (
     <>
@@ -141,6 +173,7 @@ export function StudioGallery({
       <div className="studio-topbar">
         {/* Only offer what the signed-in providers can produce: one kind hides
           the toggle, none hides it entirely. */}
+        {/* biome-ignore lint/a11y/useSemanticElements: tag must stay a div; a fieldset would change layout and styling */}
         <div
           className="studio-kind"
           data-empty={kindsOffered.length > 1 ? undefined : 'true'}
@@ -179,6 +212,7 @@ export function StudioGallery({
           {cleanup}
         </div>
       </div>
+      {/* biome-ignore lint/a11y/useAriaPropsSupportedByRole: label names the results region without adding a role, which would change screen-reader semantics */}
       <div className="studio-results" aria-label={t('Generated media')} ref={resultsRef} onScroll={onResultsScroll}>
         {visibleAssets.length === 0 && pendingJobs.length === 0 && !loading && (
           <div className="studio-blank">
@@ -307,6 +341,23 @@ export function StudioGallery({
                       onClick={() => (selecting ? onToggleChecked(asset) : onOpen(asset))}
                       aria-pressed={selecting ? checked : undefined}
                       aria-label={t('Open {{kind}}: {{prompt}}', { kind: t(asset.kind), prompt: asset.prompt })}
+                      onContextMenu={
+                        selecting
+                          ? undefined
+                          : (event) => {
+                              event.preventDefault();
+                              openAssetMenu(asset, pointerMenuPoint(event));
+                            }
+                      }
+                      onKeyDown={
+                        selecting
+                          ? undefined
+                          : (event) => {
+                              if (!isContextMenuKey(event)) return;
+                              event.preventDefault();
+                              openAssetMenu(asset, elementMenuPoint(event.currentTarget));
+                            }
+                      }
                       onMouseEnter={hoverPreview ? () => onHoverStart(asset) : undefined}
                       onMouseLeave={hoverPreview ? onHoverEnd : undefined}
                     >
@@ -371,6 +422,7 @@ export function StudioGallery({
           ))}
         </div>
       </div>
+      <ScmContextMenu state={contextMenu} onClose={closeContextMenu} />
     </>
   );
 }

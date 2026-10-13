@@ -186,13 +186,22 @@ export function normalizeWorkflowRoute(routeLike, fallback = {}) {
   if (!isLikelyRawModelId(model)) return null;
   const effort = normalizeEffortInput(routeLike?.effort ?? fallback.effort);
   const fast = routeLike?.fast ?? fallback.fast;
+  // Absent means Auto effort is on; only the off state is carried.
+  const autoEffort = routeLike?.autoEffort ?? fallback.autoEffort;
   const modelParameters = routeLike?.modelParameters ?? fallback.modelParameters;
+  const requestedPercent = Number(routeLike?.contextPercent ?? fallback.contextPercent);
+  const contextPercent =
+    Number.isFinite(requestedPercent) && requestedPercent >= 10 && requestedPercent <= 100
+      ? Math.round(requestedPercent / 10) * 10
+      : null;
   return {
     provider,
     model,
     ...(effort ? { effort } : {}),
     ...(typeof fast === 'boolean' ? { fast } : {}),
+    ...(autoEffort === false ? { autoEffort: false } : {}),
     ...(modelParameters && typeof modelParameters === 'object' ? { modelParameters: { ...modelParameters } } : {}),
+    ...(contextPercent ? { contextPercent } : {}),
   };
 }
 
@@ -208,6 +217,7 @@ export function upsertWorkflowPreset(presets, slot, routeLike) {
     model: route.model,
     ...(route.effort ? { effort: route.effort } : {}),
     ...(route.fast === true ? { fast: true } : {}),
+    ...(route.autoEffort === false ? { autoEffort: false } : {}),
     ...(route.modelParameters ? { modelParameters: route.modelParameters } : {}),
     tools: 'full',
   };

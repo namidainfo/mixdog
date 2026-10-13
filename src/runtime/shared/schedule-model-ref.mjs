@@ -1,7 +1,8 @@
 // schedule.model wire format shared by the channels-worker scheduler and the
 // engine-side run-now dispatch: either a config.presets id/name (legacy) or a
-// direct "provider/model[@effort][+fast][?parameter=value]" route string written
-// by the desktop schedule editor. Slash-form values become direct route
+// direct "provider/model[@effort][+fast][+noauto][?parameter=value]" route string
+// written by the desktop schedule editor (`+noauto`: Auto effort off for the
+// route; absent means on). Slash-form values become direct route
 // objects, which agent-dispatch consumes without a presets lookup.
 // The optional route fields an automation run carries, from a preset, a
 // maintenance slot or a parsed route ref. One shape so schedule and webhook
@@ -13,8 +14,21 @@ export function modelRouteFields(slot = {}) {
     model: slot.model,
     ...(slot.effort ? { effort: slot.effort } : {}),
     ...(slot.fast === true ? { fast: true } : {}),
+    ...(slot.autoEffort === false ? { autoEffort: false } : {}),
     ...(slot.modelParameters ? { modelParameters: { ...slot.modelParameters } } : {}),
   };
+}
+
+/** The inverse of parseScheduleModelRef for a direct route object. */
+export function formatScheduleModelRef(route) {
+  const parameters = Object.entries(route?.modelParameters || {}).filter(([key, value]) => key && value);
+  return (
+    `${route.provider}/${route.model}` +
+    (route.effort ? `@${route.effort}` : '') +
+    (route.fast === true ? '+fast' : '') +
+    (route.autoEffort === false ? '+noauto' : '') +
+    (parameters.length ? `?${new URLSearchParams(parameters).toString()}` : '')
+  );
 }
 
 export function parseScheduleModelRef(ref) {
@@ -26,6 +40,11 @@ export function parseScheduleModelRef(ref) {
   if (slash <= 0) return raw;
   let rest = routeRef.slice(slash + 1);
   let fast = false;
+  let autoEffort = true;
+  if (rest.endsWith('+noauto')) {
+    autoEffort = false;
+    rest = rest.slice(0, -7);
+  }
   if (rest.endsWith('+fast')) {
     fast = true;
     rest = rest.slice(0, -5);
@@ -41,6 +60,7 @@ export function parseScheduleModelRef(ref) {
     model: rest,
     ...(effort ? { effort } : {}),
     ...(fast ? { fast: true } : {}),
+    ...(autoEffort ? {} : { autoEffort: false }),
     ...(query ? { modelParameters: Object.fromEntries(new URLSearchParams(query)) } : {}),
   };
 }

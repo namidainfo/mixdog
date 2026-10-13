@@ -200,10 +200,16 @@ function unwrapQuotedCommand(command) {
 
 function parseCommand(rawCommand, workDir) {
   const command = unwrapQuotedCommand(rawCommand);
-  if (commandHasShellSyntax(command))
+  if (commandHasShellSyntax(command)) {
+    // commandHasShellSyntax already skips quoted text; the pipe hint follows
+    // only when the rejected command really has an unquoted `|`.
+    const unquoted = command.replace(/"(?:\\.|[^"\\])*"|'[^']*'/g, '');
     throw new Error(
-      'git command must not contain shell operators or substitution; multiple commands belong in the command array'
+      `git command must not contain shell operators or substitution; multiple commands belong in the command array.${
+        unquoted.includes('|') ? ' For | head/tail use output_limit, for | grep use the grep tool' : ''
+      }`
     );
+  }
   const tokens = tokenizeDirectArgv(command);
   if (!tokens?.length || !/(^|[\\/])git(?:\.exe)?$/i.test(tokens[0])) {
     throw new Error('command must begin with git');
@@ -802,6 +808,23 @@ function splitChainedGitCommands(command) {
 // ("status --short") gets it instead of a rejection. Only whole submitted
 // commands are prefixed; a `&&` piece after the first still has to be a full
 // git command, so non-git chain segments stay refused.
+// A JSON-stringified string[] ('["git status","git log"]') for an array param.
+// No git command or change id starts with `[`, so this never reinterprets a
+// call that could have worked.
+function parseStringifiedArray(value) {
+  if (typeof value !== 'string') return value;
+  const text = value.trim();
+  if (!text.startsWith('[') || !text.endsWith(']')) return value;
+  try {
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed) && parsed.length > 0 && parsed.every((item) => typeof item === 'string')
+      ? parsed
+      : value;
+  } catch {
+    return value;
+  }
+}
+
 function withGitPrefix(command) {
   if (typeof command !== 'string') return command;
   const text = String(unwrapQuotedCommand(command)).trim();
@@ -813,10 +836,12 @@ function withGitPrefix(command) {
 export async function executeGitTool(rawInput, workDir, options = {}) {
   if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput))
     return fail('git requires an arguments object');
+  const rawCommand = parseStringifiedArray(rawInput.command);
   const input = {
     ...rawInput,
-    command: Array.isArray(rawInput.command) ? rawInput.command.map(withGitPrefix) : withGitPrefix(rawInput.command),
+    command: Array.isArray(rawCommand) ? rawCommand.map(withGitPrefix) : withGitPrefix(rawCommand),
   };
+  if (rawInput.change_ids !== undefined) input.change_ids = parseStringifiedArray(rawInput.change_ids);
   if (rawInput.command === undefined) delete input.command;
   const action = input.action ?? 'command';
   if (action === 'stage') {

@@ -4,6 +4,8 @@ import {
   SETUP_EXTENDED_PROPERTIES,
   SETUP_MCP_SCHEMA,
 } from './settings-contract.mjs';
+import { MEDIA_KINDS } from '../../runtime/media/tool-defs.mjs';
+import { INSTRUCTION_FILES_MODES } from '../../runtime/shared/instruction-files-mode.mjs';
 
 /** Built-in `setup` tool: the model's handle on a Mixdog user's persisted
  *  configuration. The description is a contract only; how to use each action
@@ -77,6 +79,7 @@ export const SETUP_ACTION_FIELDS = Object.freeze({
   set_memory_enabled: 'enabled',
   set_recap_enabled: 'enabled',
   set_web_search_enabled: 'enabled',
+  set_instruction_files: 'instructionFiles',
   set_builtin_enabled: 'name enabled',
   install_builtin: 'name',
   install_local_model: 'modelId',
@@ -115,6 +118,7 @@ export const SETUP_BUILTIN_TOGGLE_FEATURES = Object.freeze([
   'office',
   'tidy',
   'localProvider',
+  'autoEffort',
   'browser',
   'computer',
   'voice',
@@ -172,7 +176,7 @@ export const SETUP_TOOL_DEFS = Object.freeze([
         route: {
           ...ROUTE_SCHEMA,
           description:
-            'Partial route update; omitted fields are preserved. Agent or Web Search provider "" restores Main inheritance. contextPercent is Main-only.',
+            'Partial route update; omitted fields are preserved. Agent or Web Search provider "" restores Main inheritance. contextPercent applies to Main and agent routes only.',
         },
         agent: { type: 'string', description: 'set_agent_route: agent id.' },
         workflow: { type: 'string', description: 'set_workflow: pack id.' },
@@ -210,6 +214,12 @@ export const SETUP_TOOL_DEFS = Object.freeze([
           description:
             'Boolean setters (set_*_enabled, set_compaction, set_auto_update, set_mcp_enabled, set_plugin_enabled).',
         },
+        instructionFiles: {
+          type: 'string',
+          enum: [...INSTRUCTION_FILES_MODES],
+          description:
+            'set_instruction_files: which user instruction files new sessions load (global ~/.codex/AGENTS.md, ~/.claude/CLAUDE.md, then the Project root\'s AGENTS.md/CLAUDE.md).',
+        },
         name: {
           type: 'string',
           description: `set_builtin_enabled: ${SETUP_BUILTIN_TOGGLE_FEATURES.join('|')}; install_builtin also accepts memory. Memory toggles use set_memory_enabled. revoke_linked_device: client id from status connection, not its display name; set_developer_option: option id from status developer; read_definition/delete_definition: the definition id; else MCP/plugin/provider id.`,
@@ -225,7 +235,12 @@ export const SETUP_TOOL_DEFS = Object.freeze([
           properties: {
             selectedId: { type: 'string', description: 'Account to use now.' },
             auto: { type: 'boolean', description: 'Automatic switching to another account when one is exhausted.' },
-            order: { type: 'array', items: { type: 'string' }, description: 'Every connected account id exactly once.' },
+            useCredits: { type: 'boolean', description: 'Allow paid credits once plan limits are reached.' },
+            order: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Every connected account id exactly once.',
+            },
             rename: {
               type: 'object',
               additionalProperties: false,
@@ -261,9 +276,9 @@ export const SETUP_TOOL_DEFS = Object.freeze([
         },
         contextWindow: {
           type: 'integer',
-          minimum: 512,
+          minimum: 16384,
           maximum: 32768,
-          description: 'inspect_hf_model: runtime context allocation, default 8192.',
+          description: 'inspect_hf_model: runtime context allocation; default 32768 when the GPU holds it, else 16384.',
         },
         previewId: { type: 'string', description: 'register_hf_model: unexpired read-only inspection receipt.' },
         licenseAccepted: {
@@ -296,8 +311,9 @@ export const SETUP_TOOL_DEFS = Object.freeze([
         source: { type: 'string', description: 'add_plugin: Git URL, owner/repo, or local path.' },
         kind: {
           type: 'string',
-          enum: ['skills', 'mcp', 'plugins'],
-          description: 'set_extension_scope: which extension list `name` belongs to.',
+          enum: ['skills', 'mcp', 'plugins', ...MEDIA_KINDS],
+          description:
+            'set_extension_scope: which extension list `name` belongs to (skills|mcp|plugins). set_media_default: media kind.',
         },
         projects: {
           type: 'array',

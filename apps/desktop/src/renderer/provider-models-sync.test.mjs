@@ -18,7 +18,9 @@ function fakeHost() {
   const notified = [];
   return {
     notified,
-    emit: (change) => { for (const listener of listeners) listener(change); },
+    emit: (change) => {
+      for (const listener of listeners) listener(change);
+    },
     api: {
       notifyProviderModelsChanged: (origin) => notified.push(origin),
       subscribeProviderModelsChanged: (listener) => {
@@ -38,6 +40,11 @@ test('a local provider mutation notifies main once with this renderer instance i
     assert.deepEqual(host.notified, [PROVIDER_MODELS_INSTANCE_ID]);
     invalidateSidebarReferenceForMutation('saveSchedule');
     assert.equal(host.notified.length, 1, 'non-provider mutations never notify');
+    // Custom-provider edits reach peer windows like save/remove do.
+    for (const mutation of ['saveCustomProvider', 'removeCustomProvider', 'updateCustomProviderModel']) {
+      assert.equal(invalidateSidebarReferenceForMutation(mutation), true, mutation);
+    }
+    assert.equal(host.notified.length, 4);
   } finally {
     delete globalThis.window;
   }
@@ -48,7 +55,9 @@ test('a peer notification reloads pickers without echoing; own echo is ignored',
   const host = fakeHost();
   globalThis.window = { mixdogDesktop: host.api };
   let woke = 0;
-  const unwatch = subscribeModelCatalogInvalidation(() => { woke += 1; });
+  const unwatch = subscribeModelCatalogInvalidation(() => {
+    woke += 1;
+  });
   const unsubscribe = subscribeProviderModelsSync(host.api);
   try {
     host.emit({ origin: PROVIDER_MODELS_INSTANCE_ID });

@@ -2,6 +2,12 @@ import { useEffect, useState } from 'react';
 import { record } from '../record-utils';
 import type { CapabilityApi, RecordValue } from './capability-data';
 
+export function localProviderFileSize(bytes: unknown): string {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value <= 0) return '';
+  return `${(value / 1_000_000_000).toFixed(1)} GB`;
+}
+
 export function localProviderInstallation(status: RecordValue, phase: string, modelId?: string): RecordValue {
   const entries = Array.isArray(status.installations) ? status.installations.map(record) : [];
   return (
@@ -25,6 +31,7 @@ export function installationPercent(installation: RecordValue): number | null {
 // must not block progress reads; failed reads retain the last good snapshot.
 export function useLocalProviderStatus(api: CapabilityApi, snapshot: unknown, active: boolean) {
   const [live, setLive] = useState<RecordValue | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: snapshot is the trigger: a fresh settings snapshot discards the live override and restarts polling.
   useEffect(() => {
     setLive(null);
     if (!active || (!api.readCapabilities && !api.invokeCapability)) return;

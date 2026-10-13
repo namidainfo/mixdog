@@ -36,6 +36,7 @@ test('every connected OAuth account gets one isolated minimal send, including no
   const providers = new Map();
   const sends = [];
   const before = new Map();
+  const expectedRequests = ACCOUNT_PROVIDERS.length * 2;
   for (const provider of ACCOUNT_PROVIDERS) {
     registerProviderAccount(provider, FIRST, { label: 'first' });
     registerProviderAccount(provider, SECOND, { label: 'namidainfo.n' });
@@ -59,15 +60,15 @@ test('every connected OAuth account gets one isolated minimal send, including no
       ...before.get(id),
       accounts: [connected(FIRST, 'first'), connected(SECOND, 'namidainfo.n'), { id: 'gone', authenticated: false }, { ...connected('reauth'), reauthRequired: true }],
     }),
-    refreshQuota: async () => { refreshes++; assert.equal(sends.length, 10); return dashboard; },
+    refreshQuota: async () => { refreshes++; assert.equal(sends.length, expectedRequests); return dashboard; },
   });
   const result = await request();
   assert.equal(result.status, 'completed');
-  assert.equal(result.results.length, 10);
+  assert.equal(result.results.length, expectedRequests);
   assert.ok(result.results.every((row) => row.status === 'sent'));
   assert.equal(result.dashboard, dashboard);
   assert.equal(refreshes, 1);
-  assert.equal(new Set(sends.map(({ options }) => options.sessionId)).size, 10);
+  assert.equal(new Set(sends.map(({ options }) => options.sessionId)).size, expectedRequests);
   for (const provider of ACCOUNT_PROVIDERS) {
     assert.deepEqual(sends.filter((row) => row.provider === provider).map((row) => row.accountId), [FIRST, SECOND]);
     assert.deepEqual(readProviderAccountPool(provider), before.get(provider), 'selected account and account pool must not change');

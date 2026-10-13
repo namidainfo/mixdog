@@ -2,6 +2,7 @@ import type { SVGProps } from 'react';
 
 import type { DesktopModelOption } from '../shared/contract';
 
+import { useAutoEffortShown } from './auto-effort-store';
 import { t } from './i18n';
 // @ts-expect-error Shared runtime ESM intentionally has no separate declaration file.
 import { canonicalModelDisplay } from '../../../../src/ui/model-display.mjs';
@@ -16,6 +17,8 @@ const PROVIDER_LABELS: Readonly<Record<string, string>> = {
   gemini: 'Gemini API',
   'gemini-api': 'Gemini API',
   'grok-oauth': 'Grok OAuth',
+  'muse-code-oauth': 'Muse Code',
+  'mimo-oauth': 'MiMo',
   'antigravity-oauth': 'Antigravity OAuth',
   'cursor-oauth': 'Cursor OAuth',
   'mixdog-local': 'Local Provider',
@@ -33,6 +36,8 @@ const PROVIDER_RANKS: Readonly<Record<string, number>> = {
   'openai-oauth': 10,
   'anthropic-oauth': 20,
   'grok-oauth': 30,
+  'muse-code-oauth': 33,
+  'mimo-oauth': 34,
   'antigravity-oauth': 31,
   'cursor-oauth': 32,
   'opencode-go': 35,
@@ -285,7 +290,7 @@ export function modelDisplayName(model: string | null | undefined, provider = ''
   return id ? canonicalModelDisplay(id) || id : '';
 }
 
-function modelRouteDisplayParts(
+export function modelRouteDisplayParts(
   model: string | null | undefined,
   effort: string | null | undefined = '',
   fast = false,
@@ -306,31 +311,69 @@ function modelRouteDisplayParts(
   };
 }
 
+/** The route's Daybreak Blue model parameter id; the runtime offers it only on models that accept Blue. */
+export const DAYBREAK_PARAMETER_ID = 'daybreak';
+
+/** Blue is on for this route: the toggle is set and, when the model's
+ *  parameter options are known, the model actually offers it. */
+export function routeDaybreakBlue(
+  modelParameters: Record<string, string> | null | undefined,
+  options?: DesktopModelOption['modelParameterOptions']
+): boolean {
+  if (String(modelParameters?.[DAYBREAK_PARAMETER_ID] || '').toLowerCase() !== 'on') return false;
+  return !options || options.some((parameter) => parameter.id === DAYBREAK_PARAMETER_ID);
+}
+
 export function ModelRouteLabel({
   model,
   effort = '',
   fast = false,
+  blue = false,
   effortLabel = '',
+  autoEffortCapable = false,
+  autoEffort,
+  ultra = false,
 }: {
   model: string | null | undefined;
   effort?: string | null | undefined;
   fast?: boolean;
+  /** The fast route runs the Ultrafast service tier: shown as an orange "Ultrafast". */
+  ultra?: boolean;
+  /** Daybreak Blue is on: shown right after the model ("GPT-6 Sol Blue XHigh"). */
+  blue?: boolean;
   effortLabel?: string;
+  /** The model supports Auto reasoning: with the master switch on and this route not opted out, it replaces the saved level. */
+  autoEffortCapable?: boolean;
+  /** The route's own Auto flag; only `false` opts out, absent means on. */
+  autoEffort?: boolean | null;
 }) {
-  const parts = modelRouteDisplayParts(model, effort, fast, effortLabel);
+  const autoShown = useAutoEffortShown(autoEffortCapable, String(effort || ''), autoEffort);
+  const parts = autoShown
+    ? modelRouteDisplayParts(model, '', fast, 'Auto')
+    : modelRouteDisplayParts(model, effort, fast, effortLabel);
   return (
     <span className="model-route-label">
       {parts.model && <span className="model-route-label-model">{parts.model}</span>}
-      {parts.effort && (
+      {blue && (
         <>
           {parts.model && ' '}
+          <span className="model-route-label-blue">Blue</span>
+        </>
+      )}
+      {parts.effort && (
+        <>
+          {(parts.model || blue) && ' '}
           <span className="model-route-label-effort">{parts.effort}</span>
         </>
       )}
       {parts.fast && (
         <>
-          {(parts.model || parts.effort) && ' '}
-          <span className="model-route-label-fast">{parts.fast}</span>
+          {(parts.model || blue || parts.effort) && ' '}
+          {ultra ? (
+            <span className="model-route-label-ultra">Ultrafast</span>
+          ) : (
+            <span className="model-route-label-fast">{parts.fast}</span>
+          )}
         </>
       )}
     </span>

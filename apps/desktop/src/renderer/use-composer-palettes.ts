@@ -65,8 +65,11 @@ export function useComposerPalettes({
   // dismissal its own Escape performs.
   useMobileBack(slashOpen, () => setSlashDismissed(draft));
   useMobileBack(mentionOpen, () => setMentionDismissed(mentionSignature));
+  // biome-ignore lint/correctness/useExhaustiveDependencies: draft is the trigger that resets the highlighted slash row
   useEffect(() => setSlashIndex(0), [draft]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the mention query is the trigger that resets the highlighted row
   useEffect(() => setMentionIndex(0), [mentionMatch?.query]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: depends on the match's start/end/query fields, not on the match object identity (recomputed each draft change)
   useEffect(() => {
     if (!mentionOpen || !mentionMatch) {
       mentionSearchGeneration.current += 1;
@@ -79,7 +82,7 @@ export function useComposerPalettes({
     setMentionLoading(true);
     const timer = window.setTimeout(() => {
       void window.mixdogDesktop
-        .searchProjectFiles(projectScope, mentionMatch.query, 20)
+        .searchProjectFiles(projectScope, mentionMatch.query, 100, false, true)
         .then((paths) => {
           if (mentionSearchGeneration.current !== generation) return;
           setMentionResults(paths);
@@ -96,9 +99,11 @@ export function useComposerPalettes({
       if (mentionSearchGeneration.current === generation) mentionSearchGeneration.current += 1;
     };
   }, [mentionMatch?.end, mentionMatch?.query, mentionMatch?.start, mentionOpen, projectScope]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: slashIndex and slashCommands are the triggers that re-scroll the selected option into view
   useEffect(() => {
     if (slashOpen) scrollSelectedOptionIntoView(slashPalette);
   }, [slashIndex, slashOpen, slashCommands]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: mentionIndex and mentionResults are the triggers that re-scroll the selected option into view
   useEffect(() => {
     if (mentionOpen) scrollSelectedOptionIntoView(mentionPalette);
   }, [mentionIndex, mentionOpen, mentionResults]);

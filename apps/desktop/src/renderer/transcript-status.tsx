@@ -1,12 +1,16 @@
 import { FoldVertical, GitFork, ListTree, X } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { DesktopModelSelection } from '../shared/contract';
 import { resolveContextDisplayUsage } from './context-usage';
 import type { Snapshot, TranscriptItem } from './desktop-types';
 import { useHoverPopover } from './hover-popover';
+import { cachedAutoEffortCapable, useAutoEffortShown } from './auto-effort-store';
 import { t, uiFormatLocale } from './i18n';
+import { modelRouteDisplayParts } from './provider-display';
 import { uiCurrency } from './ui-format';
+import { liveAgentRows } from './agent-activity-model';
 import { MxIcon } from './MxIcon';
+import { goalHasBackgroundWork } from './session-goal-presentation';
 import { showDesktopToast } from './notifications';
 import { inheritSessionDirectly, sessionModelSelection, shouldOfferSessionInheritance } from './session-inheritance';
 import { asRecord, formatElapsed, publicThinkingSummary } from './text-format';
@@ -18,6 +22,12 @@ import { SPINNER_MODE_OVERRIDE_VERBS, SPINNER_VERBS, spinnerVerbFor } from '../.
 import { buildSpinnerMeta } from '../../../../src/tui/spinner-meta.mjs';
 
 const CONTEXT_USAGE_MEMORY_LIMIT = 64;
+// Clockwise r=8.5 rings around (12,12) starting at -120deg, 0deg and 120deg.
+const LIVE_ACTIVITY_ARC_PATHS = [
+  'M7.75 4.639A8.5 8.5 0 0 1 16.25 19.361A8.5 8.5 0 0 1 7.75 4.639',
+  'M20.5 12A8.5 8.5 0 0 1 3.5 12A8.5 8.5 0 0 1 20.5 12',
+  'M7.75 19.361A8.5 8.5 0 0 1 16.25 4.639A8.5 8.5 0 0 1 7.75 19.361',
+];
 const rememberedContextUsage = new Map<string, ReturnType<typeof resolveContextDisplayUsage>>();
 
 type ContextUsageMetrics = NonNullable<ReturnType<typeof resolveContextDisplayUsage>>;
@@ -70,10 +80,9 @@ export function ContextUsageIndicator({
   snapshot: Snapshot;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
-  /** Runs the handover itself (user: 팝업 안 뜨고 바로 진행되게). Inheritance is
-   *  a mechanical carry into a fresh session — so the
-   *  button IS the decision; the old dialog only restated readings this card
-   *  already shows. The host still owns opening the heir's tab. */
+  /** Runs the handover itself, with no confirmation dialog. Inheritance is a
+   *  mechanical carry into a fresh session, so the button is the decision. The
+   *  host still owns opening the heir's tab. */
   onInherit?: (sourceSessionId: string, route: DesktopModelSelection) => Promise<void>;
   onViewDetails?: () => void;
 }) {
@@ -239,7 +248,7 @@ function activityVerbPool(): string[] {
  *  status — paints nothing (LiveActivity returns null for it), so the thread
  *  must not reserve the band's 24px for it either: first entry into a stored
  *  session flashed an empty band under the settled tail and bounced the whole
- *  transcript 36px up and back (user: 세션 처음 들어갈 때 위아래로 떨린다). */
+ *  transcript 36px up and back. */
 export function commandShowsActivity(snapshot: Snapshot): boolean {
   if (snapshot.spinner && snapshot.spinner.active !== false) return true;
   const command = snapshot.commandStatus && snapshot.commandStatus.active !== false ? snapshot.commandStatus : null;
@@ -249,9 +258,11 @@ export function commandShowsActivity(snapshot: Snapshot): boolean {
 export function LiveActivity({
   snapshot,
   optimisticStartedAt = 0,
+  turnKey = '',
 }: {
   snapshot: Snapshot;
   optimisticStartedAt?: number;
+  turnKey?: string;
 }) {
   const spinner = snapshot.spinner && snapshot.spinner.active !== false ? snapshot.spinner : null;
   const command = snapshot.commandStatus && snapshot.commandStatus.active !== false ? snapshot.commandStatus : null;
@@ -272,6 +283,19 @@ export function LiveActivity({
   // do not restart the phrase rotation.
   const anchorRef = useRef(0);
   const mountedAt = useRef(Date.now());
+  const liveSessionId = String(snapshot.sessionId || '').trim();
+  useLayoutEffect(() => {
+    if (!liveSessionId || !turnKey) return;
+    liveActivityTurns.add(liveTurnKey(liveSessionId, turnKey));
+  }, [liveSessionId, turnKey]);
+  const logoGradientId = `live-logo-${useId().replace(/:/g, '')}`;
+  // Auto replaces the saved level: until the runtime resolves this turn's
+  // effort, the saved level must not stand in for it.
+  const autoShown = useAutoEffortShown(
+    cachedAutoEffortCapable(String(snapshot.provider || ''), String(snapshot.model || '')),
+    String(snapshot.effort || ''),
+    snapshot.autoEffort
+  );
   const pauseTurnRef = useRef(0);
   const pausedTotalRef = useRef(0);
   const pauseStartRef = useRef(0);
@@ -328,9 +352,26 @@ export function LiveActivity({
     thinking: Boolean(activityRecord.thinking || snapshot.thinking),
     thinkingSince: Number(activityRecord.thinkingSegmentStartedAt || 0),
     thinkingMs: Number(activityRecord.thinkingAccumulatedMs || 0),
-    effort: String(snapshot.effort || ''),
+    // What the runtime actually resolved this turn/step (Auto judge); the saved
+    // level when nothing was recorded (Auto off, or a model without it).
+    effort: String(snapshot.turnEffort || (autoShown ? '' : snapshot.effort) || ''),
   });
-  const activityMeta = [elapsed, meta.showTokens ? meta.tokensText : '', meta.thinkingText].filter(Boolean).join(' · ');
+  // The TUI formats these parts as lowercase English; the desktop translates them.
+  const thinkingLabel = (() => {
+    const parts = meta.thinkingParts as
+      | { kind: 'thinking'; effort: string }
+      | { kind: 'thought'; seconds: number }
+      | null;
+    if (!parts) return '';
+    if (parts.kind === 'thought') return t('Thought for {{seconds}}s', { seconds: parts.seconds });
+    // The effort word is an untranslated name, spelled like the model chip's.
+    const effortWord = modelRouteDisplayParts('', parts.effort).effort;
+    return effortWord
+      ? t('Thinking ({{effort}})', { effort: effortWord })
+      : t('Thinking (spinner)', { defaultValue: 'Thinking' });
+  })();
+  const tokensLabel = meta.showTokens ? t('{{tokens}} tokens', { tokens: meta.tokensCount }) : '';
+  const activityMeta = [elapsed, tokensLabel, thinkingLabel].filter(Boolean).join(' · ');
   const reasoning = publicThinkingSummary(snapshot.thinking);
   const animateEnter = startedAt > 0 && startedAt >= mountedAt.current;
   return (
@@ -342,11 +383,41 @@ export function LiveActivity({
         data-animate={animateEnter ? 'true' : undefined}
       >
         <span className="live-activity-icon" aria-hidden="true">
-          <svg className="live-activity-glyph" viewBox="0 0 12 12" aria-hidden="true">
-            <g className="live-activity-glyph-spin">
-              <path className="live-activity-glyph-ring" d="M6 .9 11.1 6 6 11.1.9 6Z" />
-              <path className="live-activity-glyph-core" d="M6 .9 11.1 6 6 11.1.9 6Z" />
+          <svg
+            className="live-activity-logo live-activity-arcs"
+            viewBox="0 0 24 24"
+            width="14"
+            height="14"
+            aria-hidden="true"
+          >
+            <defs>
+              <linearGradient id={logoGradientId} x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" />
+                <stop offset="1" />
+              </linearGradient>
+            </defs>
+            {/* Each arc is the same r=8.5 ring started 120deg apart, drawn as an
+                un-rotated path: a rotate() transform would also rotate the
+                gradient, so the arc taking over at the loop seam showed a
+                different colour and the mark flickered on every restart. */}
+            <g stroke={`url(#${logoGradientId})`}>
+              {LIVE_ACTIVITY_ARC_PATHS.map((d) => (
+                <path key={d} className="arc" d={d} pathLength="360" />
+              ))}
             </g>
+          </svg>
+          <svg
+            className="live-activity-logo live-activity-star"
+            viewBox="0 0 24 24"
+            width="14"
+            height="14"
+            aria-hidden="true"
+          >
+            <path
+              className="star"
+              fill={`url(#${logoGradientId})`}
+              d="M12 8.4Q12.6 11.4 15.6 12 12.6 12.6 12 15.6 11.4 12.6 8.4 12 11.4 11.4 12 8.4Z"
+            />
           </svg>
         </span>
         <TextShimmer text={verb} />
@@ -405,7 +476,61 @@ function translateStatusDetail(detail: unknown): string {
 
 // A completion is durable history, not an entrance event. Focus, history
 // hydration and virtual-row remounts must paint it in its final state.
-export function CompletionStatus({ item }: { item: TranscriptItem }) {
+// The core stamps no completion time on turndone rows, so "completed while the
+// user was watching" is decided by identity: a LiveActivity mounted for a session + turn records
+// that pair, and only the completion of that same pair animates. Rows restored
+// by opening or re-entering a session never had a live band in this view.
+const liveActivityTurns = new Set<string>();
+const completedActivityTurns = new Set<string>();
+const liveTurnKey = (sessionId: string, turnKey: string) => `${sessionId}\0${turnKey}`;
+
+export function completionActivityKey(sessionId: string, turnKey: string): string {
+  return sessionId && turnKey ? liveTurnKey(sessionId, turnKey) : '';
+}
+
+/** Did this mounted view show a live activity for the session's turn? */
+export function hadLiveActivity(sessionId: string, turnKey: string): boolean {
+  const key = completionActivityKey(sessionId, turnKey);
+  return Boolean(key) && liveActivityTurns.has(key) && !completedActivityTurns.has(key);
+}
+
+export type BackgroundWorkCounts = { shell: number; agent: number };
+
+/** Background work still running for the session, or undefined when none.
+ *  Same facts as goalHasBackgroundWork: shell jobs plus non-queued agents. */
+export function backgroundWorkCounts(snapshot: Snapshot): BackgroundWorkCounts | undefined {
+  const agent = liveAgentRows(snapshot).filter((row) => !row.queued).length;
+  const shell = Math.max(Number(snapshot.shellJobs?.count) || 0, snapshot.shellJobs?.jobs?.length || 0);
+  return goalHasBackgroundWork(snapshot, agent > 0) ? { shell, agent } : undefined;
+}
+
+function backgroundWaitingLabel({ shell, agent }: BackgroundWorkCounts): string {
+  if (shell > 0 && agent > 0) return t('Waiting on {{shell}} shell jobs · {{agent}} agents', { shell, agent });
+  if (shell > 0) return t('Waiting on {{shell}} shell jobs', { shell });
+  return t('Waiting on {{agent}} agents', { agent });
+}
+
+/** `animateComplete` is the caller's explicit decision (see hadLiveActivity);
+ *  consume the turn on commit, not during a render React may discard.
+ *  `backgroundWork` is passed only to the latest completion: while it holds
+ *  work the line shows a waiting state in the same row, then settles in place. */
+export function CompletionStatus({
+  item,
+  animateComplete: animate = false,
+  completionActivityKey: activityKey = '',
+  backgroundWork,
+}: {
+  item: TranscriptItem;
+  animateComplete?: boolean;
+  completionActivityKey?: string;
+  backgroundWork?: BackgroundWorkCounts;
+}) {
+  const [animateComplete] = useState(() => animate && !completedActivityTurns.has(activityKey));
+  useLayoutEffect(() => {
+    if (!activityKey) return;
+    completedActivityTurns.add(activityKey);
+    liveActivityTurns.delete(activityKey);
+  }, [activityKey]);
   const tone = completionTone(item);
   const label = String(item.label || item.status || '');
   if (item.kind === 'statusdone' && item.status === 'inherited') {
@@ -459,24 +584,59 @@ export function CompletionStatus({ item }: { item: TranscriptItem }) {
   } else {
     completionLabel = translateStatusLabel(label) || label || t('Complete');
   }
+  if (backgroundWork && backgroundWork.shell + backgroundWork.agent > 0) {
+    return (
+      <div className="turn-status complete waiting" role="status">
+        <span className="turn-status-dots" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </span>
+        <span>{backgroundWaitingLabel(backgroundWork)}</span>
+      </div>
+    );
+  }
   const displayDetail = translateStatusDetail(item.detail);
-  const autoEffort = item.kind === 'turndone' ? autoEffortLabel(item.autoEffort) : '';
   return (
-    <div className="turn-status complete" role="status">
-      <MxIcon name="check" className="turn-status-icon" size={16} />
+    <div className="turn-status complete" role="status" data-animate={animateComplete ? 'true' : undefined}>
+      {animateComplete ? (
+        <span className="turn-status-mark" aria-hidden="true">
+          {/* biome-ignore lint/a11y/noSvgWithoutTitle: decorative; the wrapping mark is aria-hidden. */}
+          <svg className="turn-status-logo" viewBox="0 0 24 24">
+            <g>
+              {[-120, 0, 120].map((rot) => (
+                <circle
+                  key={rot}
+                  className="arc"
+                  cx="12"
+                  cy="12"
+                  r="8.5"
+                  pathLength="360"
+                  transform={`rotate(${rot} 12 12)`}
+                />
+              ))}
+            </g>
+            <path className="star" d="M12 8.4Q12.6 11.4 15.6 12 12.6 12.6 12 15.6 11.4 12.6 8.4 12 11.4 11.4 12 8.4Z" />
+          </svg>
+          {/* biome-ignore lint/a11y/noSvgWithoutTitle: decorative; the wrapping mark is aria-hidden. */}
+          <svg
+            className="turn-status-icon turn-status-check mx-icon lucide-check"
+            viewBox="0 0 24 24"
+            width="16"
+            height="16"
+            fill="none"
+            stroke="currentColor"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M20 6 9 17l-5-5" pathLength="1" />
+          </svg>
+        </span>
+      ) : (
+        <MxIcon name="check" className="turn-status-icon" size={16} />
+      )}
       <span>{completionLabel}</span>
       {item.kind === 'statusdone' && displayDetail && <small>· {displayDetail}</small>}
-      {autoEffort && (
-        <small>
-          {t('Auto')} {autoEffort}
-        </small>
-      )}
     </div>
   );
-}
-
-const AUTO_EFFORT_LABELS: Record<string, string> = { low: 'Low', medium: 'Medium', high: 'High', xhigh: 'XHigh' };
-
-function autoEffortLabel(effort: unknown): string {
-  return typeof effort === 'string' ? AUTO_EFFORT_LABELS[effort] || '' : '';
 }

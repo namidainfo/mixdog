@@ -11,7 +11,7 @@ import { useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useVisibleSessions } from './use-visible-sessions';
 import { t } from './i18n';
-import { isMobileRemoteSurface } from './mobile-surface';
+import { useMobileRemoteSurface } from './mobile-surface';
 import { PaneSplitLayout } from './PaneSplitLayout';
 import {
   isConversationSelection,
@@ -30,6 +30,7 @@ import type { NavigationSelection, WorkspaceSelection } from './nav-types';
 import { paneActiveSessionIds, paneActiveSelection, paneLeavesInVisualOrder, type PaneLeaf } from './pane-layout';
 import type { usePaneWorkspace } from './pane-workspace-state';
 import { defaultSessionLaneStore } from './session-lane-store';
+import { browserTabTitle } from './text-format';
 import type { DropPreview } from './pane-drop-intent';
 
 export { resolvePaneDropIntent } from './pane-drop-intent';
@@ -53,6 +54,8 @@ function selectionLabel(selection: WorkspaceSelection | null): string {
       return t('Studio');
     case 'terminal':
       return t('Terminal');
+    case 'browser':
+      return browserTabTitle(selection);
     case 'pull-request':
       return selection.title || t('Pull Request #{{number}}', { number: selection.number });
     case 'diff':
@@ -142,7 +145,7 @@ export function PaneWorkspace({
   // A phone shows ONE tab at a time and pays for every mirrored session over
   // the relay, so restored background tabs stay unregistered until opened
   // (user: vps라 비용때문에). Wide surfaces keep every pane tab observable.
-  const mobileSurface = isMobileRemoteSurface();
+  const mobileSurface = useMobileRemoteSurface();
   const paneSessionIds = mobileSurface
     ? mobileVisibleSessionIds(workspace.leaves, workspace.focusedLeafId)
     : paneActiveSessionIds(workspace.leaves, workspace.focusedLeafId);
@@ -309,6 +312,8 @@ export function PaneWorkspace({
       {renderStrip?.(leaf)}
       {renderPaneSurfaceStack(leaf, focused)}
       {renderProblems?.(leaf, focused)}
+      {/* Main-tab file footer (EditorPane portals into it): the sheet's last row. */}
+      <div className="pane-footer-slot" />
       {renderSideDock?.(leaf, focused)}
     </>
   );

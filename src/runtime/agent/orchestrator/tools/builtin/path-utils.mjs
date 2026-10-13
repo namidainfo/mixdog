@@ -1,6 +1,7 @@
 import { homedir } from 'node:os';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { realpath } from 'node:fs/promises';
+import { existsSync, realpathSync } from 'node:fs';
 import { isWSL } from '../../../../shared/wsl.mjs';
 
 // Restore the on-disk casing of a path (win32 only). rg relativizes candidate
@@ -48,6 +49,13 @@ function windowsPathToPosixPath(winPath) {
   return winPath;
 }
 
+// http(s):// URLs are not file paths; the generic path guards would reject
+// them with a misleading ADS/trailing-dot message. Returns an error message or null.
+export function urlAsPathMessage(p) {
+  if (typeof p !== 'string' || !/^\s*https?:\/\//i.test(p)) return null;
+  return 'this is a URL; use web_fetch';
+}
+
 export function normalizeInputPath(p) {
   if (typeof p !== 'string') return p;
   // Trim leading/trailing whitespace — LLMs intermittently emit paths with
@@ -68,6 +76,10 @@ export function normalizeInputPath(p) {
     const looksUnc = out.startsWith('//');
     if (looksPosixDrive || looksCygdrive || looksWsl || looksUnc) {
       out = posixPathToWindowsPath(out);
+    } else if (/^\/[a-zA-Z]:[\\/]/.test(out)) {
+      // `/C:/x/y` or `/C:\x\y`: a stray leading slash before a drive letter.
+      // Left as-is, the guard reads `C:` as a component carrying an NTFS ADS colon.
+      out = `${out[1]}:\\${out.slice(4).replace(/\//g, '\\')}`;
     }
   } else if (isWSL()) {
     // Reverse direction: a Windows-style drive path from the host maps to
@@ -321,6 +333,66 @@ function compactReadRangeTuple(value) {
     offset: value[1],
     ...(value.length === 3 ? { limit: value[2] } : {}),
   };
+}
+
+const JOINED_PATH_KEYS = { read: ['path', 'file_path'], grep: ['path', 'root'], glob: ['path', 'root'] };
+const JOINED_PATH_LIMIT = 10;
+
+// One string that joins several paths with commas/whitespace. A string that
+// is itself an existing path is left alone (so `C:\Program Files\x` works);
+// otherwise, when EVERY piece exists, it becomes a path array. Anything else
+// is left for the normal not-found error (which carries the array hint).
+// A split never widens scope: every piece must resolve strictly INSIDE the
+// session working directory (the project root). `.`, `..`, the directory
+// itself, its ancestors and anything outside it keep the string unsplit and
+// return the array hint instead.
+// Residual ambiguity (accepted): a missing filename that contains spaces or
+// commas, whose pieces all happen to exist as separate in-project paths, is
+// read as those pieces rather than reported missing.
+// Returns an error message when the split is refused or exceeds the batch
+// limit, else null.
+export function splitJoinedPathScopes(toolName, args, workDir) {
+  const keys = JOINED_PATH_KEYS[toolName];
+  if (!keys || !args || typeof args !== 'object' || Array.isArray(args)) return null;
+  const exists = (p) => {
+    try {
+      return existsSync(resolveAgainstCwd(normalizeInputPath(p), workDir));
+    } catch {
+      return false;
+    }
+  };
+  // Containment is judged on REAL targets: a symlink/junction inside the
+  // directory that points outside it is outside.
+  const realOrNull = (p) => {
+    try {
+      return realpathSync.native(p);
+    } catch {
+      return null;
+    }
+  };
+  const realRoot = realOrNull(resolve(workDir));
+  const strictlyInside = (p) => {
+    const piece = normalizeInputPath(p);
+    if (piece === '.' || piece === '..' || !realRoot) return false;
+    const target = realOrNull(resolveAgainstCwd(piece, workDir));
+    if (!target) return false;
+    const rel = relative(realRoot, target);
+    return Boolean(rel) && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+  };
+  for (const key of keys) {
+    const value = args[key];
+    if (typeof value !== 'string' || !/[\s,]/.test(value.trim()) || exists(value)) continue;
+    const pieces = value.split(/[\s,]+/).filter(Boolean);
+    if (pieces.length < 2 || !pieces.every(exists)) continue;
+    if (!pieces.every(strictlyInside)) {
+      return `Error: ${toolName} arg "${key}" joins several paths in one string, and one is ".", "..", a parent of the working directory or outside it, so it is not split automatically. To pass several paths, send an array (path[]), not a comma- or space-joined string.`;
+    }
+    if (pieces.length > JOINED_PATH_LIMIT) {
+      return `Error: ${toolName} arg "${key}" joins ${pieces.length} paths in one string (${pieces.length} given, max ${JOINED_PATH_LIMIT}); split or pass the parent directory.`;
+    }
+    args[key] = pieces;
+  }
+  return null;
 }
 
 export function coerceReadFamilyPathArg(path) {

@@ -1,0 +1,489 @@
+/* Tab strip shared by the browser pane and the session terminal. Its tabs
+   follow the workspace pane strip (04-workspace-tabs.css): flat cells with a
+   rounded plate, short seams between neighbours, and the + docked right
+   after the last tab; trailing controls sit at the far right. */
+
+.browser-tab-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  min-width: 0;
+  flex: none;
+  height: 38px;
+  padding: 0 6px 0 0;
+  border-bottom: 1px solid var(--mx-border-muted);
+}
+
+.browser-tab-list {
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  height: 100%;
+  gap: 0;
+  /* Like .workspace-tabs.drag-scroll: scrolls when tabs hit their floor, with
+     the scrollbar fully hidden (it used to eat row height and push tabs up). */
+  overflow-x: scroll;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.browser-tab-list::-webkit-scrollbar {
+  display: none;
+}
+
+.browser-tab {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 1 160px;
+  /* Pane tab floors (.workspace-tab): inactive 30px, active 56px. */
+  min-width: 30px;
+  height: 100%;
+  overflow: hidden;
+  padding: 0 9px 0 12px;
+  color: var(--mx-tab-idle-ink);
+  background: linear-gradient(var(--mx-border-structure), var(--mx-border-structure)) right center / 1px 16px no-repeat;
+}
+.browser-tab:last-child {
+  background-image: none;
+}
+/* 30px plate in the 38px row; idle tabs rest on a faint plate. */
+.browser-tab::before {
+  content: "";
+  position: absolute;
+  inset: 4px 3px;
+  z-index: -1;
+  border-radius: var(--mx-radius-md);
+  background: color-mix(in srgb, var(--mx-text) 3%, transparent);
+  pointer-events: none;
+}
+.browser-tab:first-child {
+  padding-left: 13px;
+}
+.browser-tab:first-child::before {
+  left: 4px;
+}
+.browser-tab:not(.is-active):is(:hover, :focus-within)::before {
+  background: var(--mx-hover);
+}
+
+.browser-tab.is-active {
+  min-width: 56px;
+  color: var(--mx-text);
+}
+.browser-tab.is-active::before {
+  background: color-mix(in srgb, var(--mx-text) 14%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--mx-text) 18%, transparent);
+}
+:root[data-mixdog-theme="light"] .browser-tab.is-active::before {
+  background: color-mix(in srgb, var(--mx-text) 10%, transparent);
+  box-shadow: none;
+}
+
+.browser-tab-trailing {
+  margin-left: auto;
+}
+
+.browser-tab-select,
+.browser-tab-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.browser-tab-select {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  gap: 4px;
+  padding: 0;
+  font-size: var(--mx-font-item);
+  font-weight: var(--mx-weight-regular);
+  line-height: var(--mx-line-ui);
+}
+.browser-tab.is-active .browser-tab-select {
+  font-weight: var(--mx-weight-medium);
+}
+
+/* Icon tier of .workspace-tab-main > svg. */
+.browser-tab-select svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  color: currentColor;
+}
+.browser-tab-select svg.lucide {
+  stroke-width: 1.5px;
+}
+/* The site icon takes the glyph's slot at 14px, rounded like inline links. */
+.browser-tab-favicon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  margin: 0 0.5px;
+  border-radius: 3px;
+  object-fit: contain;
+}
+.browser-tab-select span {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.browser-tab-select small {
+  flex: none;
+  color: var(--mx-text-faint);
+}
+/* X and + follow the workspace pane strip (04-workspace-tabs.css) in size and
+   ink, but every tab — the selected one included — shows its X only under
+   the pointer or keyboard, keeping its slot; both marks share a 1.5px line. */
+.browser-tab-close {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  padding: 0;
+  border-radius: var(--mx-radius-sm);
+  color: var(--mx-text);
+  transition: opacity var(--mx-motion-ink);
+}
+.browser-tab:not(:hover):not(:has(:focus-visible)) .browser-tab-close {
+  opacity: 0;
+}
+.browser-tab-close svg {
+  width: 16px;
+  height: 16px;
+}
+.browser-tab-close svg.lucide {
+  stroke-width: 1.5px;
+}
+/* ＋ follows the pane strip's +: 15px on a 1.5px line in a 24px plate. */
+.browser-tab-new svg.lucide {
+  width: 15px;
+  height: 15px;
+  stroke-width: 1.5px;
+}
+.browser-tab-close:hover {
+  background: var(--mx-hover);
+  color: var(--mx-text);
+}
+/* The + hit box fills the strip row; the hover pill is drawn on the glyph. */
+.browser-tab-new {
+  width: 30px;
+  flex: 0 0 30px;
+  align-self: stretch;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--mx-text);
+  cursor: pointer;
+}
+.browser-tab-new svg {
+  box-sizing: content-box;
+  padding: 4.5px;
+  border-radius: var(--mx-radius-md);
+}
+.browser-tab-new:hover:not(:disabled) svg,
+.browser-tab-new:focus-visible svg {
+  background: var(--mx-hover);
+}
+.browser-tab-new:focus-visible {
+  outline: 0;
+}
+.browser-tab-new:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.browser-tab-select:focus-visible,
+.browser-tab-close:focus-visible {
+  outline: 2px solid var(--mx-focus);
+  outline-offset: -2px;
+}
+
+.browser-pane-nav-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--mx-radius-md);
+  background: transparent;
+  color: var(--mx-text-muted);
+  cursor: pointer;
+  flex: none;
+}
+
+.browser-pane-nav-button:hover:not(:disabled) {
+  background: var(--mx-hover);
+  color: var(--mx-text);
+}
+
+/* Side-dock strip (file, diff): one chip, so it shrinks before the actions do
+   and never grows the thin overflow scroller the multi-tab strips use. */
+.browser-tab-toolbar[data-side-dock-strip] .browser-tab-list {
+  overflow-x: hidden;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.browser-tab-toolbar[data-side-dock-strip] .browser-tab,
+.browser-tab-toolbar[data-side-dock-strip] .browser-tab.is-active {
+  min-width: 0;
+}
+.browser-tab-toolbar[data-side-dock-strip] .browser-tab-trailing {
+  flex: none;
+}
+/* Side-dock file strip: its actions share the strip's trailing slot. */
+.side-file-strip-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.browser-pane-nav-button.side-strip-text-button {
+  width: auto;
+  padding: 0 8px;
+  font-size: var(--mx-font-meta);
+}
+.side-strip-text-button[aria-pressed="true"] {
+  background: var(--mx-hover);
+  color: var(--mx-text);
+}
+
+.browser-pane-nav-button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* ── Dock header row (pane-dock-chrome.tsx) ──
+   ONE row per side surface. Its height is --mx-dock-header-height (44px: level
+   with the pane tab strip row). */
+.dock-header-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  min-width: 0;
+  height: var(--mx-dock-header-height, 44px);
+  padding: 0 6px 0 8px;
+  /* No rule under the header: content starts directly beneath it. A divider
+     belongs to a second top row (the browser nav row), not to this one. */
+  border-bottom: 0;
+}
+.dock-header-left {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+}
+.dock-header-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+/* Header buttons mirror .pane-dock-toggle (22-markdown.css): a 28px slot,
+   --mx-radius-md plate, 15px lucide mark on a 1.5px stroke, muted idle ink,
+   full ink + --mx-hover plate on hover/focus, --mx-pressed when pressed. */
+.dock-header-controls .browser-pane-nav-button {
+  display: grid;
+  place-items: center;
+  flex: 0 0 28px;
+  padding: 0;
+}
+.dock-header-controls .browser-pane-nav-button svg.lucide,
+.browser-pane-toolbar:not(.browser-remote-pane .browser-pane-toolbar) .browser-pane-nav-button svg.lucide {
+  width: 15px;
+  height: 15px;
+  stroke-width: 1.5px;
+}
+.dock-header-controls .browser-pane-nav-button:focus-visible {
+  color: var(--mx-text);
+  background: var(--mx-hover);
+  outline: none;
+}
+.dock-header-controls .browser-pane-nav-button[aria-pressed="true"] {
+  color: var(--mx-text);
+  background: var(--mx-pressed);
+}
+.dock-header-title {
+  padding: 0 2px;
+  color: var(--mx-text);
+  font-size: var(--mx-rail-panel-title, 13px);
+  font-weight: var(--mx-weight-semibold);
+  white-space: nowrap;
+}
+/* The file chip IS a `.browser-tab.is-active` (same plate, font, weight, ink and
+   icon size as the pane workspace tabs); only its width floor is released. */
+.dock-header-chip {
+  min-width: 0;
+  height: 100%;
+  flex: 0 1 160px;
+  padding-right: 12px;
+}
+.dock-header-chip .browser-tab-select {
+  cursor: default;
+}
+/* Side-dock file tabs: a preview tab (the next link replaces it) is italic,
+   like a preview tab in the pane workspace strip. */
+.browser-tab.is-preview .browser-tab-select span {
+  font-style: italic;
+}
+/* Tab strips (browser, terminal) sit in the left slot: the row owns the height
+   and the rule, and the tab plates shrink to chip height. */
+.dock-header-row .browser-tab-toolbar {
+  flex: 0 1 auto;
+  height: 100%;
+  padding: 0;
+  border-bottom: 0;
+}
+/* Same 30px plate as .pane-cell .workspace-tab::before, centred in the row. */
+.dock-header-row .browser-tab::before {
+  inset: 7px 3px;
+}
+.dock-header-menu-host {
+  position: relative;
+}
+/* Portalled to <body>; top / bottom / right / max-height come from the ⋯
+   button's rect (dockMenuPlacement), so no clipping ancestor reaches it. */
+.dock-header-menu {
+  position: fixed;
+  z-index: var(--mx-menu-z-index, 60);
+  box-sizing: border-box;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  min-width: 200px;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  border: 1px solid var(--mx-border);
+  border-radius: var(--mx-radius-md);
+  background: var(--mx-sheet-ink, var(--mx-workspace-sheet));
+  box-shadow: var(--mx-overlay);
+}
+.dock-header-menu > button {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--mx-radius-sm);
+  background: transparent;
+  color: var(--mx-text);
+  font-size: var(--mx-font-minor);
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.dock-header-menu > button:hover:not(:disabled) {
+  background: var(--mx-hover);
+}
+.dock-header-menu > button:disabled {
+  color: var(--mx-text-muted);
+  cursor: default;
+}
+.dock-header-menu > button.has-separator {
+  margin-top: 5px;
+  position: relative;
+}
+.dock-header-menu > button.has-separator::before {
+  content: "";
+  position: absolute;
+  top: -3px;
+  left: 4px;
+  right: 4px;
+  height: 1px;
+  background: var(--mx-border-muted);
+}
+.dock-header-menu-detail {
+  margin-left: auto;
+  padding-left: 12px;
+  color: var(--mx-text-muted);
+  font-size: var(--mx-font-meta);
+}
+.dock-header-menu-glyph {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 14px;
+  color: var(--mx-text-muted);
+}
+/* The phone sheet keeps its own dock header and X. */
+html[data-mixdog-mobile-tabs] .dock-header-close {
+  display: none;
+}
+
+/* ── Side file footer / status bar (side-file-status-row.tsx) ──
+   Last row of the side file card, inside the rounded sheet (the card clips its
+   bottom corners): fixed 24px, top hairline, no background of its own, small
+   muted tabular text and compact hover-only hit targets. */
+.side-file-status-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  height: 24px;
+  min-width: 0;
+  padding: 0 6px;
+  border-top: 1px solid var(--mx-border);
+  background: transparent;
+  color: var(--mx-text-muted);
+  font-size: var(--mx-font-micro);
+  font-variant-numeric: tabular-nums;
+}
+.side-file-status-items {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+.side-file-status-items button {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: var(--mx-radius-sm, 4px);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.side-file-status-items button:hover,
+.side-file-status-items button:focus-visible {
+  background: var(--mx-hover);
+  color: var(--mx-text);
+  outline: none;
+}
+.side-file-status-problems {
+  gap: 6px;
+  min-width: 52px;
+}
+.side-file-status-cursor {
+  min-width: 36px;
+  justify-content: center;
+  font-variant-numeric: tabular-nums;
+}
+.side-file-status-language,
+.side-file-status-size {
+  white-space: nowrap;
+}
+.side-file-status-size {
+  padding: 0 4px;
+}

@@ -10,6 +10,7 @@ import type {
   DesktopSubmitOptions,
   SessionSnapshot,
 } from '../shared/contract';
+import { type RouteSpeed, speedRouteFields } from './model-route-utils';
 import {
   resolveDesktopSlashCommand,
   type CommandSurface as CommandSurfaceName,
@@ -26,9 +27,13 @@ type SlashExecutorDeps = {
   effort: string;
   fast: boolean;
   fastCapable: boolean;
+  /** The route's own Auto reasoning flag; absent means on. */
+  autoEffort?: boolean;
   modelParameters?: Record<string, string>;
+  /** Whether the current model offers the Ultrafast service tier. */
+  ultrafastCapable?: () => boolean;
   onDraftModelSelection?: (selection: DesktopModelSelection) => void;
-  onRoutePreferenceApplied?: (selection: DesktopModelSelection) => void;
+  onRoutePreferenceApplied?: (selection: DesktopModelSelection, options?: { modelChoice?: boolean }) => void;
   invokeResult: <T>(action: () => T | Promise<T>) => Promise<T | undefined>;
   invokeCapabilityResult: <T>(
     capability: DesktopCapability,
@@ -40,6 +45,8 @@ type SlashExecutorDeps = {
   clearNotice: () => void;
   showNotice: (message: string) => void;
   openGoalDialog: () => void;
+  /** /skills opens the composer's add menu, where a skill is picked for the next message. */
+  openSkillMenu: () => void;
   onNewTask: () => void;
   onClearToNewTask?: () => void;
   onResumeSession: (id: string) => void;
@@ -109,6 +116,7 @@ async function runSlashCommand(
   else if (name === 'effort' && argument) await runEffort(run, argument);
   else if (name === 'model') deps.onOpenSettings('model');
   else if (name === 'usage') await runUsage(run, argument);
+  else if (name === 'skills') deps.openSkillMenu();
   else if (command.surface) deps.onOpenCommandSurface(command.surface);
   else if (command.settingsRow) deps.onOpenSettings(command.settingsRow);
   return undefined;
@@ -139,13 +147,18 @@ async function commandCapability<T>(run: SlashRun, capability: DesktopCapability
   return result.value;
 }
 
-function modelSelection(deps: SlashExecutorDeps, patch: { effort?: string; fast?: boolean }): DesktopModelSelection {
-  const { provider, model, effort, modelParameters } = deps;
+function modelSelection(
+  deps: SlashExecutorDeps,
+  patch: { effort?: string; fast?: boolean; modelParameters?: Record<string, string> }
+): DesktopModelSelection {
+  const { provider, model, effort } = deps;
+  const { modelParameters = deps.modelParameters, ...rest } = patch;
   return {
     provider,
     model,
     effort,
-    ...patch,
+    ...rest,
+    ...(typeof deps.autoEffort === 'boolean' ? { autoEffort: deps.autoEffort } : {}),
     ...(modelParameters && Object.keys(modelParameters).length ? { modelParameters } : {}),
   };
 }
@@ -239,33 +252,50 @@ async function runUsage(run: SlashRun, argument: string) {
   if (['refresh', '--refresh', '-r', 'true'].includes(argument.toLowerCase())) {
     await commandCapability(run, 'getUsageDashboard', [{ refresh: true }]);
   }
-  run.deps.onOpenCommandSurface('usage');
+  run.deps.onOpenCommandSurface('stats');
 }
 
-function parseFastArgument(argument: string, current: boolean): boolean | null {
+export function parseFastArgument(argument: string, current: boolean): RouteSpeed | null {
   const value = argument.toLowerCase();
-  if (!value) return !current;
-  if (['1', 'true', 'yes', 'on', 'enable', 'enabled'].includes(value)) return true;
-  if (['0', 'false', 'no', 'off', 'disable', 'disabled'].includes(value)) return false;
+  if (!value) return current ? 'standard' : 'fast';
+  if (['1', 'true', 'yes', 'on', 'enable', 'enabled'].includes(value)) return 'fast';
+  if (['0', 'false', 'no', 'off', 'disable', 'disabled'].includes(value)) return 'standard';
+  if (value === 'ultra') return 'ultrafast';
   return null;
 }
 
 async function runFast(run: SlashRun, argument: string): Promise<boolean | undefined> {
   const { deps } = run;
-  const nextFast = parseFastArgument(argument, deps.fast);
-  if (nextFast === null) {
-    deps.setAttachmentError('Usage: /fast [on|off]');
+  const speed = parseFastArgument(argument, deps.fast);
+  if (speed === null) {
+    deps.setAttachmentError('Usage: /fast [on|off|ultra]');
     return false;
   }
+  const offersTier = deps.ultrafastCapable?.() === true;
+  if (speed === 'ultrafast' && !offersTier) {
+    deps.setAttachmentError('Ultrafast is not available for the current model.');
+    return false;
+  }
+  const nextFast = speed !== 'standard';
+  const route = speedRouteFields(speed, deps.modelParameters || {}, offersTier);
+  const selection = modelSelection(deps, { fast: nextFast, modelParameters: route.modelParameters });
   if (deps.draftMode && deps.onDraftModelSelection && deps.provider && deps.model) {
-    deps.onDraftModelSelection(modelSelection(deps, { fast: nextFast }));
+    deps.onDraftModelSelection(selection);
+  } else if (offersTier && deps.provider && deps.model) {
+    const next = await deps.invokeResult(() =>
+      window.mixdogDesktop.setModelRoute(selection, deps.sessionId || undefined)
+    );
+    if (next === undefined) return false;
+    deps.applySnapshot(next);
+    deps.onRoutePreferenceApplied?.(selection);
   } else {
     const next = await deps.invokeResult(() => window.mixdogDesktop.setFast(nextFast, deps.sessionId || undefined));
     if (next === undefined) return false;
     deps.applySnapshot(next);
-    if (deps.provider && deps.model) deps.onRoutePreferenceApplied?.(modelSelection(deps, { fast: nextFast }));
+    if (deps.provider && deps.model) deps.onRoutePreferenceApplied?.(selection);
   }
-  deps.showNotice(`Fast mode ${nextFast ? 'on' : 'off'}`);
+  const labels = { standard: 'off', fast: 'on', ultrafast: 'ultra' };
+  deps.showNotice(speed === 'ultrafast' ? 'Ultrafast mode on' : `Fast mode ${labels[speed]}`);
   return undefined;
 }
 
@@ -318,6 +348,7 @@ async function runModel(run: SlashRun, argument: string): Promise<boolean | unde
   const next = await deps.invokeResult(() => window.mixdogDesktop.setModelRoute(selection, sessionId));
   if (next === undefined) return false;
   deps.applySnapshot(next);
-  deps.onRoutePreferenceApplied?.(selection);
+  const sameModel = match.provider === deps.provider && match.model === deps.model;
+  deps.onRoutePreferenceApplied?.(selection, sameModel ? undefined : { modelChoice: true });
   return undefined;
 }

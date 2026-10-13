@@ -26,6 +26,11 @@ on:
         required: false
         type: boolean
         default: true
+      mobile_version:
+        description: "Android app version X.Y.Z to publish as mobile-vX.Y.Z before the relay deploy; empty for none"
+        required: false
+        type: string
+        default: ""
     secrets:
       NPM_TOKEN:
         required: true
@@ -53,10 +58,22 @@ on:
         required: false
       AZURE_CLIENT_SECRET:
         required: false
+      # Android APK signing and Firebase config; only read with mobile_version.
+      ANDROID_KEYSTORE_B64:
+        required: false
+      ANDROID_KEYSTORE_PASSWORD:
+        required: false
+      ANDROID_KEY_ALIAS:
+        required: false
+      ANDROID_KEY_PASSWORD:
+        required: false
+      FIREBASE_GOOGLE_SERVICES_JSON_B64:
+        required: false
 
+# Read-only by default; jobs that create/publish releases or use npm
+# provenance raise their own permissions.
 permissions:
-  contents: write # version commit, tag push, release creation
-  id-token: write # npm --provenance
+  contents: read
 
 concurrency:
   group: release
@@ -69,11 +86,13 @@ jobs:
   identity:
     name: validate-release-identity
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ inputs.ref || github.ref }}
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -105,11 +124,13 @@ jobs:
     name: validate-and-stage-npm
     needs: identity
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ inputs.ref || github.ref }}
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -161,6 +182,13 @@ jobs:
           npm test
           npm run smoke:patch
 
+      # `npm pack --ignore-scripts` below skips prepack, so the shipped-history
+      # generation never runs there: fail instead when the committed file is
+      # stale (needs the full history fetched above; a shallow clone is skipped
+      # by the script's own guard).
+      - name: Verify shipped definition history is current
+        run: node scripts/build-shipped-history.mjs --check
+
       - name: Pack staged npm release
         id: pack
         shell: bash
@@ -184,12 +212,14 @@ jobs:
   desktop-build:
     name: build-desktop-once
     runs-on: ubuntu-22.04
+    timeout-minutes: 60
     env:
       NODE_OPTIONS: --max-old-space-size=6144
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
 
       # The lock file cannot enter this key through hashFiles: Deploy rewrites
       # its version field one job earlier, which missed the cache on every
@@ -204,13 +234,20 @@ jobs:
             apps/desktop/package-lock.json)" >> "$GITHUB_OUTPUT"
 
       # Key mirrored in release-gate.yml, which warms it on every main push.
+      # The renderer bundles CHANGELOG.md and the desktop package version
+      # (Settings > About > changelog), so both belong in the key: the
+      # release commit Deploy stamps must rebuild instead of reusing the
+      # gate's pre-release output.
       - name: Restore unchanged desktop output
         id: desktop-out
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: apps/desktop/out
           key: >-
-            desktop-out-v3-${{ steps.desktop-key.outputs.manifest }}-${{ hashFiles(
+            desktop-out-v4-${{ steps.desktop-key.outputs.manifest }}-${{ hashFiles(
+              'CHANGELOG.md',
+              'changelog/*.md',
+              'apps/desktop/package.json',
               'apps/desktop/src/**',
               '!apps/desktop/src/**/*.test.mjs',
               '!apps/desktop/src/**/*.test.jsx',
@@ -231,13 +268,30 @@ jobs:
 
       - name: Install build dependencies
         if: steps.desktop-out.outputs.cache-hit != 'true'
+        # The two trees are independent, so they install side by side; each
+        # PID is waited on so either failure fails the step.
         run: |
-          npm ci --prefer-offline --no-audit --no-fund
-          npm ci --prefix apps/desktop --prefer-offline --no-audit --no-fund
+          npm ci --prefer-offline --no-audit --no-fund &
+          root_pid=$!
+          npm ci --prefix apps/desktop --prefer-offline --no-audit --no-fund &
+          desktop_pid=$!
+          status=0
+          wait "$root_pid" || status=1
+          wait "$desktop_pid" || status=1
+          exit "$status"
 
+      # `npm run build` is typecheck && build:fast in sequence. The typecheck
+      # emits nothing the build reads, so it runs beside build:fast; the step
+      # still fails if either does, and the output is cached only on success.
       - name: Build platform-neutral desktop output
         if: steps.desktop-out.outputs.cache-hit != 'true'
-        run: npm run build --prefix apps/desktop
+        run: |
+          npm run typecheck --prefix apps/desktop &
+          typecheck_pid=$!
+          status=0
+          npm run build:fast --prefix apps/desktop || status=1
+          wait "$typecheck_pid" || status=1
+          exit "$status"
 
       - name: Stage common desktop output
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -254,6 +308,7 @@ jobs:
     name: prepare-hidden-release
     needs: [identity]
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     permissions:
       contents: write
     outputs:
@@ -314,8 +369,43 @@ jobs:
       APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
       APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
 
-  desktop-linux-x64:
+  desktop-darwin-x64:
     needs: [desktop-build, prepare-github-release]
+    uses: ./.github/workflows/desktop-package.yml
+    permissions:
+      contents: write
+    with:
+      ref: ${{ inputs.ref || github.ref }}
+      tag: ${{ inputs.tag || github.ref_name }}
+      release_id: ${{ needs.prepare-github-release.outputs.release_id }}
+      runner: macos-15-intel
+      platform: darwin
+      arch: x64
+      artifact_arch: x64
+      target: mac
+    secrets:
+      MAC_CERTIFICATE_P12_BASE64: ${{ secrets.MAC_CERTIFICATE_P12_BASE64 }}
+      MAC_CERTIFICATE_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
+      APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+
+  # mixdog-computer/-graph/-patch built in manylinux_2_28 (glibc 2.28), so the
+  # native tools do not follow the package runner's glibc. The shipped Linux
+  # package floor is glibc 2.31 (runtime built on ubuntu:20.04), enforced by
+  # the payload checks. This is the single producer of the
+  # native-tools-glibc228-<arch> artifacts in this run: linux-verify-full
+  # consumes them (native_tools_prebuilt) instead of building again.
+  linux-native-tools:
+    needs: [identity]
+    uses: ./.github/workflows/linux-native-tools.yml
+    permissions:
+      contents: read
+    with:
+      ref: ${{ inputs.ref }}
+
+  desktop-linux-x64:
+    needs: [desktop-build, prepare-github-release, linux-native-tools]
     uses: ./.github/workflows/desktop-package.yml
     permissions:
       contents: write
@@ -330,7 +420,7 @@ jobs:
       target: linux
 
   desktop-linux-arm64:
-    needs: [desktop-build, prepare-github-release]
+    needs: [desktop-build, prepare-github-release, linux-native-tools]
     uses: ./.github/workflows/desktop-package.yml
     permissions:
       contents: write
@@ -344,10 +434,39 @@ jobs:
       artifact_arch: arm64
       target: linux
 
+  # Full Linux verification (update proof, sandbox .deb, distro containers,
+  # native-tool exec matrix) gates publication.
+  linux-verify-full:
+    needs: [identity, linux-native-tools]
+    uses: ./.github/workflows/linux-desktop-verify.yml
+    permissions:
+      contents: read
+    with:
+      full: true
+      native_tools_prebuilt: true
+      # Every checkout inside the called workflow uses this exact commit
+      # (and asserts HEAD == ref), not the caller's default-branch sha.
+      ref: ${{ inputs.ref }}
+
+  # The commit the Linux verification actually checked out must be the release commit.
+  linux-verify-sha-gate:
+    needs: [linux-verify-full]
+    runs-on: ubuntu-22.04
+    steps:
+      - env:
+          VERIFIED: ${{ needs.linux-verify-full.outputs.verified_sha }}
+          RELEASE_SHA: ${{ inputs.ref }}
+        run: |
+          echo "verified: $VERIFIED"
+          echo "release:  $RELEASE_SHA"
+          test -n "$VERIFIED"
+          test "$VERIFIED" = "$RELEASE_SHA"
+
   publish:
     name: publish-staged-release
-    needs: [validate, prepare-github-release, desktop-windows, desktop-darwin-arm64, desktop-linux-x64, desktop-linux-arm64]
+    needs: [validate, prepare-github-release, desktop-windows, desktop-darwin-arm64, desktop-darwin-x64, desktop-linux-x64, desktop-linux-arm64, linux-verify-full, linux-verify-sha-gate]
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     permissions:
       contents: write
       id-token: write
@@ -355,6 +474,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
 
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -366,6 +486,27 @@ jobs:
         with:
           name: npm-package
           path: staged-npm
+
+      # electron-updater on macOS reads one latest-mac.yml, but each macOS job
+      # builds a single architecture and so emits a feed for its own zip only.
+      # Merge both into the one feed and add it to the hidden draft.
+      - name: Download macOS update feeds
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: desktop-mac-feed-*
+          path: mac-feeds
+
+      - name: Merge and upload macOS update feed
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          RELEASE_ID: ${{ needs.prepare-github-release.outputs.release_id }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/merge-mac-update-feed.mjs --version="${RELEASE_TAG#v}" --out=latest-mac.yml \
+            mac-feeds/desktop-mac-feed-arm64/latest-mac.yml mac-feeds/desktop-mac-feed-x64/latest-mac.yml
+          bash .github/scripts/upload-release-assets.sh latest-mac.yml
 
       - name: Verify complete hidden release
         env:
@@ -401,20 +542,75 @@ jobs:
             throw new Error('Hidden GitHub release identity no longer matches this immutable build');
           }
 
-          const expected = [
-            'latest.yml',
-            'mixdog-desktop-linux-arm64.AppImage',
-            'mixdog-desktop-linux-x86_64.AppImage',
-            'mixdog-desktop-mac-arm64.dmg',
-            'mixdog-desktop-mac-arm64.zip',
-            'mixdog-desktop-win-x64.exe',
-            'mixdog-desktop-win-x64.exe.blockmap',
-          ].sort();
+          // Per-platform requirements. The publish job already needs every
+          // desktop package job, so each group is an explicit part of the
+          // release contract rather than a side effect of another platform.
+          const requirements = {
+            windows: [
+              'latest.yml',
+              'mixdog-desktop-win-x64.exe',
+              'mixdog-desktop-win-x64.exe.blockmap',
+            ],
+            // latest-mac.yml is merged from both architectures' feeds by the
+            // publish job; the zip blockmaps serve the differential updater.
+            macos: [
+              'latest-mac.yml',
+              'mixdog-desktop-mac-arm64.dmg',
+              'mixdog-desktop-mac-arm64.zip',
+              'mixdog-desktop-mac-arm64.zip.blockmap',
+              'mixdog-desktop-mac-x64.dmg',
+              'mixdog-desktop-mac-x64.zip',
+              'mixdog-desktop-mac-x64.zip.blockmap',
+            ],
+            // electron-updater reads latest-linux*.yml; a .deb install uses
+            // DebUpdater, which downloads the .deb named in that feed.
+            linux: [
+              'latest-linux.yml',
+              'latest-linux-arm64.yml',
+              'mixdog-desktop-linux-arm64.AppImage',
+              'mixdog-desktop-linux-arm64.deb',
+              'mixdog-desktop-linux-x86_64.AppImage',
+              'mixdog-desktop-linux-amd64.deb',
+            ],
+          };
+          const expected = Object.values(requirements).flat().sort();
           const assets = JSON.parse(readFileSync('/tmp/assets.json', 'utf8')).flat();
           const actual = assets.map(asset => asset.name).sort();
+          for (const [platform, names] of Object.entries(requirements)) {
+            const missing = names.filter(name => !actual.includes(name));
+            if (missing.length) {
+              throw new Error(`Hidden release is missing ${platform} assets: ${missing.join(', ')}`);
+            }
+          }
           if (new Set(actual).size !== actual.length
               || JSON.stringify(actual) !== JSON.stringify(expected)) {
             throw new Error(`Hidden release asset set is not exact: ${JSON.stringify(actual)}`);
+          }
+          // Every file a Linux update feed points at must be a draft asset,
+          // and each feed must offer both the AppImage and the .deb.
+          for (const feedName of ['latest-linux.yml', 'latest-linux-arm64.yml']) {
+            const feedAsset = assets.find(asset => asset.name === feedName);
+            const response = await fetch(feedAsset.url, {
+              headers: {
+                Authorization: `Bearer ${process.env.GH_TOKEN}`,
+                Accept: 'application/octet-stream',
+              },
+            });
+            if (!response.ok) throw new Error(`Cannot read ${feedName}: HTTP ${response.status}`);
+            const feed = await response.text();
+            const referenced = new Set(
+              [...feed.matchAll(/^\s*(?:-\s+)?(?:url|path):\s*['"]?([^'"\s]+)['"]?\s*$/gm)].map(m => m[1])
+            );
+            for (const ext of ['.AppImage', '.deb']) {
+              if (![...referenced].some(name => name.endsWith(ext))) {
+                throw new Error(`${feedName} does not reference a ${ext} file`);
+              }
+            }
+            for (const name of referenced) {
+              if (!actual.includes(name)) {
+                throw new Error(`${feedName} references ${name}, which is not a hidden release asset`);
+              }
+            }
           }
           for (const asset of assets) {
             if (asset.state !== 'uploaded' || !(asset.size > 0)
@@ -487,10 +683,12 @@ jobs:
     name: stage-production-web-relay
     needs: [identity, desktop-build]
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
       - name: Download verified renderer
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -525,11 +723,69 @@ jobs:
           if-no-files-found: error
           retention-days: 2
 
+  # The Android APK release ships with the app release when Deploy planned one
+  # (scripts/mobile-release.mjs). It runs beside the desktop build and gates
+  # only the relay deploy below, whose /app page links it.
+  mobile-android:
+    name: release-mobile-android
+    if: ${{ inputs.mobile_version != '' }}
+    uses: ./.github/workflows/mobile-android.yml
+    permissions:
+      contents: write # callee creates the mobile-v* release and its tag
+    with:
+      version: ${{ inputs.mobile_version }}
+      ref: ${{ inputs.ref }}
+    secrets:
+      ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      FIREBASE_GOOGLE_SERVICES_JSON_B64: ${{ secrets.FIREBASE_GOOGLE_SERVICES_JSON_B64 }}
+
+  # The Android release /app links: the newest published mobile-v* release
+  # whose APK downloads, re-checked here. It runs once the Android release is
+  # done; when that was skipped or failed, the newest earlier release stays
+  # linked, never one that is missing.
+  android-link:
+    name: resolve-android-install-link
+    needs: [mobile-android]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      url: ${{ steps.link.outputs.url }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+      - name: Resolve the newest downloadable Android release
+        id: link
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MOBILE_VERSION: ${{ inputs.mobile_version }}
+          ANDROID_RESULT: ${{ needs.mobile-android.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/mobile-release.mjs link
+          linked="$(sed -n 's/^tag=//p' "$GITHUB_OUTPUT" | tail -n 1)"
+          if [[ -n "$MOBILE_VERSION" && "$linked" != "mobile-v${MOBILE_VERSION}" ]]; then
+            echo "::error title=Android release not linked::mobile-v${MOBILE_VERSION} (${ANDROID_RESULT}) is not downloadable; /app keeps linking ${linked:-the releases list}."
+          fi
+
   deploy-relay:
     name: deploy-production-web-relay
-    needs: [publish, stage-relay]
+    needs: [publish, stage-relay, android-link]
+    # android-link follows a possibly skipped Android release; that transitive
+    # skip would fail the implicit success().
+    if: ${{ !cancelled() && needs.publish.result == 'success' && needs.stage-relay.result == 'success' && needs.android-link.result == 'success' }}
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     environment: production
+    permissions: {}
     steps:
       - name: Download staged production relay
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -553,27 +809,33 @@ jobs:
           RELAY_USER: ${{ vars.RELAY_USER }}
           RELAY_DOMAIN: ${{ vars.RELAY_DOMAIN }}
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          ANDROID_URL: ${{ needs.android-link.outputs.url }}
         shell: bash
         run: |
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
           [[ "$RELAY_PORT" =~ ^[0-9]+$ ]]
+          [[ "$ANDROID_URL" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases(/tag/mobile-v[0-9]+\.[0-9]+\.[0-9]+)?$ ]]
+          DESKTOP_VERSION="${RELEASE_TAG#v}"
           ARCHIVE="/tmp/mixdog-relay-${RELEASE_TAG}.tar.gz"
           REMOTE_DIR="/tmp/mixdog-relay-${RELEASE_TAG}"
           tar -czf "$ARCHIVE" -C apps/relay .
           scp -P "$RELAY_PORT" "$ARCHIVE" "$RELAY_USER@$RELAY_HOST:$ARCHIVE"
           ssh -p "$RELAY_PORT" "$RELAY_USER@$RELAY_HOST" \
-            "set -euo pipefail; rm -rf '$REMOTE_DIR'; mkdir -p '$REMOTE_DIR'; tar -xzf '$ARCHIVE' -C '$REMOTE_DIR'; bash '$REMOTE_DIR/deploy/deploy-release.sh' '$RELAY_DOMAIN' '$RELEASE_TAG'; rm -rf '$REMOTE_DIR' '$ARCHIVE'"
+            "set -euo pipefail; rm -rf '$REMOTE_DIR'; mkdir -p '$REMOTE_DIR'; tar -xzf '$ARCHIVE' -C '$REMOTE_DIR'; bash '$REMOTE_DIR/deploy/deploy-release.sh' '$RELAY_DOMAIN' '$RELEASE_TAG' '$DESKTOP_VERSION' '$ANDROID_URL'; rm -rf '$REMOTE_DIR' '$ARCHIVE'"
           EXPECTED=$(sha256sum apps/relay/renderer/index.html | awk '{print $1}')
           ACTUAL=$(ssh -p "$RELAY_PORT" "$RELAY_USER@$RELAY_HOST" \
             "sha256sum /opt/mixdog-relay/renderer/index.html | awk '{print \$1}'")
           test "$EXPECTED" = "$ACTUAL"
           curl --fail --silent --show-error "https://$RELAY_DOMAIN/healthz" | grep -q '"status":"ok"'
+          app_page="$(curl --fail --silent --show-error "https://$RELAY_DOMAIN/app")"
+          grep -qF "href=\"$ANDROID_URL\"" <<<"$app_page"
 
   release-timings:
     if: always()
     needs: [publish, deploy-relay]
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     permissions:
       actions: read
       contents: read
@@ -581,6 +843,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
       - name: Record timing and warn on material regressions
         continue-on-error: true
         env:

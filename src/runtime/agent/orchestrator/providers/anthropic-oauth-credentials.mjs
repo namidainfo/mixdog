@@ -15,8 +15,17 @@ import { boundProviderAuthPath } from '../../../shared/provider-auth-binding.mjs
 import { resolvePluginData } from '../../../shared/plugin-paths.mjs';
 import { getLlmDispatcher } from '../../../shared/llm/http-agent.mjs';
 import { claudeCliUserAgent, resolveCliVersion } from './anthropic-oauth-client-version.mjs';
-import { expiryFromAccessToken, oauthCredentialStatus, scrubOAuthSecrets } from './lib/oauth-token-utils.mjs';
+import {
+  accountIdentityFields,
+  expiryFromAccessToken,
+  isDefinitiveOAuthFailure,
+  normalizeAccountIdentity,
+  oauthCredentialStatus,
+  scrubOAuthSecrets,
+} from './lib/oauth-token-utils.mjs';
 import { createOAuthPkce, parseOAuthCodeInput } from './lib/oauth-pkce.mjs';
+
+const SIGN_IN_EXPIRED_PREFIX = 'Anthropic sign-in expired. Sign in again from Providers.';
 
 // SSRF guard for the OAuth token endpoint override. Env-supplied URLs must be
 // https with a valid http(s) URL shape; reject file:/data:/ftp:/etc. and any
@@ -88,13 +97,24 @@ function _loadCredentialsFile(path) {
       mtimeMs: stat.mtimeMs,
       accessToken: oauth.accessToken,
       refreshToken: oauth.refreshToken || null,
+      reauthRequired: oauth.reauthRequired === true,
       expiresAt: _normalizeExpiresAt(oauth.expiresAt ?? oauth.expires_at) || expiryFromAccessToken(oauth.accessToken),
       scopes: Array.isArray(oauth.scopes) ? oauth.scopes : [],
       subscriptionType: oauth.subscriptionType || null,
+      identity: normalizeAccountIdentity(oauth.identity),
     };
   } catch {
     return null;
   }
+}
+
+// The token endpoint names the signed-in account next to the tokens.
+export function identityFromTokenResponse(json) {
+  return normalizeAccountIdentity({
+    id: json?.account?.uuid,
+    email: json?.account?.email_address,
+    organizationId: json?.organization?.uuid,
+  });
 }
 
 // Cross-process safe credential save. Lockfile (O_EXCL) prevents two Mixdog
@@ -174,7 +194,21 @@ export function describeAnthropicOAuthCredentials() {
         expiresAt,
       };
     }
-    return oauthCredentialStatus({ hasRefresh, expiresAt, detail, refreshSkewMs: TOKEN_REFRESH_SKEW_MS });
+    if (creds.reauthRequired) {
+      return {
+        authenticated: false,
+        usable: false,
+        refreshable: false,
+        reauthRequired: true,
+        status: 'Reauth Required',
+        detail,
+        expiresAt,
+      };
+    }
+    return {
+      ...oauthCredentialStatus({ hasRefresh, expiresAt, detail, refreshSkewMs: TOKEN_REFRESH_SKEW_MS }),
+      ...accountIdentityFields(creds.identity),
+    };
   } catch (err) {
     return {
       authenticated: false,
@@ -289,10 +323,14 @@ async function _refreshOAuthCredentialsUnlocked(creds) {
     }
     if (!res.ok) {
       const isInvalidGrant = text.includes('invalid_grant') || json?.error === 'invalid_grant';
-      throw Object.assign(
-        _tokenEndpointError('token refresh', res.status, text, [creds.refreshToken, creds.accessToken]),
-        { isInvalidGrant }
-      );
+      const failure = _tokenEndpointError('token refresh', res.status, text, [creds.refreshToken, creds.accessToken]);
+      if (isDefinitiveOAuthFailure(text, res.status)) {
+        throw Object.assign(new Error(`${SIGN_IN_EXPIRED_PREFIX} ${failure.message}`), {
+          isInvalidGrant: true,
+          reauthRequired: true,
+        });
+      }
+      throw Object.assign(failure, { isInvalidGrant });
     }
 
     const accessToken = json?.access_token || json?.accessToken;
@@ -305,6 +343,7 @@ async function _refreshOAuthCredentialsUnlocked(creds) {
       expiresAt,
       scopes: Array.isArray(json?.scope) ? json.scope : creds.scopes,
       subscriptionType: creds.subscriptionType,
+      identity: identityFromTokenResponse(json) || creds.identity || null,
     };
     // Persist rotated tokens back so any other Mixdog reader of the same
     // credentials file picks up the new refresh_token. Without this, a
@@ -320,6 +359,8 @@ async function _refreshOAuthCredentialsUnlocked(creds) {
             refreshToken: refreshed.refreshToken,
             expiresAt: refreshed.expiresAt,
             scopes: refreshed.scopes,
+            reauthRequired: undefined,
+            ...(refreshed.identity ? { identity: refreshed.identity } : {}),
           },
         }));
       } catch (err) {
@@ -364,7 +405,31 @@ export async function refreshOAuthCredentials(creds) {
       ) {
         return disk;
       }
-      return _refreshOAuthCredentialsUnlocked(disk || { ...creds, path: credentialPath });
+      const attempt = disk || { ...creds, path: credentialPath };
+      try {
+        return await _refreshOAuthCredentialsUnlocked(attempt);
+      } catch (err) {
+        if (err?.reauthRequired !== true) throw err;
+        const latest = _loadCredentialsFile(credentialPath);
+        if (latest?.refreshToken && latest.refreshToken !== attempt.refreshToken) {
+          if (!latest.expiresAt || latest.expiresAt > Date.now()) return latest;
+          return _refreshOAuthCredentialsUnlocked(latest);
+        }
+        try {
+          _updateCredentialsFile(credentialPath, (raw) => {
+            const oauth = raw?.claudeAiOauth;
+            if (!oauth || oauth.refreshToken !== attempt.refreshToken) return undefined;
+            // Non-destructive: tokens stay intact; a new sign-in or a
+            // successful refresh rewrites the entry without this marker.
+            return { ...raw, claudeAiOauth: { ...oauth, reauthRequired: true } };
+          });
+        } catch (saveErr) {
+          process.stderr.write(
+            `[anthropic-oauth] dead-account mark failed: ${_scrubTokens(saveErr?.message || String(saveErr)).slice(0, 200)}\n`
+          );
+        }
+        throw err;
+      }
     },
     {
       timeoutMs: 120_000,
@@ -536,6 +601,7 @@ async function exchangeAuthorizationCode({ pkce, code, state, redirectUri }) {
   }
   const expiresAt = expiresAtFromTokenResponse(json);
   const scopes = _oauthParseScopeField(json?.scope);
+  const identity = identityFromTokenResponse(json);
   const credPath = _oauthCredentialsWritePath();
   const raw = _updateCredentialsFile(credPath, (current) => {
     const base = current && typeof current === 'object' ? current : {};
@@ -548,7 +614,10 @@ async function exchangeAuthorizationCode({ pkce, code, state, redirectUri }) {
         refreshToken,
         expiresAt,
         scopes,
+        reauthRequired: undefined,
         subscriptionType: existingOauth.subscriptionType ?? null,
+        // A fresh sign-in replaces the account: never keep the previous identity.
+        identity: identity || undefined,
       },
     };
   });
@@ -559,10 +628,11 @@ async function exchangeAuthorizationCode({ pkce, code, state, redirectUri }) {
     expiresAt,
     scopes,
     subscriptionType: raw.claudeAiOauth.subscriptionType,
+    identity,
   };
 }
 
-export async function beginOAuthLogin({ openBrowserFn = null } = {}) {
+export async function beginOAuthLogin({ openBrowserFn = null, openBrowser = true } = {}) {
   const pkce = createOAuthPkce();
   const state = randomBytes(32).toString('base64url');
   const buildUrl = (redirectUri) => {
@@ -580,6 +650,7 @@ export async function beginOAuthLogin({ openBrowserFn = null } = {}) {
   const url = buildUrl(OAUTH_REDIRECT_URI);
   const manualUrl = buildUrl(OAUTH_MANUAL_REDIRECT_URI);
   const openLoginUrl = async (targetUrl, label = 'login') => {
+    if (!openBrowser) return;
     try {
       const openInBrowser = openBrowserFn || (await import('../../../shared/open-url.mjs')).openInBrowser;
       await openInBrowser(targetUrl.toString());

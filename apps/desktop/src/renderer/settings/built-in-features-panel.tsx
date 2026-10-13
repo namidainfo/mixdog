@@ -37,10 +37,14 @@ import {
   useLocalProviderStatus,
 } from './local-provider-status';
 import { useLocalProviderActions } from './local-provider-actions';
-import type { LocalProviderActions } from './local-provider-operations';
+import type { LocalProviderActions } from './local-provider-actions';
 import { GitPanel } from './git-panel';
+import { getCachedDesktopStatus, readDesktopStatus, storeDesktopStatus } from './desktop-status-cache';
 import { useTidyEngineStatus } from './tidy-status';
+import { useAutoEffortStatus } from './auto-effort-status';
 import { TidyEngines } from './tidy-engines';
+import { computerReadinessBlocking } from './computer-readiness';
+import { ComputerReadinessSection, useComputerReadiness } from './computer-readiness-section';
 
 type FeatureAction = {
   id: BuiltInFeatureId;
@@ -51,8 +55,6 @@ type FeatureAction = {
 
 const reason = (error: unknown): string =>
   String((error as Error)?.message || error || '') || t('Something went wrong');
-
-const desktopSettingsCache = new WeakMap<object, DesktopSettings>();
 
 function voiceProgress(snapshot: unknown): { text: string; percent: number | null } {
   const hint = record(record(snapshot).progressHint);
@@ -69,17 +71,19 @@ function voiceProgress(snapshot: unknown): { text: string; percent: number | nul
 /** Desktop settings and the Git / LibreOffice dependency status the cards depend on. */
 function useDesktopFeatureStatus(api: PanelContext['api']) {
   const [settings, setSettings] = useState<DesktopSettings | null>(
-    () => desktopSettingsCache.get(api as object) ?? null
+    () => getCachedDesktopStatus(api, 'settings') ?? null
   );
-  const [gitStatus, setGitStatus] = useState<DesktopGitCliStatus | null>(null);
-  const [officeDependency, setOfficeDependency] = useState<DesktopLibreOfficeStatus | null>(null);
+  const [gitStatus, setGitStatus] = useState<DesktopGitCliStatus | null>(
+    () => getCachedDesktopStatus(api, 'gitCli') ?? null
+  );
+  const [officeDependency, setOfficeDependency] = useState<DesktopLibreOfficeStatus | null>(
+    () => getCachedDesktopStatus(api, 'libreOffice') ?? null
+  );
   useEffect(() => {
     let live = true;
     const read = () =>
-      void api
-        .readSettings?.()
-        .then((next) => {
-          desktopSettingsCache.set(api as object, next);
+      void readDesktopStatus(api, 'settings')
+        ?.then((next) => {
           if (live) setSettings(next);
         })
         .catch(() => {});
@@ -92,15 +96,13 @@ function useDesktopFeatureStatus(api: PanelContext['api']) {
   }, [api]);
   useEffect(() => {
     let live = true;
-    void api
-      .gitCliStatus?.()
-      .then((next) => {
+    void readDesktopStatus(api, 'gitCli')
+      ?.then((next) => {
         if (live) setGitStatus(next);
       })
       .catch(() => {});
-    void api
-      .libreOfficeStatus?.()
-      .then((next) => {
+    void readDesktopStatus(api, 'libreOffice')
+      ?.then((next) => {
         if (live) setOfficeDependency(next);
       })
       .catch(() => {});
@@ -128,10 +130,12 @@ type FeatureState = {
   progressPercent: number | null;
   localProvider: RecordValue;
   info: RecordValue;
+  /** Computer Use only: the OS still lacks something that blocks work. */
+  readinessBlocking: boolean;
 };
 
 /** Short list tag for noteworthy states (not installed, installing, failed, disabled). */
-function featureStatus({
+export function featureStatus({
   ready,
   installed,
   supported,
@@ -139,6 +143,7 @@ function featureStatus({
   action,
   progressPercent,
   enabled,
+  readinessBlocking,
 }: FeatureState): SidebarResourceTag | null {
   if (!ready) return null;
   if (!available) return supported ? null : { label: t('Unavailable'), tone: 'muted' };
@@ -149,6 +154,7 @@ function featureStatus({
   if (action?.status === 'failed') return { label: t('Failed'), tone: 'danger' };
   if (!installed) return { label: t('Not installed'), tone: 'muted' };
   if (!enabled) return { label: t('Disabled'), tone: 'muted' };
+  if (readinessBlocking) return { label: t('Setup needed'), tone: 'warn' };
   return null;
 }
 
@@ -209,9 +215,11 @@ function FeatureDetailDialog({
   officeDependency,
   tidyStatus,
   tidyInstallStatus,
+  computerReadiness,
 }: {
   api: PanelContext['api'];
   state: FeatureState;
+  computerReadiness: ReturnType<typeof useComputerReadiness>;
   gitStatus: DesktopGitCliStatus | null;
   officeDependency: DesktopLibreOfficeStatus | null;
   tidyStatus: DesktopTidyEngineStatus | null;
@@ -233,6 +241,17 @@ function FeatureDetailDialog({
       dataAttributes={{ 'data-feature-id': feature.id }}
       headerControl={<FeatureControl state={state} onInstall={onInstall} onToggle={onToggle} />}
     >
+      {ready && installed && feature.id === 'computer' ? (
+        <ComputerReadinessSection rows={computerReadiness.rows} api={api} refresh={computerReadiness.refresh} />
+      ) : null}
+      {ready && feature.id === 'autoEffort' && !state.supported ? (
+        <ExtensionNote>{t('Auto effort is not supported on Intel Macs.')}</ExtensionNote>
+      ) : null}
+      {ready && feature.id === 'memory' && state.info.supported === false ? (
+        <ExtensionNote>
+          {t('Semantic search is unavailable on Intel Macs. Memory uses keyword search only.')}
+        </ExtensionNote>
+      ) : null}
       {ready && !installed && requirement ? (
         <ExtensionNote>{t('Requires {{name}}', { name: requirement })}</ExtensionNote>
       ) : null}
@@ -266,7 +285,12 @@ function FeatureDetailDialog({
           </ExtensionItemList>
         </ExtensionSection>
       )}
-      <BuiltInFeatureInfo state={state} gitStatus={gitStatus} officeDependency={officeDependency} />
+      <BuiltInFeatureInfo
+        state={state}
+        gitStatus={gitStatus}
+        officeDependency={officeDependency}
+        linux={computerReadiness.readiness?.linux}
+      />
     </ExtensionDetailDialog>
   );
 }
@@ -301,6 +325,8 @@ export function BuiltInFeaturesPanel({
     openId === 'tidy' || action?.id === 'tidy',
     action?.id === 'tidy' && action?.status === 'installing'
   );
+  const autoEffort = useAutoEffortStatus(api, toolModules.autoEffort);
+  const computerReadiness = useComputerReadiness(api, openId === 'computer');
   const voice = record(data.voice);
   const progress = voiceProgress(snapshot);
   // Built-in skills ride their feature's Install and toggle, so the card names
@@ -331,10 +357,10 @@ export function BuiltInFeaturesPanel({
       office: record(toolModules.office).installed === true,
       tidy: record(toolModules.tidy).installed === true,
       localProvider: localProvider.installed === true,
-      autoEffort: record(toolModules.autoEffort).installed === true,
+      autoEffort: autoEffort.installed === true,
       voice: voiceInstalled || voice.installed === true,
     }),
-    [gitStatus?.installed, settings, toolModules, localProvider, voice.installed, voiceInstalled]
+    [gitStatus?.installed, settings, toolModules, localProvider, autoEffort, voice.installed, voiceInstalled]
   );
   const enabled = useMemo<Record<BuiltInFeatureId, boolean>>(
     () => ({
@@ -345,10 +371,10 @@ export function BuiltInFeaturesPanel({
       office: record(toolModules.office).enabled !== false,
       tidy: record(toolModules.tidy).enabled !== false,
       localProvider: localProvider.enabled === true,
-      autoEffort: record(toolModules.autoEffort).enabled === true,
+      autoEffort: autoEffort.enabled === true,
       voice: voice.enabled === true && installed.voice,
     }),
-    [installed.voice, settings, toolModules, localProvider, voice.enabled]
+    [installed.voice, settings, toolModules, localProvider, autoEffort, voice.enabled]
   );
 
   const updateDesktopSetting = async (
@@ -357,7 +383,7 @@ export function BuiltInFeaturesPanel({
   ): Promise<boolean> => {
     if (!api.updateSetting) return false;
     const saved = await api.updateSetting(key, next);
-    setSettings(saved);
+    setSettings(storeDesktopStatus(api, 'settings', saved));
     // Session Browser surfaces follow the install markers live instead of polling.
     window.dispatchEvent(new Event('mixdog:built-in-features-changed'));
     return saved[key] === next;
@@ -403,7 +429,7 @@ export function BuiltInFeaturesPanel({
       if (id === 'git') {
         const next = await api.installGitCli?.();
         if (!next?.installed) throw new Error(t('Git installation did not complete.'));
-        setGitStatus(next);
+        setGitStatus(storeDesktopStatus(api, 'gitCli', next));
         if (!(await setEnabled('git', true))) throw new Error(t('Git could not be enabled.'));
       } else if (id === 'voice') {
         const result = record(await run('toggleVoice', [true], `built-in-${id}`));
@@ -421,7 +447,7 @@ export function BuiltInFeaturesPanel({
           if (!dependency?.installed) {
             throw new Error(t('LibreOffice installation did not complete.'));
           }
-          setOfficeDependency(dependency);
+          setOfficeDependency(storeDesktopStatus(api, 'libreOffice', dependency));
         }
         const result = record(await run('installBuiltinFeature', [id], `built-in-${id}`));
         const entry = record(result[id]);
@@ -433,8 +459,8 @@ export function BuiltInFeaturesPanel({
           await tidy.refresh();
         }
       } else {
-        // Browser Use / Computer Use ship bundled: install marks the feature
-        // activated, then turns its control on.
+        // Browser Use / Computer Use ship bundled: install marks the
+        // feature activated, then turns its control on.
         const marker = id === 'browser' ? ('browserInstalled' as const) : ('computerInstalled' as const);
         const control = id === 'browser' ? ('browserControl' as const) : ('computerControl' as const);
         if (!(await updateDesktopSetting(marker, true)) || !(await updateDesktopSetting(control, true))) {
@@ -451,14 +477,18 @@ export function BuiltInFeaturesPanel({
   const stateOf = (feature: BuiltInFeatureDefinition): FeatureState => {
     // Local Provider runs where the runtime pins a llama.cpp build (Windows
     // CUDA, Apple Silicon Metal); its catalog says so for this host.
-    const supported = feature.id !== 'localProvider' || localProvider.platformSupported !== false;
-    const available = feature.id !== 'localProvider' || (supported && localProvider.available !== false);
+    // Auto effort needs onnxruntime-node, which has no Intel Mac binding.
+    const supported =
+      (feature.id !== 'localProvider' || localProvider.platformSupported !== false) &&
+      (feature.id !== 'autoEffort' || autoEffort.supported !== false);
+    const available = supported && (feature.id !== 'localProvider' || localProvider.available !== false);
     // Every entry waits for its own status source before painting a control,
     // so an Install pill never flashes into a toggle (or back).
     let ready = sectionLoaded(data, 'toolModules');
     if (feature.id === 'git') ready = gitStatus !== null && sectionLoaded(data, 'toolModules');
-    else if (feature.id === 'browser' || feature.id === 'computer') ready = settings !== null;
-    else if (feature.id === 'voice') ready = sectionLoaded(data, 'voice');
+    else if (feature.id === 'browser' || feature.id === 'computer') {
+      ready = settings !== null;
+    } else if (feature.id === 'voice') ready = sectionLoaded(data, 'voice');
     let progressPercent: number | null = null;
     if (feature.id === 'localProvider') {
       progressPercent = installationPercent(localProviderInstallation(localProvider, 'runtime'));
@@ -476,10 +506,18 @@ export function BuiltInFeaturesPanel({
       supported,
       available,
       busy,
-      action: action?.id === feature.id ? action : null,
+      // Auto reasoning also installs in the background (boot download), which
+      // the card shows as its own Install step.
+      action:
+        action?.id === feature.id
+          ? action
+          : feature.id === 'autoEffort' && autoEffort.installing === true
+            ? { id: feature.id, status: 'installing' }
+            : null,
       progressPercent,
       localProvider,
       info: record(feature.id === 'voice' ? voice.info : record(toolModules[feature.id]).info),
+      readinessBlocking: feature.id === 'computer' && computerReadinessBlocking(computerReadiness.rows),
     };
   };
   const open = openId ? BUILT_IN_FEATURES.find((feature) => feature.id === openId) : undefined;
@@ -511,6 +549,7 @@ export function BuiltInFeaturesPanel({
           officeDependency={officeDependency}
           tidyStatus={tidy.status}
           tidyInstallStatus={tidy.installStatus}
+          computerReadiness={computerReadiness}
           onInstall={() => install(open.id)}
           onToggle={(next) => toggle(open.id, next)}
           onClose={() => setOpenId(null)}

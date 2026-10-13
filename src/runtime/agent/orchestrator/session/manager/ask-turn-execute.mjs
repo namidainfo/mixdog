@@ -7,7 +7,7 @@
 import { getProvider } from '../../providers/registry.mjs';
 import { prepareExplicitSkills } from '../explicit-skills.mjs';
 import { prepareTurnEffortConfiguration } from '../../providers/effort-configuration.mjs';
-import { resolveTurnAutoEffort } from './ask-turn-auto-effort.mjs';
+import { resolveTurnAutoEffort, turnStepAutoEffort } from './ask-turn-auto-effort.mjs';
 import { saveSessionAsync } from '../store.mjs';
 import { hasUserConversationMessage, refreshSessionBp3Environment } from './prompt-utils.mjs';
 import { filterModelVisibleSessionMessages } from './message-sanitize.mjs';
@@ -34,6 +34,9 @@ export async function prepareAskTurn({ sessionId, opened, input, cwdOverride, tr
     provider,
     autoEffort?.applied ? autoEffort.effort : undefined
   );
+  // Auto effort also judges every tool-result step of the turn when the
+  // installed judge was trained on steps (session/loop/step-auto-effort.mjs).
+  const stepAutoEffort = turnStepAutoEffort(autoEffort, effortConfiguration);
   applyTurnContextMeta(session, provider);
   const effectiveCwd = cwdOverride || session.cwd;
   // A failed-turn retry resubmits the prompt the failure left unanswered;
@@ -119,8 +122,7 @@ export async function prepareAskTurn({ sessionId, opened, input, cwdOverride, tr
     effectiveCwd,
     turnEffort,
     effortConfiguration,
-    // The effort Auto picked for this turn, shown next to the turn's result.
-    autoEffort: autoEffort ? autoEffort.effort : null,
+    stepAutoEffort,
     outgoing,
     beforeCount: historyMessages.length + 1,
     deferredToolDelta: userTurn.deferredToolDelta,
@@ -140,7 +142,7 @@ export async function runAskAgentLoop({
   takeAssistantTranscriptMetadata,
 }) {
   const { turn, turnSignal, interruption, checkpoint, codexTurnId, startedAt } = opened;
-  const { provider, effectiveCwd, turnEffort, effortConfiguration, outgoing } = prepared;
+  const { provider, effectiveCwd, turnEffort, effortConfiguration, stepAutoEffort, outgoing } = prepared;
   const session = turn.session;
   const agentLoop = await runAbortable(turnSignal, () => _getAgentLoop());
   const priorToolApprovalHook = session.toolApprovalHook;
@@ -175,6 +177,7 @@ export async function runAskAgentLoop({
           checkpoint,
           turnEffort,
           effortConfiguration,
+          stepAutoEffort,
           codexTurnId,
           startedAtMs: startedAt,
           signal,

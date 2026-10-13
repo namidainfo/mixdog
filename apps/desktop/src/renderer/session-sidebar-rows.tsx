@@ -1,10 +1,11 @@
-import { Archive, ArchiveRestore, Trash2, X } from 'lucide-react';
+import { Archive, ArchiveRestore, Star, Trash2, X } from 'lucide-react';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { DesktopSessionSummary } from '../shared/contract';
 import { sessionSummaryTitle } from '../shared/session-title.mjs';
 import { ProgressSpinner } from './ProgressSpinner';
 import { t } from './i18n';
 import { beginPaneDrag, finishPaneDrag, type PaneDragSession } from './pane-drag-session';
+import { elementMenuPoint, isContextMenuKey, pointerMenuPoint } from './ScmContextMenu';
 
 const SESSION_PREFETCH_INTENT_DELAY_MS = 40;
 
@@ -32,12 +33,16 @@ export const SessionSidebarRow = React.memo(function SessionSidebarRow({
   onSetConfirming,
   onSetDeleting,
   onArchiveSession,
+  onFavoriteSession,
   onDeleteSession,
+  onOpenMenu,
 }: {
   session: DesktopSessionSummary;
   active: boolean;
   working?: boolean;
   unread?: boolean;
+  /** Right-click / Menu key: the sidebar owns the menu and its items. */
+  onOpenMenu?(session: DesktopSessionSummary, point: { x: number; y: number }): void;
   editingSessionId: string;
   sessionTitleDraft: string;
   sessionTitleInvalid: boolean;
@@ -53,6 +58,7 @@ export const SessionSidebarRow = React.memo(function SessionSidebarRow({
   onSetConfirming: React.Dispatch<React.SetStateAction<string>>;
   onSetDeleting: React.Dispatch<React.SetStateAction<string>>;
   onArchiveSession(sessionId: string, archived: boolean): Promise<void>;
+  onFavoriteSession(sessionId: string, favorite: boolean): Promise<void>;
   onDeleteSession(sessionId: string): Promise<void>;
 }) {
   return (
@@ -65,6 +71,8 @@ export const SessionSidebarRow = React.memo(function SessionSidebarRow({
       titleDraft={sessionTitleDraft}
       titleInvalid={sessionTitleInvalid}
       onArchiveSession={onArchiveSession}
+      onFavoriteSession={onFavoriteSession}
+      onOpenMenu={onOpenMenu}
       onTitleDraftChange={onTitleDraftChange}
       onStartRename={onStartRename}
       onCancelRename={onCancelRename}
@@ -109,11 +117,14 @@ const SessionRow = React.memo(function SessionRow({
   onCancelDelete,
   onConfirmDelete,
   onArchiveSession,
+  onFavoriteSession,
+  onOpenMenu,
 }: {
   session: DesktopSessionSummary;
   active: boolean;
   working?: boolean;
   unread?: boolean;
+  onOpenMenu?(session: DesktopSessionSummary, point: { x: number; y: number }): void;
   editing: boolean;
   titleDraft: string;
   titleInvalid: boolean;
@@ -129,6 +140,7 @@ const SessionRow = React.memo(function SessionRow({
   onCancelDelete(): void;
   onConfirmDelete(session: DesktopSessionSummary): void;
   onArchiveSession(sessionId: string, archived: boolean): Promise<void>;
+  onFavoriteSession(sessionId: string, favorite: boolean): Promise<void>;
 }) {
   const resume = useCallback(() => onResumeSession(session.id), [onResumeSession, session.id]);
   const titleInput = useRef<HTMLInputElement>(null);
@@ -191,6 +203,8 @@ const SessionRow = React.memo(function SessionRow({
     };
   }, []);
   return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: draggable row container; its keyboard-operable controls are the nested buttons
+    // biome-ignore lint/a11y/useKeyWithClickEvents: the row click is a pointer shortcut; the title button inside is the keyboard path
     <div
       className={`session-row ${active ? 'selected' : ''} ${working ? 'working' : ''} ${editing ? 'editing' : ''} ${confirmingDelete ? 'confirming-delete' : ''}`}
       data-session-id={session.id}
@@ -223,6 +237,12 @@ const SessionRow = React.memo(function SessionRow({
         finishPaneDrag();
       }}
       onClick={activateFromClick}
+      onContextMenu={(event) => {
+        if (!onOpenMenu || editing || deleting) return;
+        event.preventDefault();
+        cancelPrefetch();
+        onOpenMenu(session, pointerMenuPoint(event));
+      }}
       onDoubleClick={(event) => {
         if (
           editing ||
@@ -251,7 +271,7 @@ const SessionRow = React.memo(function SessionRow({
         onDoubleClick={(event) => event.stopPropagation()}
         onKeyDown={(event) => {
           event.stopPropagation();
-          if (event.key === 'Enter') {
+          if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
             event.preventDefault();
             onCommitRename(session);
           } else if (event.key === 'Escape') {
@@ -268,6 +288,12 @@ const SessionRow = React.memo(function SessionRow({
         className="session-row-main"
         inert={editing ? true : undefined}
         aria-hidden={editing ? true : undefined}
+        aria-haspopup={onOpenMenu ? 'menu' : undefined}
+        onKeyDown={(event) => {
+          if (!onOpenMenu || !isContextMenuKey(event)) return;
+          event.preventDefault();
+          onOpenMenu(session, elementMenuPoint(event.currentTarget));
+        }}
       >
         <span className="session-row-copy">
           <b>{label}</b>
@@ -291,7 +317,10 @@ const SessionRow = React.memo(function SessionRow({
         )}
       </button>
       <div className="session-row-actions" inert={editing ? true : undefined} aria-hidden={editing ? true : undefined}>
-        {session.archived === true && (
+        {/* Archived rows always carry restore/delete; any other row shows the
+            same cancel/confirm pair while a menu-started delete awaits
+            confirmation. */}
+        {(session.archived === true || confirmingDelete) && (
           <>
             <button
               type="button"
@@ -335,7 +364,23 @@ const SessionRow = React.memo(function SessionRow({
             </button>
           </>
         )}
-        {session.archived !== true && (
+        {session.archived !== true && !confirmingDelete && (
+          <button
+            type="button"
+            className={`session-row-action session-row-favorite ${session.favorite === true ? 'active' : ''}`}
+            aria-label={session.favorite === true ? t('Remove from favorites') : t('Add to favorites')}
+            aria-pressed={session.favorite === true}
+            data-tooltip={session.favorite === true ? t('Remove from favorites') : t('Add to favorites')}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              void onFavoriteSession(session.id, session.favorite !== true).catch(() => {});
+            }}
+          >
+            <Star size={14} fill={session.favorite === true ? 'currentColor' : 'none'} />
+          </button>
+        )}
+        {session.archived !== true && !confirmingDelete && (
           <button
             type="button"
             className="session-row-action session-row-archive"

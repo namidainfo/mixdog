@@ -1,5 +1,5 @@
 import { LoaderCircle, X } from 'lucide-react';
-import { useEffect, useId, useState, type ReactNode, type RefObject } from 'react';
+import { useEffect, useId, useState, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 
 import { ErrorNotice } from './ErrorNotice';
@@ -11,6 +11,7 @@ import { acquireTitleBarDim } from './titlebar-dim';
  *  closes it. */
 function dialogLayerPortal(className: string, host: HTMLElement, onClose: () => void, children: ReactNode) {
   return createPortal(
+    // biome-ignore lint/a11y/noStaticElementInteractions: scrim container; backdrop press and Escape dismissal are delegated here for the dialog inside
     <div
       className={className}
       onMouseDown={(event) => {
@@ -28,6 +29,25 @@ function dialogLayerPortal(className: string, host: HTMLElement, onClose: () => 
     </div>,
     host
   );
+}
+
+/** Keeps Tab / Shift+Tab cycling inside a modal card (its keydown handler). */
+export function containDialogTab(event: KeyboardEvent<HTMLElement>) {
+  if (event.key !== 'Tab') return;
+  const controls = [
+    ...event.currentTarget.querySelectorAll<HTMLElement>(
+      'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled)'
+    ),
+  ];
+  const first = controls[0];
+  const last = controls.at(-1);
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last?.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first?.focus();
+  }
 }
 
 /** Shared lifecycle for dialogs launched from a sidebar destination.
@@ -73,6 +93,7 @@ export function EditorDialogFooter({
   onDelete,
   children,
   saveDisabled = false,
+  armDelete = false,
 }: {
   error: string;
   busy: boolean;
@@ -81,8 +102,10 @@ export function EditorDialogFooter({
   children?: ReactNode;
   /** The form is incomplete (e.g. an agent switched on with no model). */
   saveDisabled?: boolean;
+  /** Opens with the delete already armed (a row menu's Delete). */
+  armDelete?: boolean;
 }) {
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(armDelete);
   return (
     <footer>
       {error && <ErrorNotice error={error} />}

@@ -14,7 +14,11 @@ import {
   t,
   type UiLanguagePreference,
 } from '../i18n';
+import type { DesktopApi, DesktopEditorSettings } from '../../shared/contract';
+import { DEFAULT_DESKTOP_EDITOR_SETTINGS } from '../../shared/editor-settings';
+import { getLinkPreview, setLinkPreview, subscribeLinkPreview } from '../link-preview-preference';
 import { record } from '../record-utils';
+import { isRemoteHostRenderer } from '../remote-ui-projection';
 import {
   getSidePanelMode,
   setSidePanelMode,
@@ -80,6 +84,65 @@ function UiLanguageChoices({ pending }: Pick<PanelContext, 'pending'>) {
   );
 }
 
+/** Renderer-only UI preference; applies to open panes without a restart. */
+function LinkPreviewToggle({ pending }: Pick<PanelContext, 'pending'>) {
+  const enabled = useSyncExternalStore(subscribeLinkPreview, getLinkPreview, () => true);
+  return (
+    <ToggleRow
+      title={t('Link preview')}
+      description={t('Open chat links in a preview tab that the next link replaces.')}
+      checked={enabled}
+      disabled={Boolean(pending)}
+      onChange={setLinkPreview}
+    />
+  );
+}
+
+/** Which view a Markdown file opens in until the user picks one for it. */
+function MarkdownDefaultViewChoice({ pending }: Pick<PanelContext, 'pending'>) {
+  const api = (window as unknown as { mixdogDesktop?: Partial<DesktopApi> }).mixdogDesktop;
+  const [view, setView] = useState<DesktopEditorSettings['markdownDefaultView']>(
+    DEFAULT_DESKTOP_EDITOR_SETTINGS.markdownDefaultView
+  );
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let live = true;
+    void api
+      ?.readMarkdownDefaultView?.()
+      .then((configured) => {
+        if (live) setView(configured);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [api]);
+  const choose = (next: DesktopEditorSettings['markdownDefaultView']) => {
+    const writer = api?.writeMarkdownDefaultView;
+    if (!writer) return;
+    setError('');
+    void writer(next)
+      .then(setView)
+      .catch(() => setError(t('Default view could not be saved to your user settings.')));
+  };
+  return (
+    <Group title={t('Markdown files')}>
+      <SelectRow
+        title={t('Default view')}
+        value={view}
+        disabled={Boolean(pending) || !api?.writeMarkdownDefaultView}
+        options={[
+          { value: 'preview', label: t('Preview') },
+          { value: 'rich', label: t('Rich') },
+          { value: 'source', label: t('Source') },
+        ]}
+        onChange={(next) => choose(next as DesktopEditorSettings['markdownDefaultView'])}
+      />
+      {error && <p role="alert">{error}</p>}
+    </Group>
+  );
+}
+
 function SidePanelChoices({ pending }: Pick<PanelContext, 'pending'>) {
   const configuredMode = useSyncExternalStore(subscribeSidePanelMode, getSidePanelMode, () => 'close-both');
   const narrow = window.matchMedia?.(NARROW_SHELL_QUERY).matches === true;
@@ -102,9 +165,29 @@ function SidePanelChoices({ pending }: Pick<PanelContext, 'pending'>) {
   );
 }
 
+/** Remote surfaces: the settings this device stores for itself (localStorage),
+ *  split out of General so the page says where they apply. */
+export function DisplayPanel({ data, pending }: PanelContext) {
+  return (
+    <>
+      <UiLanguageChoices pending={pending} />
+      <ThemeChoices data={data} pending={pending} />
+      <Group title={t('Link preview')}>
+        <LinkPreviewToggle pending={pending} />
+      </Group>
+      <SidePanelChoices pending={pending} />
+    </>
+  );
+}
+
 export function GeneralPanel({ data, pending, run, api }: PanelContext) {
+  const remoteSurface = isRemoteHostRenderer();
   const profile = record(data.profile);
   const webSearchModule = record(record(data.toolModules).webSearch);
+  const rawInstructionFiles = record(data.toolModules).instructionFiles;
+  const instructionFilesMode = ['all', 'agents', 'claude', 'off'].includes(String(rawInstructionFiles))
+    ? String(rawInstructionFiles)
+    : 'off';
   const languageOptions = rows(profile.languages).map((entry) => ({
     value: String(entry.id || entry.value || 'system'),
     label: t(label(entry)),
@@ -148,12 +231,31 @@ export function GeneralPanel({ data, pending, run, api }: PanelContext) {
           disabled={busy}
           onChange={(enabled) => void run('setWebSearchEnabled', [enabled])}
         />
+        <SelectRow
+          title={t('Instruction files')}
+          description={t('Automatically include AGENTS.md / CLAUDE.md rules from your home folder and the project folder in new sessions. Enabled files are trusted as instructions, so only enable this for repositories you trust.')}
+          value={instructionFilesMode}
+          disabled={busy}
+          options={[
+            { value: 'all', label: t('All') },
+            { value: 'agents', label: 'AGENTS.md' },
+            { value: 'claude', label: 'CLAUDE.md' },
+            { value: 'off', label: t('Off') },
+          ]}
+          onChange={(mode) => void run('setInstructionFiles', [mode])}
+        />
+        {!remoteSurface && <LinkPreviewToggle pending={pending} />}
       </Group>
       <PushNotificationToggle api={api} />
       <DesktopNotificationToggle />
-      <UiLanguageChoices pending={pending} />
-      <ThemeChoices data={data} pending={pending} />
-      <SidePanelChoices pending={pending} />
+      {!remoteSurface && (
+        <>
+          <UiLanguageChoices pending={pending} />
+          <ThemeChoices data={data} pending={pending} />
+          <SidePanelChoices pending={pending} />
+        </>
+      )}
+      <MarkdownDefaultViewChoice pending={pending} />
     </>
   );
 }

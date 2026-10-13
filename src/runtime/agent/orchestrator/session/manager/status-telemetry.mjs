@@ -9,6 +9,16 @@ import {
 } from '../../providers/statusline-route-meta.mjs';
 import { estimateTranscriptContextUsage } from '../context-utils.mjs';
 
+/** Effort snapshot of the latest user turn (prepareTurnEffortConfiguration writes it). */
+function turnEffort(session) {
+  const messages = session?.messages || [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role !== 'user') continue;
+    return messages[i]?.meta?.effortConfiguration?.effort || null;
+  }
+  return null;
+}
+
 function standaloneStatusRouteInfo(session) {
   if (!session) return null;
   // autoCompactTokenLimit is an EXPLICIT sub-boundary auto-compact limit only.
@@ -25,6 +35,7 @@ function standaloneStatusRouteInfo(session) {
     modelDisplay: session.modelDisplay || session.displayName || session.model,
     effort: session.effort || '',
     fast: session.fast === true,
+    ...(session.autoEffort === false ? { autoEffort: false } : {}),
     modelParameters: session.modelParameters || {},
     contextWindow: session.contextWindow || null,
     rawContextWindow: session.rawContextWindow || session.contextWindow || null,
@@ -61,6 +72,9 @@ export function recordStandaloneStatusTelemetry(session, result, durationMs) {
     const summary = {
       ...summarizeGatewayUsage(routeInfo, providerOut, compactArg, durationMs),
       requestKind: 'chat',
+      // The route key keeps the saved effort (statusline sections stay per
+      // route); `effort` records what this turn ran at, e.g. an auto-effort pick.
+      effort: turnEffort(session) || session.effort || null,
       sessionId: session.id || null,
       sourceType: session.sourceType || 'lead',
       sourceName: session.sourceName || session.agent || null,

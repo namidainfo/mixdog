@@ -18,13 +18,18 @@
  */
 import type { WebContents } from 'electron';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { validateBrowserToolArgs } from '../../../../../src/runtime/browser-bridge/action-schema.mjs';
-import { app, BrowserWindow, dialog, screen, sharedTexture, webContents } from 'electron';
+import { app, type BrowserWindow, dialog, screen, sharedTexture, webContents } from 'electron';
 
 import {
   DESKTOP_IPC,
+  MAIN_BROWSER_PAGE_PREFIX,
+  type DesktopBrowserImportProgress,
+  type DesktopRemoteBrowserTab,
   type DesktopBrowserViewportConfig,
   type DesktopBrowserPageFrame,
+  type DesktopBrowserPageIdentity,
   type DesktopBrowserPageResample,
   type DesktopBrowserPageControl,
   type DesktopRemoteBrowserControl,
@@ -99,7 +104,10 @@ import { createBrowserRefActions } from './ref-actions';
 import { redactBrowserText } from './redaction';
 import { createBrowserRefPoints } from './ref-points';
 import { createBrowserRemoteControl } from './remote-control';
+import { createBrowserRemoteTabs } from './remote-tabs';
 import { createPageInputDispatcher } from './page-surface-control';
+import { createBrowserPageIdentityStore, trackBrowserPageIdentity } from './page-identity';
+import { captureBrowserPageThumbnail, readBrowserFavicon } from './page-identity-capture';
 import { createBrowserReply } from './reply';
 import { createBrowserScreenshotService } from './screenshot';
 import { createBrowserVisualPrivacy } from './visual-privacy';
@@ -114,6 +122,8 @@ import { browserPageGuardScripts } from './webrtc-guard';
 import type { BrowserUrlPolicy } from './url-policy';
 import { createBrowserInputDispatch } from './input-dispatch';
 import { createBrowserNativeViews, type BrowserNativeRect } from './native-view';
+import { browserPageWindow } from './page-window';
+import { createBrowserPagePower, reclaimIdleUserSessions } from './page-power';
 
 export type {
   BrowserCommand,
@@ -145,9 +155,17 @@ export interface BrowserHost {
   browserHistorySearch(query: string): Promise<BrowserHistoryEntry[]>;
   browserCredentialSuggestions(sessionId: string): Promise<BrowserCredentialSuggestion[]>;
   browserCredentialFill(sessionId: string, credentialId: string): Promise<BrowserCredentialFillResult>;
+  /** Title, site icon and thumbnail this browser recorded for `url`, or null. */
+  browserPageIdentity(url: string): DesktopBrowserPageIdentity | null;
   /** Start/renew (options) or stop (null) streaming a session's live frames. */
   remoteBrowserStream(sessionId: string, options: DesktopRemoteBrowserStreamOptions | null): Promise<void>;
   remoteBrowserControl(sessionId: string, input: DesktopRemoteBrowserControl): Promise<void>;
+  /** The main-workspace browser tabs a paired client may switch between. */
+  remoteTabs(): DesktopRemoteBrowserTab[];
+  /** Start/stop publishing tab changes; returns the current list. */
+  remoteTabsWatch(on: boolean): DesktopRemoteBrowserTab[];
+  /** Open a new main-workspace tab on `url`. */
+  remoteTabOpen(url: string): Promise<DesktopRemoteBrowserTab>;
   dispose(): Promise<void>;
 }
 
@@ -257,6 +275,10 @@ export function createBrowserHost(
     onSurfaceRequest?: (request: DesktopBrowserOpenRequest) => void;
     /** One live frame of a remotely streamed session, handed to the service. */
     publishRemoteFrame?: (frame: DesktopRemoteBrowserStreamFrame) => Promise<void>;
+    /** The main-workspace tab list changed, for watching paired clients. */
+    publishRemoteTabs?: (tabs: DesktopRemoteBrowserTab[]) => Promise<void>;
+    /** Profile-import progress, for the paired client that may have started it. */
+    publishRemoteImportProgress?: (progress: DesktopBrowserImportProgress) => Promise<void>;
   } = {}
 ): BrowserHost {
   const state = new BrowserGuestStateStore();
@@ -273,6 +295,8 @@ export function createBrowserHost(
   /** Foreground gestures serialize together; named background pages get their
    *  own queues so independent research tabs can actually run concurrently. */
   const commandChains = new Map<string, Promise<unknown>>();
+  const isBackgroundBusy = (sessionId: string, name: string) =>
+    commandChains.has(`session:${sessionId}:background:${name}`);
   /** Read-only commands observe without changing the page, so they run
    *  together; a write waits for the previous write AND every in-flight read. */
   const pendingReads = new Map<string, Set<Promise<unknown>>>();
@@ -346,6 +370,36 @@ export function createBrowserHost(
         id
       ),
   });
+  // What displays a page: a mounted panel (reported per guest), a natively
+  // presented view, or a remote viewer streaming the session's current page.
+  const panelActiveGuests = new Set<WebContents>();
+  const nativeShownGuests = new Map<string, WebContents>();
+  const remoteViewingSessions = new Set<string>();
+  const pagePower = createBrowserPagePower<WebContents>({
+    isDisplayed: (guest) => {
+      if (panelActiveGuests.has(guest)) return true;
+      if ([...nativeShownGuests.values()].includes(guest)) return true;
+      const owner = browserSessions.sessionIdForGuest(guest);
+      return owner !== undefined && remoteViewingSessions.has(owner) && browserSessions.currentGuest(owner) === guest;
+    },
+  });
+  // One change notice per site and tick: a load reports title, icon and
+  // thumbnail in quick succession.
+  const changedOrigins = new Set<string>();
+  const pageIdentity = createBrowserPageIdentityStore({
+    onChange: (origin) => {
+      if (!changedOrigins.size)
+        setImmediate(() => {
+          for (const changed of changedOrigins) sendToRenderer(DESKTOP_IPC.browserPageIdentityChanged, changed);
+          changedOrigins.clear();
+        });
+      changedOrigins.add(origin);
+    },
+  });
+  const refreshSessionPower = (sessionId: string) => {
+    for (const guest of browserSessions.visibleGuests(sessionId)) pagePower.refresh(guest);
+    for (const page of browserSessions.backgroundPages(sessionId).values()) pagePower.refresh(page.guest);
+  };
   const lifecycle = createBrowserGuestLifecycle({
     window,
     partitionSession,
@@ -354,12 +408,19 @@ export function createBrowserHost(
     cdp,
     urlPolicy: browserUrlPolicy,
     bridgeWanted: () => bridgeWanted,
-    isBackgroundBusy: (sessionId, name) => commandChains.has(`session:${sessionId}:background:${name}`),
+    isBackgroundBusy,
     waitForLoadSettle: settle.waitForLoadSettle,
     onPopup: (opener, popup) => taskLifecycle.inherit(opener, popup),
     onGuest: (guest) => {
+      pagePower.track(guest);
+      guest.once('destroyed', () => panelActiveGuests.delete(guest));
       displayTextures.attach(guest);
       nativeViews?.watch(guest);
+      trackBrowserPageIdentity(guest, pageIdentity, {
+        // The page's own session: its cookies and cache, as the page loads it.
+        favicon: (url, pageUrl) => readBrowserFavicon(guest.session, url, pageUrl),
+        thumbnail: captureBrowserPageThumbnail,
+      });
     },
     onSurfaceRequest: (request) => {
       if (request.hide || request.reveal === true) options.onSurfaceRequest?.(request);
@@ -383,7 +444,7 @@ export function createBrowserHost(
   const taskLifecycle = createBrowserTaskLifecycle<WebContents>({
     current: (sessionId) => browserSessions.currentGuest(sessionId),
     select: (sessionId, guest) => browserSessions.selectGuest(sessionId, guest),
-    close: (guest) => BrowserWindow.fromWebContents(guest)?.destroy(),
+    close: (guest) => browserPageWindow(guest)?.destroy(),
     canClose: (guest) => !state.for(guest).pendingDialog,
     preserve: (guest) => {
       const owner = browserSessions.sessionIdForGuest(guest);
@@ -537,7 +598,14 @@ export function createBrowserHost(
     urlPolicy: browserUrlPolicy,
     ensureGuest: lifecycle.ensureGuest,
     currentGuest: (sessionId) => browserSessions.currentGuest(sessionId) ?? null,
-    viewerChanged: (sessionId, active) => sendToRenderer(DESKTOP_IPC.browserRemoteViewerChanged, { sessionId, active }),
+    viewerChanged: (sessionId, active) => {
+      // Lease expiry ends a stream without remoteBrowserStream(null), so the
+      // power classification follows the stream lifecycle itself.
+      if (active) remoteViewingSessions.add(sessionId);
+      else remoteViewingSessions.delete(sessionId);
+      refreshSessionPower(sessionId);
+      sendToRenderer(DESKTOP_IPC.browserRemoteViewerChanged, { sessionId, active });
+    },
     onUserControl: retainGuest,
     assertResolvedUrlAllowed: urls.assertResolvedUrlAllowed,
     dispatchPageInput: createPageInputDispatcher({
@@ -548,6 +616,11 @@ export function createBrowserHost(
       assertUrl: urls.assertResolvedUrlAllowed,
     }),
     publishFrame: (frame) => options.publishRemoteFrame?.(frame) ?? Promise.resolve(),
+  });
+  const remoteTabs = createBrowserRemoteTabs({
+    sessionIds: () => browserSessions.sessionIds(),
+    liveGuest: (sessionId) => browserSessions.liveGuest(sessionId),
+    publish: (tabs) => options.publishRemoteTabs?.(tabs) ?? Promise.resolve(),
   });
   // Fixed at startup: the live acceleration flag can flip after a GPU-crash
   // fallback while the capture path and window options do not.
@@ -587,15 +660,15 @@ export function createBrowserHost(
     captureTexture: (guest, documentId, pixels) =>
       displayTextures.acquire(guest, documentId, pixels.width, pixels.height),
     resize: (guest, width, height) => {
-      const owner = BrowserWindow.fromWebContents(guest);
+      const owner = browserPageWindow(guest);
       if (!owner) return null;
       owner.setContentSize(width, height);
       const [landedWidth, landedHeight] = owner.getContentSize();
       return { width: landedWidth, height: landedHeight };
     },
     viewport: (guest) => {
-      const owner = BrowserWindow.fromWebContents(guest);
-      if (!owner || owner.isDestroyed() || guest.isDestroyed()) {
+      const owner = browserPageWindow(guest);
+      if (!owner || guest.isDestroyed()) {
         throw new Error('Browser page changed during capture.');
       }
       const [width, height] = owner.getContentSize();
@@ -643,7 +716,7 @@ export function createBrowserHost(
     pageId: (guest) => state.pageId(guest),
     currentGuest: (sessionId) => browserSessions.currentGuest(sessionId),
     selectGuest: (sessionId, guest) => browserSessions.selectGuest(sessionId, guest),
-    closeGuest: (guest) => BrowserWindow.fromWebContents(guest)?.close(),
+    closeGuest: (guest) => browserPageWindow(guest)?.close(),
   });
 
   const services: BrowserActionServices = {
@@ -697,6 +770,7 @@ export function createBrowserHost(
     downloads,
     taskLifecycle,
     retainGuest,
+    drivePage: pagePower.drive,
     services,
   });
 
@@ -776,7 +850,21 @@ export function createBrowserHost(
     lifecycle.destroyAllBackgroundPages();
   }
 
-  return {
+  // Pages nobody displays or drives for long are unloaded (URLs kept) and
+  // restore when the panel or an agent command returns.
+  const userReclaimTimer = setInterval(
+    () =>
+      reclaimIdleUserSessions({
+        sessions: browserSessions,
+        power: pagePower,
+        isBackgroundBusy,
+        unload: (sessionId) => browserHost.releaseSession(sessionId, { restore: true }),
+      }),
+    BACKGROUND_RECLAIM_INTERVAL_MS
+  );
+  userReclaimTimer.unref?.();
+
+  const browserHost: BrowserHost = {
     browserPageFrame(sessionId, previousFrameId = '', texture = false) {
       const owner = browserSessionId(sessionId);
       return presentationReads.read(owner, previousFrameId, texture);
@@ -786,7 +874,13 @@ export function createBrowserHost(
     },
     browserPresentNative(sessionId, rect) {
       if (!nativeViews) return { enabled: false, shown: false };
-      return { enabled: true, shown: nativeViews.present(browserSessionId(sessionId), rect) };
+      const owner = browserSessionId(sessionId);
+      const shown = nativeViews.present(owner, rect);
+      const guest = shown ? browserSessions.currentGuest(owner) : null;
+      if (guest) nativeShownGuests.set(owner, guest);
+      else nativeShownGuests.delete(owner);
+      refreshSessionPower(owner);
+      return { enabled: true, shown };
     },
     browserPageControl(sessionId, input) {
       const owner = browserSessionId(sessionId);
@@ -837,6 +931,8 @@ export function createBrowserHost(
     },
     releaseSession(sessionId: string, options: { restore?: boolean } = {}): void {
       const ownerSessionId = browserSessionId(sessionId);
+      nativeShownGuests.delete(ownerSessionId);
+      remoteViewingSessions.delete(ownerSessionId);
       remote.releaseViewer(ownerSessionId);
       presentationReads.release(ownerSessionId);
       nativeViews?.present(ownerSessionId, null);
@@ -850,16 +946,22 @@ export function createBrowserHost(
         ownerSessionId,
         options.restore === true ? 'unloaded' : 'gone'
       );
+      remoteTabs.changed();
     },
     setGuestActive(sessionId: string, webContentsId: number, active: boolean): void {
       const owner = browserSessionId(sessionId);
-      const guest = browserSessions.guestForSession(owner, webContentsId);
-      if (guest) {
-        // A late display report must never undo a newer tab selection.
-        if (active && guest === browserSessions.currentGuest(owner)) guest.invalidate();
-      } else {
+      let guest = browserSessions.guestForSession(owner, webContentsId);
+      if (!guest) {
         browserSessions.bindVisibleGuest(owner, webContentsId, active);
+        guest = browserSessions.guestForSession(owner, webContentsId);
       }
+      if (!guest) return;
+      if (active) panelActiveGuests.add(guest);
+      else panelActiveGuests.delete(guest);
+      // Restore a shown page before repainting it; a hidden one throttles.
+      pagePower.refresh(guest);
+      // A late display report must never undo a newer tab selection.
+      if (active && guest === browserSessions.currentGuest(owner)) guest.invalidate();
     },
     async configureGuestViewport(
       sessionId: string,
@@ -879,6 +981,7 @@ export function createBrowserHost(
     async browserImport(request: BrowserImportRequest): Promise<BrowserImportResult> {
       return await profileImporter.importProfile(request, (progress) => {
         sendToRenderer(DESKTOP_IPC.browserProfileImportProgress, progress);
+        void options.publishRemoteImportProgress?.(progress)?.catch(() => undefined);
       });
     },
     async browserHistorySearch(query: string): Promise<BrowserHistoryEntry[]> {
@@ -896,17 +999,32 @@ export function createBrowserHost(
         credentialFill.fillCredentialInGuest(guest, credential)
       );
     },
+    browserPageIdentity: (url) => pageIdentity.lookup(url),
     remoteBrowserStream(sessionId: string, streamOptions: DesktopRemoteBrowserStreamOptions | null): Promise<void> {
-      return remote.remoteBrowserStream(browserSessionId(sessionId), streamOptions);
+      const owner = browserSessionId(sessionId);
+      if (streamOptions) remoteViewingSessions.add(owner);
+      else remoteViewingSessions.delete(owner);
+      refreshSessionPower(owner);
+      return remote.remoteBrowserStream(owner, streamOptions);
     },
     remoteBrowserControl(sessionId: string, control: DesktopRemoteBrowserControl): Promise<void> {
       return executeSerialized({ action: 'remote_control', session_id: browserSessionId(sessionId) }, undefined, () =>
         remote.remoteBrowserControl(browserSessionId(sessionId), control)
       );
     },
+    remoteTabs: () => remoteTabs.list(),
+    remoteTabsWatch: (on) => remoteTabs.watch(on),
+    async remoteTabOpen(url: string): Promise<DesktopRemoteBrowserTab> {
+      const id = `${MAIN_BROWSER_PAGE_PREFIX}${randomUUID().replaceAll('-', '')}`;
+      await browserHost.remoteBrowserControl(id, { type: 'navigate', url });
+      remoteTabs.changed();
+      return remoteTabs.list().find((tab) => tab.id === id) ?? { id, title: '', url, loading: true };
+    },
     async dispose(): Promise<void> {
       if (disposed) return;
       disposed = true;
+      remoteTabs.dispose();
+      clearInterval(userReclaimTimer);
       screen.removeListener('display-metrics-changed', followPrimaryScale);
       screen.removeListener('display-added', followPrimaryScale);
       screen.removeListener('display-removed', followPrimaryScale);
@@ -922,4 +1040,5 @@ export function createBrowserHost(
       lifecycle.destroyAllPrimaryPages();
     },
   };
+  return browserHost;
 }

@@ -1,11 +1,15 @@
 // Traversal-guarded project directory listing, editor read/stat/atomic-write,
 // tree mutations, and code-graph symbol lookup. Every function receives a
 // resolved project root from the service project registry.
+import { isUtf8 } from 'node:buffer';
+import { randomUUID } from 'node:crypto';
 import { existsSync, realpathSync } from 'node:fs';
-import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, lstat, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve, sep } from 'node:path';
+import { toUSVString } from 'node:util';
 
 import { codeGraphModuleUrl } from './desktop-support';
+import { withProjectMutationPaths } from './project-mutation-queue';
 
 export type ProjectTextEncoding = 'utf8' | 'utf8bom' | 'utf16le' | 'utf16be';
 
@@ -18,22 +22,41 @@ function decodeUtf16Be(bytes: Buffer): string {
   return swapped.toString('utf16le');
 }
 
-/** Decode editor text without erasing its on-disk encoding. UTF-16 files with
- * a BOM are always text; BOM-less UTF-16 is accepted only when its NUL-byte
- * lane is unambiguous, otherwise the normal binary guard wins. */
-export function decodeProjectText(bytes: Buffer): {
+interface DecodedProjectText {
   content: string;
   encoding: ProjectTextEncoding;
   binary: boolean;
-} {
+  hasBom: boolean;
+  lossless: boolean;
+}
+
+function decodeTextPayload(
+  bytes: Buffer,
+  encoding: ProjectTextEncoding,
+  hasBom: boolean,
+  binary = false
+): DecodedProjectText {
+  const utf16 = encoding === 'utf16le' || encoding === 'utf16be';
+  const text = encoding === 'utf16be' ? decodeUtf16Be(bytes) : bytes.toString(utf16 ? 'utf16le' : 'utf8');
+  // Replacement characters are safe for display only. A literal U+FFFD in a
+  // valid file is not an error; validate the bytes/code units, not that glyph.
+  const content = toUSVString(text);
+  const lossless = utf16 ? bytes.length % 2 === 0 && content === text : isUtf8(bytes);
+  return { content, encoding, binary, hasBom, lossless };
+}
+
+/** Retain BOM presence independently of the encoding. Ambiguous BOM-less
+ * UTF-16 keeps the existing NUL-lane heuristic. Malformed text can be viewed,
+ * but its replacement-decoded display is never evidence for a safe write. */
+export function decodeProjectText(bytes: Buffer): DecodedProjectText {
   if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
-    return { content: bytes.subarray(3).toString('utf8'), encoding: 'utf8bom', binary: false };
+    return decodeTextPayload(bytes.subarray(3), 'utf8bom', true);
   }
   if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
-    return { content: bytes.subarray(2).toString('utf16le'), encoding: 'utf16le', binary: false };
+    return decodeTextPayload(bytes.subarray(2), 'utf16le', true);
   }
   if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
-    return { content: decodeUtf16Be(bytes.subarray(2)), encoding: 'utf16be', binary: false };
+    return decodeTextPayload(bytes.subarray(2), 'utf16be', true);
   }
   const sample = bytes.subarray(0, Math.min(bytes.length - (bytes.length % 2), 8_192));
   let evenNuls = 0;
@@ -44,39 +67,33 @@ export function decodeProjectText(bytes: Buffer): {
   }
   const pairs = sample.length / 2;
   if (pairs >= 4 && oddNuls / pairs > 0.6 && evenNuls / pairs < 0.1) {
-    return {
-      content: bytes.subarray(0, bytes.length - (bytes.length % 2)).toString('utf16le'),
-      encoding: 'utf16le',
-      binary: false,
-    };
+    return decodeTextPayload(bytes, 'utf16le', false);
   }
   if (pairs >= 4 && evenNuls / pairs > 0.6 && oddNuls / pairs < 0.1) {
-    return { content: decodeUtf16Be(bytes), encoding: 'utf16be', binary: false };
+    return decodeTextPayload(bytes, 'utf16be', false);
   }
-  return {
-    content: bytes.toString('utf8'),
-    encoding: 'utf8',
-    binary: bytes.subarray(0, 8_192).includes(0),
-  };
+  return decodeTextPayload(bytes, 'utf8', false, bytes.subarray(0, 8_192).includes(0));
 }
 
-function encodeProjectText(content: string, encoding: ProjectTextEncoding): Buffer {
+function encodeProjectText(content: string, encoding: ProjectTextEncoding, hasBom: boolean): Buffer {
+  if (toUSVString(content) !== content) throw new TypeError('File content contains unpaired Unicode surrogates.');
   if (encoding === 'utf8bom') {
     return Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(content, 'utf8')]);
   }
-  if (encoding === 'utf16le') {
-    return Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(content, 'utf16le')]);
-  }
-  if (encoding === 'utf16be') {
-    const littleEndian = Buffer.from(content, 'utf16le');
-    const bigEndian = Buffer.allocUnsafe(littleEndian.length);
-    for (let index = 0; index < littleEndian.length; index += 2) {
-      bigEndian[index] = littleEndian[index + 1];
-      bigEndian[index + 1] = littleEndian[index];
-    }
-    return Buffer.concat([Buffer.from([0xfe, 0xff]), bigEndian]);
+  if (encoding === 'utf16le' || encoding === 'utf16be') {
+    const bytes = Buffer.from(content, 'utf16le');
+    if (encoding === 'utf16be') bytes.swap16();
+    if (!hasBom) return bytes;
+    const bom = encoding === 'utf16le' ? [0xff, 0xfe] : [0xfe, 0xff];
+    return Buffer.concat([Buffer.from(bom), bytes]);
   }
   return Buffer.from(content, 'utf8');
+}
+
+function requireLosslessText(decoded: DecodedProjectText): void {
+  if (!decoded.lossless) {
+    throw new Error('File has invalid text encoding. Convert or repair it in an external editor before saving.');
+  }
 }
 
 function comparablePath(path: string): string {
@@ -113,8 +130,24 @@ export function projectEntryPathIn(root: string, relPath: string): string {
   return target;
 }
 
+/** Claim lexical paths AND their resolved aliases. Revalidate after waiting:
+ * a changed symlink must not redirect a queued operation outside its claim. */
+function mutateProjectEntries<T>(root: string, relPaths: string[], run: () => Promise<T>): Promise<T> {
+  const paths = () => relPaths.flatMap((relPath) => {
+    const path = projectEntryPathIn(root, relPath);
+    return [path, canonicalPathThroughExistingAncestor(path)];
+  });
+  const claimed = paths();
+  return withProjectMutationPaths(claimed, async () => {
+    if (paths().some((path, index) => path !== claimed[index])) {
+      throw new Error('Project path changed while waiting. Retry the operation.');
+    }
+    return run();
+  });
+}
+
 /** Dock Files tab: one lazy directory level inside a registered project.
- *  Traversal-guarded — the resolved target must stay under the project
+ *  Traversal-guarded — the resolved target stays under the project
  *  root. One directory level is loaded per request. */
 export async function listProjectDirIn(root: string, relDir: string): Promise<Array<{ name: string; dir: boolean }>> {
   const target = projectEntryPathIn(root, relDir);
@@ -127,7 +160,11 @@ export async function listProjectDirIn(root: string, relDir: string): Promise<Ar
     });
 }
 
-/** Editor tab: read a project text file (1 MB cap, binary sniff). */
+/** Editable text up to 1 MB; larger text up to 10 MB opens read-only. */
+export const PROJECT_TEXT_EDIT_MAX_BYTES = 1_048_576;
+export const PROJECT_TEXT_VIEW_MAX_BYTES = 10_485_760;
+
+/** Editor tab: read a project text file (1 MB edit cap, 10 MB read-only cap, binary sniff). */
 export async function readProjectTextFileIn(
   root: string,
   relPath: string
@@ -136,21 +173,26 @@ export async function readProjectTextFileIn(
   mtimeMs: number;
   binary: boolean;
   tooLarge: boolean;
+  readOnly?: boolean;
+  readOnlyReason?: 'encoding';
   encoding: ProjectTextEncoding;
 }> {
   const file = projectEntryPathIn(root, relPath);
   const info = await stat(file);
   if (!info.isFile()) throw new Error('Not a file.');
-  if (info.size > 1_048_576) {
+  if (info.size > PROJECT_TEXT_VIEW_MAX_BYTES) {
     return { content: '', mtimeMs: info.mtimeMs, binary: false, tooLarge: true, encoding: 'utf8' };
   }
   const bytes = await readFile(file);
   const decoded = decodeProjectText(bytes);
+  const readOnly = !decoded.binary && (!decoded.lossless || bytes.length > PROJECT_TEXT_EDIT_MAX_BYTES);
   return {
     content: decoded.binary ? '' : decoded.content,
     mtimeMs: info.mtimeMs,
     binary: decoded.binary,
     tooLarge: false,
+    ...(readOnly ? { readOnly: true } : {}),
+    ...(!decoded.binary && !decoded.lossless ? { readOnlyReason: 'encoding' as const } : {}),
     encoding: decoded.encoding,
   };
 }
@@ -191,15 +233,46 @@ export async function codeGraphQueryIn(
   return String(result ?? '');
 }
 
-/** Editor tab: content-version compare-and-swap followed by atomic replace.
- *  A deleted/renamed/externally changed file is never silently recreated or
- *  overwritten; the renderer must explicitly adopt the new disk version. */
+/** Editor saves serialize with overlapping project mutations in this process.
+ * Content is rechecked before atomic replacement. Uncooperative writers (other
+ * processes, shell/agent tools, OS trash) are not locked: the last check/rename
+ * gap is NOT an atomic filesystem compare-and-swap against those writers. */
 export async function writeProjectTextFileIn(
   root: string,
   relPath: string,
   content: string,
   expectedContent: string,
   encoding?: ProjectTextEncoding
+): Promise<{ mtimeMs: number }> {
+  return mutateProjectEntries(root, [relPath], () =>
+    writeProjectTextFileUnlocked(root, relPath, content, expectedContent, encoding)
+  );
+}
+
+type ProjectFileReplacement = {
+  before: Buffer;
+  after: Buffer;
+  mode: number;
+  destination: string;
+};
+
+// Rename replaces the leaf itself, so resolve its parent rather than a leaf
+// symlink. Neither a save nor recovery may follow a retargeted directory alias.
+function replacementDestination(file: string): string {
+  // Queue keys deliberately over-serialize case variants. Destination identity
+  // must retain case: A/file and a/file can be different replacement targets.
+  return join(realpathSync(dirname(file)), basename(file));
+}
+
+// Caller owns the complete mutation claim, including a batch's rollback.
+async function writeProjectTextFileUnlocked(
+  root: string,
+  relPath: string,
+  content: string,
+  expectedContent: string,
+  encoding?: ProjectTextEncoding,
+  onCommitted?: (replacement: ProjectFileReplacement) => void,
+  expectedDestination?: string
 ): Promise<{ mtimeMs: number }> {
   if (typeof content !== 'string' || content.length > 4_194_304) throw new TypeError('File content is invalid.');
   if (typeof expectedContent !== 'string' || expectedContent.length > 4_194_304) {
@@ -215,34 +288,131 @@ export async function writeProjectTextFileIn(
     throw new TypeError('File encoding is invalid.');
   }
   const file = projectEntryPathIn(root, relPath);
-  const current = decodeProjectText(await readFile(file));
+  // Own the destination before the first asynchronous read. A batch passes
+  // its preflight identity, so earlier writes cannot retarget a later entry.
+  const destination = expectedDestination ?? replacementDestination(file);
+  const validatePath = () => {
+    projectEntryPathIn(root, relPath);
+    if (replacementDestination(file) !== destination) {
+      throw new Error('Project path changed before saving.');
+    }
+  };
+  validatePath();
+  const currentBytes = await readFile(file);
+  const current = decodeProjectText(currentBytes);
+  requireLosslessText(current);
   if (current.binary || current.content !== expectedContent) {
     throw new Error('File changed on disk. Reload or keep your edits before saving.');
   }
   const info = await stat(file);
   if (!info.isFile()) throw new Error('Not a file.');
-  const temp = `${file}.mixdog-save-${process.pid}-${Date.now()}`;
   const targetEncoding = encoding ?? current.encoding;
+  // Ordinary saves preserve the observed BOM; an explicit encoding keeps
+  // the existing conversion contract, including a BOM for UTF-16.
+  const bytes = encodeProjectText(content, targetEncoding, encoding === undefined ? current.hasBom : true);
+  await replaceProjectFileBytes(file, bytes, currentBytes, info.mode, () => {
+    // Record the successful rename before any fallible post-commit metadata
+    // lookup. A batch must roll this file back even when the stat below fails.
+    onCommitted?.({ before: currentBytes, after: bytes, mode: info.mode, destination });
+  }, validatePath);
+  return { mtimeMs: (await stat(file)).mtimeMs };
+}
+
+/** Shared atomic byte replacement for forward saves and exact-byte recovery.
+ * The optional commit observer is internal and synchronous. A completed
+ * rollback does not depend on a subsequent metadata lookup. */
+async function replaceProjectFileBytes(
+  file: string,
+  bytes: Buffer,
+  expectedBytes: Buffer,
+  mode: number,
+  onCommitted?: () => void,
+  validatePath?: () => void
+): Promise<void> {
+  // Own the scratch path in a resolved parent. If an external process
+  // retargets a directory alias, cleanup must still remove our own file.
+  const temp = join(realpathSync(dirname(file)), `${basename(file)}.mixdog-save-${process.pid}-${randomUUID()}`);
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  let ownsTemp = false;
   try {
-    await writeFile(temp, encodeProjectText(content, targetEncoding), { mode: info.mode });
-    // Recheck immediately before the swap so a change during temp-file IO is
-    // also rejected. The final rename remains atomic for readers.
-    const rechecked = decodeProjectText(await readFile(file));
-    if (rechecked.binary || rechecked.content !== expectedContent || rechecked.encoding !== current.encoding) {
+    validatePath?.();
+    handle = await open(temp, 'wx', mode);
+    ownsTemp = true;
+    await handle.writeFile(bytes);
+    // open's mode is filtered by umask. Apply the observed permissions after
+    // writing so atomic replacement preserves them rather than narrowing them.
+    if (process.platform !== 'win32') await handle.chmod(mode);
+    await handle.close();
+    handle = undefined;
+    // Compare the bytes we actually observed/wrote, not a potentially lossy
+    // text decoding. Never roll back over a newer external edit or BOM change.
+    validatePath?.();
+    if (!(await readFile(file)).equals(expectedBytes)) {
       throw new Error('File changed on disk. Reload or keep your edits before saving.');
     }
+    validatePath?.();
     await rename(temp, file);
-    return { mtimeMs: (await stat(file)).mtimeMs };
+    ownsTemp = false;
+    onCommitted?.();
   } finally {
-    await rm(temp, { force: true }).catch(() => {});
+    await handle?.close().catch(() => {});
+    // An exclusive-create failure owns nothing, even if the random name
+    // already existed. Never delete another writer's scratch file.
+    if (ownsTemp) await rm(temp, { force: true }).catch(() => {});
+  }
+}
+
+export type ProjectTextBatchFailure = {
+  failedPath: string;
+  committedPaths: readonly string[];
+  restoredPaths: readonly string[];
+  unrestoredPaths: readonly string[];
+};
+
+type ProjectTextRollbackFailure = { relPath: string; cause: unknown };
+
+function writeFailureMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Direct callers retain structured recovery evidence and the original cause.
+ * All recovery information needed for manual intervention is also in message:
+ * existing desktop/remote transports do not preserve arbitrary Error fields. */
+export class ProjectTextBatchWriteError extends Error {
+  readonly code: string;
+  readonly result: ProjectTextBatchFailure;
+  readonly rollbackFailures: readonly ProjectTextRollbackFailure[];
+
+  constructor(
+    cause: unknown,
+    result: ProjectTextBatchFailure,
+    rollbackFailures: readonly ProjectTextRollbackFailure[]
+  ) {
+    const failures = rollbackFailures.map(({ relPath, cause: failure }) =>
+      `${JSON.stringify(relPath)} (${writeFailureMessage(failure)})`
+    );
+    const recovery = failures.length
+      ? `Rollback incomplete. Not restored: ${failures.join('; ')}. Inspect these files before retrying.`
+      : 'All committed files were restored.';
+    super(
+      `Workspace edit failed at ${JSON.stringify(result.failedPath)}: ${writeFailureMessage(cause)}. ` +
+      `Committed: ${JSON.stringify(result.committedPaths)}. Restored: ${JSON.stringify(result.restoredPaths)}. ${recovery}`,
+      { cause }
+    );
+    this.name = 'ProjectTextBatchWriteError';
+    this.code = rollbackFailures.length ? 'EPARTIAL_WRITE' : 'EWORKSPACE_WRITE';
+    this.result = result;
+    this.rollbackFailures = rollbackFailures;
   }
 }
 
 /** Closed-file half of an LSP WorkspaceEdit. Every target is read and
  * compare-checked before any write begins; each replacement then reuses the
- * same atomic CAS writer as a normal editor save. If a later file fails,
- * already-written files are rolled back only while they still contain our
- * exact replacement, so an external edit is never overwritten. */
+ * same writer as a normal editor save, under one claim for the entire batch.
+ * If a later write or its post-commit stat fails, recovery restores original
+ * bytes in reverse commit order, while preserving newer external changes.
+ * Recovery failures are reported, not swallowed. The same external-writer
+ * limitation as a single save still applies; this is not a crash journal. */
 export async function writeProjectTextFilesIn(
   root: string,
   writes: ReadonlyArray<{ relPath: string; content: string; expectedContent: string }>
@@ -258,33 +428,78 @@ export async function writeProjectTextFilesIn(
   if (new Set(normalized.map((write) => write.relPath.toLocaleLowerCase())).size !== normalized.length) {
     throw new TypeError('Workspace edit contains duplicate files.');
   }
-  for (const write of normalized) {
-    if (
-      !write.relPath ||
-      typeof write.content !== 'string' ||
-      typeof write.expectedContent !== 'string' ||
-      write.content.length > 4_194_304 ||
-      write.expectedContent.length > 4_194_304
-    ) {
-      throw new TypeError('Workspace edit file content is invalid.');
-    }
-    const current = decodeProjectText(await readFile(projectEntryPathIn(root, write.relPath)));
-    if (current.binary || current.content !== write.expectedContent) {
-      throw new Error(`File changed on disk: ${write.relPath}`);
-    }
-  }
-  const committed: typeof normalized = [];
-  try {
+  return mutateProjectEntries(root, normalized.map((write) => write.relPath), async () => {
+    // Resolve every destination while all claimed paths are still synchronous;
+    // one preflight read must not legitimize a retargeted later batch entry.
+    const destinations = new Map(normalized.map(({ relPath }) =>
+      [relPath, replacementDestination(projectEntryPathIn(root, relPath))]
+    ));
     for (const write of normalized) {
-      await writeProjectTextFileIn(root, write.relPath, write.content, write.expectedContent);
-      committed.push(write);
+      if (
+        !write.relPath ||
+        typeof write.content !== 'string' ||
+        typeof write.expectedContent !== 'string' ||
+        write.content.length > 4_194_304 ||
+        write.expectedContent.length > 4_194_304
+      ) {
+        throw new TypeError('Workspace edit file content is invalid.');
+      }
+      if (toUSVString(write.content) !== write.content) {
+        throw new TypeError('File content contains unpaired Unicode surrogates.');
+      }
+      const current = decodeProjectText(await readFile(projectEntryPathIn(root, write.relPath)));
+      requireLosslessText(current);
+      if (current.binary || current.content !== write.expectedContent) {
+        throw new Error(`File changed on disk: ${write.relPath}`);
+      }
     }
-  } catch (error) {
-    for (const write of committed.reverse()) {
-      await writeProjectTextFileIn(root, write.relPath, write.expectedContent, write.content).catch(() => {});
+    const committed: Array<ProjectFileReplacement & { relPath: string }> = [];
+    let failedPath = '';
+    try {
+      for (const write of normalized) {
+        failedPath = write.relPath;
+        await writeProjectTextFileUnlocked(
+          root, write.relPath, write.content, write.expectedContent, undefined,
+          (replacement) => { committed.push({ ...replacement, relPath: write.relPath }); },
+          destinations.get(write.relPath)
+        );
+      }
+    } catch (error) {
+      // Before any successful swap there is nothing to recover; keep the
+      // original pre-commit error (including its code and identity).
+      if (!committed.length) throw error;
+      const restored = new Set<string>();
+      const rollbackFailures: ProjectTextRollbackFailure[] = [];
+      for (const replacement of [...committed].reverse()) {
+        try {
+          const file = projectEntryPathIn(root, replacement.relPath);
+          const validatePath = () => {
+            projectEntryPathIn(root, replacement.relPath);
+            if (replacementDestination(file) !== replacement.destination) {
+              throw new Error('Project path changed before rollback.');
+            }
+          };
+          // Restore content, not a newer external chmod. Metadata failure
+          // must not prevent byte recovery; retain the saved mode as fallback.
+          let mode = replacement.mode;
+          try { mode = (await stat(file)).mode; } catch { /* Metadata is advisory during recovery. */ }
+          await replaceProjectFileBytes(
+            file, replacement.before, replacement.after, mode,
+            () => { restored.add(replacement.relPath); }, validatePath
+          );
+        } catch (cause) {
+          rollbackFailures.push({ relPath: replacement.relPath, cause });
+        }
+      }
+      const committedPaths = committed.map(({ relPath }) => relPath);
+      throw new ProjectTextBatchWriteError(error, {
+        failedPath,
+        committedPaths,
+        restoredPaths: committedPaths.filter((path) => restored.has(path)),
+        unrestoredPaths: committedPaths.filter((path) => !restored.has(path)),
+      }, rollbackFailures);
     }
-    throw error;
-  }
+  });
 }
 
 const INVALID_ENTRY_SEGMENT = /[:*?"<>|\u0000-\u001f]/;
@@ -309,16 +524,32 @@ function explorerEntrySegments(name: string): string[] {
 export async function createProjectEntryIn(root: string, relDir: string, name: string, dir: boolean): Promise<void> {
   const segments = explorerEntrySegments(name);
   const relTarget = join(String(relDir || ''), ...segments);
-  const target = projectEntryPathIn(root, relTarget);
-  if (dir) {
-    await mkdir(target, { recursive: true });
-    return;
-  }
-  await mkdir(dirname(target), { recursive: true });
-  await writeFile(target, '', { encoding: 'utf8', flag: 'wx' });
+  return mutateProjectEntries(root, [relTarget], async () => {
+    const target = projectEntryPathIn(root, relTarget);
+    if (dir) {
+      await mkdir(target, { recursive: true });
+      return;
+    }
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, '', { encoding: 'utf8', flag: 'wx' });
+  });
 }
 
-/** Files tree: rename an entry in place (same directory). */
+// Only absence authorizes a destination. Permission/IO failures are not absence;
+// lstat also treats a dangling symlink as an occupied directory entry.
+async function entryExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+/** Files tree: rename in place without replacing a distinct existing entry.
+ * The check and rename are serialized with this module's mutations, not with
+ * external processes. Node's portable rename API has no no-replace flag. */
 export async function renameProjectEntryIn(root: string, relPath: string, newName: string): Promise<void> {
   const trimmed = String(newName || '').trim();
   if (!trimmed || /[\\/:*?"<>|\u0000-\u001f]/.test(trimmed) || trimmed === '.' || trimmed === '..') {
@@ -326,30 +557,40 @@ export async function renameProjectEntryIn(root: string, relPath: string, newNam
   }
   const source = projectEntryPathIn(root, relPath);
   if (source === resolve(root)) throw new Error('Cannot rename the project root.');
-  await rename(source, join(dirname(source), trimmed));
+  const destinationRel = join(dirname(relPath.replace(/\\/g, '/')), trimmed);
+  return mutateProjectEntries(root, [relPath, destinationRel], async () => {
+    const from = projectEntryPathIn(root, relPath);
+    const destination = projectEntryPathIn(root, destinationRel);
+    await lstat(from);
+    if (from === destination) return;
+    if (await entryExists(destination)) {
+      const names = await readdir(dirname(from));
+      const caseOnly = basename(from).toLowerCase() === trimmed.toLowerCase()
+        && names.includes(basename(from)) && !names.includes(trimmed);
+      if (!caseOnly) throw new Error('An entry with that name already exists in the target folder.');
+    }
+    await rename(from, destination);
+  });
 }
 
 /** Files tree: move an entry into another project folder (Explorer DnD and
  *  cut/paste). Never overwrites; a same-name target is a hard error. */
 export async function moveProjectEntryIn(root: string, relPath: string, targetDirRel: string): Promise<void> {
-  const source = projectEntryPathIn(root, relPath);
-  if (source === resolve(root)) throw new Error('Cannot move the project root.');
-  const targetDir = projectEntryPathIn(root, targetDirRel);
-  if (!(await stat(targetDir)).isDirectory()) throw new Error('Move target is not a folder.');
-  if (targetDir === source || targetDir.startsWith(source + sep)) {
-    throw new Error('Cannot move a folder into itself.');
-  }
-  const destination = join(targetDir, basename(source));
-  if (destination === source) return;
-  if (
-    await stat(destination).then(
-      () => true,
-      () => false
-    )
-  ) {
-    throw new Error('An entry with that name already exists in the target folder.');
-  }
-  await rename(source, destination);
+  return mutateProjectEntries(root, [relPath, targetDirRel], async () => {
+    const source = projectEntryPathIn(root, relPath);
+    if (source === resolve(root)) throw new Error('Cannot move the project root.');
+    const targetDir = projectEntryPathIn(root, targetDirRel);
+    if (!(await stat(targetDir)).isDirectory()) throw new Error('Move target is not a folder.');
+    if (targetDir === source || targetDir.startsWith(source + sep)) {
+      throw new Error('Cannot move a folder into itself.');
+    }
+    const destination = join(targetDir, basename(source));
+    if (destination === source) return;
+    if (await entryExists(destination)) {
+      throw new Error('An entry with that name already exists in the target folder.');
+    }
+    await rename(source, destination);
+  });
 }
 
 /** Files tree: copy an entry into a project folder. Collisions take the
@@ -359,30 +600,28 @@ export async function copyProjectEntryIn(
   relPath: string,
   targetDirRel: string
 ): Promise<{ name: string }> {
-  const source = projectEntryPathIn(root, relPath);
-  if (source === resolve(root)) throw new Error('Cannot copy the project root.');
-  const targetDir = projectEntryPathIn(root, targetDirRel);
-  if (!(await stat(targetDir)).isDirectory()) throw new Error('Copy target is not a folder.');
-  if (targetDir === source || targetDir.startsWith(source + sep)) {
-    throw new Error('Cannot copy a folder into itself.');
-  }
-  const sourceIsDir = (await stat(source)).isDirectory();
-  const exists = (candidate: string) =>
-    stat(join(targetDir, candidate)).then(
-      () => true,
-      () => false
-    );
-  let name = basename(source);
-  if (await exists(name)) {
-    const dot = sourceIsDir ? -1 : name.lastIndexOf('.');
-    const stem = dot > 0 ? name.slice(0, dot) : name;
-    const extension = dot > 0 ? name.slice(dot) : '';
-    let counter = 0;
-    while (await exists(name)) {
-      counter += 1;
-      name = counter === 1 ? `${stem} copy${extension}` : `${stem} copy ${counter}${extension}`;
+  return mutateProjectEntries(root, [relPath, targetDirRel], async () => {
+    const source = projectEntryPathIn(root, relPath);
+    if (source === resolve(root)) throw new Error('Cannot copy the project root.');
+    const targetDir = projectEntryPathIn(root, targetDirRel);
+    if (!(await stat(targetDir)).isDirectory()) throw new Error('Copy target is not a folder.');
+    if (targetDir === source || targetDir.startsWith(source + sep)) {
+      throw new Error('Cannot copy a folder into itself.');
     }
-  }
-  await cp(source, join(targetDir, name), { recursive: true, force: false, errorOnExist: true });
-  return { name };
+    const sourceIsDir = (await stat(source)).isDirectory();
+    const exists = (candidate: string) => entryExists(join(targetDir, candidate));
+    let name = basename(source);
+    if (await exists(name)) {
+      const dot = sourceIsDir ? -1 : name.lastIndexOf('.');
+      const stem = dot > 0 ? name.slice(0, dot) : name;
+      const extension = dot > 0 ? name.slice(dot) : '';
+      let counter = 0;
+      while (await exists(name)) {
+        counter += 1;
+        name = counter === 1 ? `${stem} copy${extension}` : `${stem} copy ${counter}${extension}`;
+      }
+    }
+    await cp(source, join(targetDir, name), { recursive: true, force: false, errorOnExist: true });
+    return { name };
+  });
 }

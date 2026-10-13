@@ -5,7 +5,10 @@
  */
 import { writeStatuslineRoute } from '../../statusline-route.mjs';
 import { clean, hasOwn } from '../../../runtime/agent/orchestrator/runtime-core/session-text.mjs';
-import { toolSpecForMode, deferredSurfaceModeForLead } from '../../../runtime/agent/orchestrator/runtime-core/effort.mjs';
+import {
+  toolSpecForMode,
+  deferredSurfaceModeForLead,
+} from '../../../runtime/agent/orchestrator/runtime-core/effort.mjs';
 import { isScratchConversation } from '../shared.mjs';
 
 export function resolveResumeCwd(session, currentCwd) {
@@ -68,6 +71,7 @@ export function createSessionResume(deps, { ingestSessionIntoMemory, closeSurfac
       model: resumed.model,
       effort: resumeEffort,
       fast: resumed.fast === true,
+      autoEffort: resumed.autoEffort !== false,
       modelParameters: resumed.modelParameters || {},
     });
   }
@@ -89,6 +93,8 @@ export function createSessionResume(deps, { ingestSessionIntoMemory, closeSurfac
       const activeSession = getSession();
       activeSession.effort = getRoute().effectiveEffort || null;
       activeSession.fast = getRoute().fast === true;
+      if (getRoute().autoEffort === false) activeSession.autoEffort = false;
+      else delete activeSession.autoEffort;
       activeSession.cwd = getCurrentCwd();
       restoreResumedToolSurface(activeSession, getRoute());
       writeStatuslineRoute(statusRoutes, activeSession, getRoute());
@@ -97,6 +103,9 @@ export function createSessionResume(deps, { ingestSessionIntoMemory, closeSurfac
   }
 
   async function resume(id) {
+    // An addressed runtime may only reopen its own conversation; checked
+    // before anything is retired or closed.
+    deps.assertResumeTarget?.(id);
     clearRoutePreparation?.();
     const prev = getSession();
     // Captured before the manager reopens anything: the scratch decision for

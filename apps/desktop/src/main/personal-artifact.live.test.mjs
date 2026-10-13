@@ -12,7 +12,7 @@ test('personal Windows artifact retains its separate identity and numeric calibr
   const appArchive = join(resources, 'app.asar');
   const meta = JSON.parse(extractFile(appArchive, 'package.json').toString());
   assert.equal(meta.name, 'mixdog-personal');
-  assert.equal(meta.version, '1.0.11-personal.1');
+  assert.equal(meta.version, '1.1.2-personal.1');
   await access(join(output, 'win-unpacked', 'Mixdog Personal.exe'));
   await access(join(resources, 'LICENSE.txt'));
   await access(join(resources, 'NOTICE.md'));
@@ -25,7 +25,7 @@ test('personal Windows artifact retains its separate identity and numeric calibr
 });
 
 test('personal installer is a Windows executable and publishing is disabled', async () => {
-  const installer = join(output, 'mixdog-personal-1.0.11-personal.1-win-x64.exe');
+  const installer = join(output, 'mixdog-personal-1.1.2-personal.1-win-x64.exe');
   const handle = await open(installer, 'r');
   try {
     const bytes = Buffer.alloc(64);

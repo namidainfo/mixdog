@@ -8,6 +8,7 @@ import { presetKey, writeAgentStatuslineRoute } from '../helpers.mjs';
 import { resolveAgentWatchdogPolicy } from '../../../../runtime/agent/orchestrator/agent-runtime/agent-progress-watchdog.mjs';
 import { prepareAgentSession } from '../../../../runtime/agent/orchestrator/agent-runtime/session-builder.mjs';
 import { getProvider } from '../../../../runtime/agent/orchestrator/providers/registry.mjs';
+import { resolveRouteContextState } from '../../../route-state.mjs';
 import { createSpawnPlanner } from './spawn-plan.mjs';
 
 /** The route fields every worker-row and tag record carries. */
@@ -19,12 +20,13 @@ export function presetDescriptor(agent, preset, presetName) {
     model: preset.model,
     effort: preset.effort || null,
     fast: preset.fast === true,
+    ...(preset.autoEffort === false ? { autoEffort: false } : {}),
   };
 }
 
-// Spawn prewarm builds the materialized stable prompt and keeps the resulting
-// Codex-style client handle reserved for the first turn. Fire-and-forget:
-// failures fall back to the lazy per-send handshake.
+// Spawn prewarm opens the session's pooled socket ahead of the first turn
+// (connection only). Fire-and-forget: failures fall back to the lazy
+// per-send handshake.
 // MIXDOG_AGENT_SPAWN_WS_PREWARM=0 disables.
 function maybePrewarmSpawnTransport(plan, session) {
   if (process.env.MIXDOG_AGENT_SPAWN_WS_PREWARM === '0') return;
@@ -80,14 +82,21 @@ export function createSpawnPreparer({
   }
 
   async function createSpawnedSession(plan, spec, prepState) {
+    // A sub-100 context share needs the window it selects; a percent alone
+    // keeps the full served window.
+    const sessionSpec = { ...spec };
+    if (plan.preset.contextPercent) {
+      const { contextPercent, selectedContextWindow } = resolveRouteContextState(plan.preset, null);
+      Object.assign(sessionSpec, { contextPercent, selectedContextWindow });
+    }
     if (sessionSurface?.canonical === true && typeof sessionSurface.createChild === 'function') {
-      return sessionSurface.createChild({ spec, prompt: plan.prompt, tag: plan.tag });
+      return sessionSurface.createChild({ spec: sessionSpec, prompt: plan.prompt, tag: plan.tag });
     }
     await ensureProvider(plan.config, plan.preset.provider);
     if (prepState?.timedOut) {
       throw new Error('agent spawn prep timed out before session bind');
     }
-    return prepareAgentSession(spec);
+    return prepareAgentSession(sessionSpec);
   }
 
   async function prepareSpawnInProcess(args, callerCwd = null, context = {}, prepState = null) {
@@ -116,5 +125,5 @@ export function createSpawnPreparer({
     return prepareSpawnInProcess(args, callerCwd, context, prepState);
   }
 
-  return { prepareSpawn, prepareSpawnInProcess };
+  return { prepareSpawn, prepareSpawnInProcess, createSpawnedSession };
 }

@@ -5,7 +5,9 @@ export { convertMessagesToResponsesInput } from './openai-responses-input.mjs';
 import { buildStableProviderPromptCacheKey, resolveProviderPromptCacheLane } from '../agent-runtime/cache-strategy.mjs';
 import { isResponsesFreeformTool, toResponsesCustomTool } from './custom-tool-wire.mjs';
 import { _envFlag } from './openai-oauth-http-sse.mjs';
-import { findCachedCodexModel, codexModelSupportsServiceTier } from './openai-oauth-catalog.mjs';
+import { findCachedCodexModel } from './openai-oauth-catalog.mjs';
+import { resolveOpenAiServiceTier } from './openai-service-tier.mjs';
+import { daybreakAccessPrograms } from '../../../shared/llm/openai-daybreak.mjs';
 
 export function toOpenAIResponsesTool(t) {
   if (t?.name === 'load_tool' || t?.name === 'tool_search') {
@@ -46,10 +48,6 @@ function _codexModelSupportsReasoningSummaries(id) {
     if (typeof flag === 'boolean') return flag;
   }
   return true;
-}
-
-export function buildCodexStartupPrewarmBody(body) {
-  return { ...body, input: [], generate: false };
 }
 
 // Effort normalization: `ultra` collapses to
@@ -128,7 +126,7 @@ function requestedMaxOutputTokens(opts) {
 // probed 2026-06-11). Only send the request value when the model catalog
 // advertises it.
 function requestedServiceTier(model, opts) {
-  return opts.fast === true && codexModelSupportsServiceTier(model, 'priority') ? 'priority' : '';
+  return resolveOpenAiServiceTier(opts.promptCacheProvider === 'openai' ? 'openai' : 'openai-oauth', model, opts);
 }
 
 // Both OpenAI routes retain reasoning in full logical history. Delta
@@ -222,6 +220,12 @@ export function buildRequestBody(messages, model, tools, sendOpts) {
     toolChoice,
   });
   const verbosity = requestedVerbosity(opts);
+  // Daybreak Blue rides on the ChatGPT route only, and only for a model that
+  // accepts it; the server still decides entitlement.
+  const accessPrograms =
+    promptCacheProvider === 'openai-oauth'
+      ? daybreakAccessPrograms(findCachedCodexModel(model) || model, opts.modelParameters)
+      : null;
   // Match the request body shape the OAuth backend expects so the
   // server-side auto-cache routes correctly: text.verbosity / include /
   // tool_choice / parallel_tool_calls are inert for most callers but their
@@ -249,6 +253,7 @@ export function buildRequestBody(messages, model, tools, sendOpts) {
     ...(serviceTier ? { service_tier: serviceTier } : {}),
     prompt_cache_key: promptCacheKey,
     text: { verbosity },
+    ...(accessPrograms ? { access_programs: accessPrograms } : {}),
     ...(maxOutputTokens ? { max_output_tokens: maxOutputTokens } : {}),
   };
 }

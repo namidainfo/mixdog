@@ -3,7 +3,7 @@ import { hasOwn } from '../../runtime/shared/object.mjs';
 import { isHiddenAgent } from '../../runtime/agent/orchestrator/internal-agents.mjs';
 import { normalizeWorkflowRoute } from '../../runtime/agent/orchestrator/runtime-core/workflow.mjs';
 import { ensureProviderEnabled } from '../../runtime/agent/orchestrator/runtime-core/config-helpers.mjs';
-import { fastCapableFor } from '../../runtime/agent/orchestrator/runtime-core/model-capabilities.mjs';
+import { selectionFastCapable } from '../route-state.mjs';
 import { canonicalizeAgentRouteStorage, withAgentDisabled } from '../../runtime/shared/agent-route-config.mjs';
 import { agentEditorId } from './shared.mjs';
 
@@ -43,16 +43,22 @@ export function createAgentRouteApi(deps) {
       clean(selectedRoute.provider) === clean(stored.provider) && clean(selectedRoute.model) === clean(stored.model);
     const inheritedEffort = sameModel ? stored.effort || null : null;
     const inheritedModelParameters = sameModel ? stored.modelParameters || {} : {};
+    const inheritedContextPercent = sameModel ? stored.contextPercent : undefined;
     selectedRoute = {
       ...selectedRoute,
       effort: requested.effort !== undefined ? selectedRoute.effort : inheritedEffort,
       fast: requested.fast !== undefined ? selectedRoute.fast === true : sameModel && stored.fast === true,
+      // Main's modelSettings bucket must not decide an agent's Auto effort.
+      autoEffort: requested.autoEffort !== undefined ? requested.autoEffort !== false : !sameModel || stored.autoEffort !== false,
       modelParameters:
         requested.modelParameters !== undefined ? selectedRoute.modelParameters : inheritedModelParameters,
+      // resolveRoute reads contextPercent from Main's modelSettings bucket;
+      // an agent route owns its own.
+      contextPercent: requested.contextPercent !== undefined ? requested.contextPercent : inheritedContextPercent,
     };
     await ensureProvidersReady(ensureProviderEnabled(getConfig(), selectedRoute.provider));
     const modelMeta = await lookupModelMeta(selectedRoute.provider, selectedRoute.model);
-    const fastCapable = fastCapableFor(
+    const fastCapable = selectionFastCapable(
       selectedRoute.provider,
       modelMeta,
       selectedRoute.effort,

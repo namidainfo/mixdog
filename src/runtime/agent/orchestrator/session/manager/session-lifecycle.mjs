@@ -4,7 +4,9 @@
 // resumeSession (reload tools for a stored session) all share the same tool
 // resolution + context-meta + agent-runtime resolution helpers.
 import { getProvider } from '../../providers/registry.mjs';
+import { invalidateContextUsageSnapshot, invalidateProviderContextBaseline } from '../loop/compact-policy.mjs';
 import { saveSession, saveSessionAsync, saveSessionAsyncDeferred, loadSession, setLiveSession } from '../store.mjs';
+import { _liveSessions } from '../store/live-state.mjs';
 import { _isActivelyOwnedElsewhere, _recoverTurnCheckpointDurably } from './session-owner-liveness.mjs';
 import { isAgentOwner } from '../../agent-owner.mjs';
 import { getHiddenAgent } from '../../internal-agents.mjs';
@@ -45,7 +47,7 @@ export { isSessionOwnerGone, recoverSessionAfterProcessRestart } from './session
 // re-exported so prior importers of this module stay unchanged.
 export { prefetchSession, prepareSessionProjection } from './prepared-resume-cache.mjs';
 
-function buildSessionProviderCacheOpts(providerName, sessionId, agent = null) {
+function buildSessionProviderCacheOpts(providerName, sessionId, agent = null, config = null) {
   // Keep this in sync with createSession's provider-cache policy: only
   // explicit-breakpoint providers get BP cache opts here; OpenAI/key-prefix
   // providers use promptCacheKey and request-time strategy instead, plus the
@@ -56,7 +58,7 @@ function buildSessionProviderCacheOpts(providerName, sessionId, agent = null) {
   try {
     let autoClear = null;
     if (!agent || agent === 'lead') {
-      const loadedConfig = loadConfig({ secrets: false });
+      const loadedConfig = config || loadConfig({ secrets: false });
       const normalizedAutoClear = normalizeAutoClearConfig(loadedConfig?.autoClear);
       autoClear = {
         ...normalizedAutoClear,
@@ -67,6 +69,29 @@ function buildSessionProviderCacheOpts(providerName, sessionId, agent = null) {
   } catch {
     return null;
   }
+}
+
+// Re-derive a Lead session's builder-made cache policy (messages TTL follows
+// the auto-clear idle window). Explicit caller/profile policies, non-Lead
+// sessions and non-explicit-breakpoint providers are left untouched.
+export function refreshSessionProviderCacheOpts(session, config = null) {
+  if (!session || session.providerCacheOptsOverride === true) return false;
+  if (session.agent && session.agent !== 'lead') return false;
+  if (cacheCapabilityForProvider(session.provider) !== 'explicit-breakpoint') return false;
+  const next = buildSessionProviderCacheOpts(session.provider, session.id, session.agent, config);
+  if (!next) return false;
+  session.providerCacheOpts = next;
+  return true;
+}
+
+// An auto-clear settings change reaches every Lead session held in this
+// process, not only the one on screen; persisted ones refresh on resume.
+export function refreshLiveSessionsProviderCacheOpts(config = null) {
+  let refreshed = 0;
+  for (const session of _liveSessions.values()) {
+    if (refreshSessionProviderCacheOpts(session, config)) refreshed += 1;
+  }
+  return refreshed;
 }
 
 // --- agent spawn (createSession) ---
@@ -129,6 +154,8 @@ function resolveSessionRoute(opts, presetObj, profile) {
   const toolPreset = opts.tools || presetObj?.tools || (typeof opts.preset === 'string' ? opts.preset : null) || 'full';
   const effort = Object.hasOwn(opts, 'effort') ? opts.effort || null : presetObj?.effort || null;
   const fast = presetObj?.fast === true || opts.fast === true;
+  // Absent means on: an explicit request wins, else the preset's own flag.
+  const autoEffort = opts.autoEffort !== undefined ? opts.autoEffort !== false : presetObj?.autoEffort !== false;
   let modelParameters = {};
   if (opts.modelParameters && typeof opts.modelParameters === 'object') {
     modelParameters = { ...opts.modelParameters };
@@ -148,7 +175,18 @@ function resolveSessionRoute(opts, presetObj, profile) {
   // materialization. Supplying that reservation here keeps the address
   // stable across intake -> queued turn -> provider execution.
   const id = requestedId || mintSessionId();
-  return { providerName, modelName, provider, toolPreset, effort, fast, modelParameters, contextPercent, id };
+  return {
+    providerName,
+    modelName,
+    provider,
+    toolPreset,
+    effort,
+    fast,
+    autoEffort,
+    modelParameters,
+    contextPercent,
+    id,
+  };
 }
 
 // Unified-shard policy — no broad role-specific schema filter. Keep
@@ -200,6 +238,7 @@ export function createSession(opts) {
     contextMeta,
     origin: sessionOriginFields(opts, { profile, presetObj, providerCacheOpts, surface }),
   });
+  session.providerCacheOptsOverride = Boolean(resolved.providerCacheOpts);
   refreshSessionBp3Environment(session, opts.cwd);
   const titleReservation = opts.titleReservation || reserveSessionTitle(session);
   if (titleReservation) {
@@ -267,6 +306,10 @@ function applyRouteFields(session, route) {
   if (route.provider) session.provider = route.provider;
   if (route.model) session.model = route.model;
   if (Object.hasOwn(route, 'fast')) session.fast = route.fast === true;
+  if (Object.hasOwn(route, 'autoEffort')) {
+    if (route.autoEffort === false) session.autoEffort = false;
+    else delete session.autoEffort;
+  }
   if (Object.hasOwn(route, 'effort')) session.effort = route.effort || null;
   ensureCodexWireSessionId(session);
   if (Object.hasOwn(route, 'modelParameters')) {
@@ -314,6 +357,7 @@ function applyRouteContextWindow(session, routeChanged, selectedContextWindowPro
 function resetSessionForRouteChange(id, session, previousModel, previousProvider) {
   session.promptCacheKey = providerCacheKey(session.provider);
   session.providerCacheOpts = buildSessionProviderCacheOpts(session.provider, session.id, session.agent) || null;
+  session.providerCacheOptsOverride = false;
   session.lastInputTokens = 0;
   session.lastOutputTokens = 0;
   session.lastCachedReadTokens = 0;
@@ -343,7 +387,34 @@ function resetSessionForRouteChange(id, session, previousModel, previousProvider
   _forgetPreparedResume(id);
 }
 
-export function updateSessionRoute(id, route = {}) {
+// Every message field a provider adapter replays or re-reads as native state.
+const PROVIDER_REPLAY_FIELDS = [
+  'providerReplay',
+  'reasoning',
+  'thinkingBlocks',
+  'assistantBlocks',
+  'reasoningItems',
+  'reasoningContent',
+  'providerMetadata',
+];
+
+// Provider-native replay (reasoning items, thinking blocks) belongs to the
+// provider that produced it. Replace, never mutate, so delta saves rewrite.
+function stripProviderReplay(session) {
+  if (!Array.isArray(session.messages)) return;
+  session.messages = session.messages.map((message) => {
+    if (!message || !PROVIDER_REPLAY_FIELDS.some((field) => field in message)) return message;
+    const plain = { ...message };
+    for (const field of PROVIDER_REPLAY_FIELDS) delete plain[field];
+    return plain;
+  });
+}
+
+// `options.crossProvider` is the explicit in-place continuation of an
+// established session on another model: the previous provider's replay state
+// and context readings are dropped so the next turn re-measures (and
+// auto-compacts) against the new model's window.
+export function updateSessionRoute(id, route = {}, options = {}) {
   if (!id) return null;
   const session = loadSession(id);
   if (!session || session.closed === true) return null;
@@ -354,6 +425,11 @@ export function updateSessionRoute(id, route = {}) {
     (route.provider && route.provider !== previousProvider) || (route.model && route.model !== previousModel);
   applyRouteContextWindow(session, routeChanged, Object.hasOwn(route, 'selectedContextWindow'));
   if (routeChanged) resetSessionForRouteChange(id, session, previousModel, previousProvider);
+  if (routeChanged && options.crossProvider === true) {
+    stripProviderReplay(session);
+    invalidateContextUsageSnapshot(session);
+    invalidateProviderContextBaseline(session);
+  }
   // The model feeds the `# Session` prompt block (`Model: …`).
   // Rebuild it here: createSession stamped the block with the creation-time
   // route and set sessionStartMetaInjected, so the ask-time refresh guard
@@ -456,6 +532,7 @@ export async function resumeSession(sessionId, preset, options = {}) {
   if (_isActivelyOwnedElsewhere(session, sessionId)) return _attachViewerSession(session, sessionId);
   _recoverTurnCheckpointDurably(session, sessionId);
   _refreshResumedTools(session, sessionId, preset);
+  refreshSessionProviderCacheOpts(session);
   // The live session already owns the refreshed tools and desktop scope.
   // Defer the structured clone + worker round-trip so opening a conversation
   // is not blocked on persisting the same in-memory state back to disk.

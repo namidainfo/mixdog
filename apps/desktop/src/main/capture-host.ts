@@ -1,6 +1,7 @@
 import type {
   DesktopAbortOptions,
   DesktopAgentPoolRow,
+  DesktopSessionContentMatch,
   DesktopCapability,
   DesktopCapabilityReadRequest,
   DesktopCapabilityReadResult,
@@ -256,6 +257,9 @@ export class CaptureService implements DesktopService {
   async codeGraphQuery(): Promise<unknown> {
     return null;
   }
+  async searchSessionContent(_query: string): Promise<DesktopSessionContentMatch[]> {
+    return [];
+  }
   async listAgentPool(): Promise<DesktopAgentPoolRow[]> {
     return [];
   }
@@ -263,7 +267,23 @@ export class CaptureService implements DesktopService {
     return true;
   }
   async renameSession(): Promise<void> {}
+  async continueSessionInModel(): Promise<boolean> {
+    return true;
+  }
+  async scheduleQuotaResume(): Promise<boolean> {
+    return true;
+  }
+  async cancelQuotaResume(): Promise<boolean> {
+    return true;
+  }
+  async getQuotaAutoResume(): Promise<boolean> {
+    return true;
+  }
+  async setQuotaAutoResume(): Promise<boolean> {
+    return true;
+  }
   async setSessionArchived(): Promise<void> {}
+  async setSessionFavorite(): Promise<void> {}
   async deleteSession(): Promise<SessionSnapshot> {
     return null;
   }
@@ -558,7 +578,8 @@ export class CaptureService implements DesktopService {
     if (
       capability === 'getOnboardingStatus' ||
       capability === 'skipOnboarding' ||
-      capability === 'completeOnboarding'
+      capability === 'completeOnboarding' ||
+      capability === 'saveStarterGuideState'
     ) {
       return { value: { completed: true } as T, snapshot: this.getSnapshot() };
     }

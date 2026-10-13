@@ -5,8 +5,6 @@ import { createSessionLifecycle } from '../session-lifecycle.mjs';
 import { createNewSessionConfig } from '../new-session-config.mjs';
 import { modelToolSchemaAllowlist } from '../../runtime/agent/orchestrator/runtime-core/tool-profile.mjs';
 import { bootProfile } from '../boot-profile.mjs';
-import { builtinFeatureActive } from '../../runtime/agent/orchestrator/runtime-core/builtin-features.mjs';
-import { warmEffortJudge } from '../../runtime/effort-judge/judge-client.mjs';
 import { resolveRoute, workflowHelpers } from './shared.mjs';
 
 export function wireSessionLifecycle(boot) {
@@ -22,6 +20,7 @@ export function wireSessionLifecycle(boot) {
       params.model !== undefined ||
       params.effort !== undefined ||
       params.fast !== undefined ||
+      params.autoEffort !== undefined ||
       params.modelParameters !== undefined,
     invalidatePreSessionToolSurface: boot.invalidatePreSessionToolSurface,
     invalidateOutputStyleStatusCache: boot.invalidateOutputStyleStatusCache,
@@ -32,6 +31,9 @@ export function wireSessionLifecycle(boot) {
   const lifecycle = createSessionLifecycle({
     rt,
     adoptSession: boot.adoptSession,
+    // Same-id recovery of an addressed runtime goes through the lifecycle
+    // resume (late-bound: the lifecycle api is built after this stage).
+    resumeAddressedSession: (id) => boot.lifecycleApi.resume(id),
     collectProviderModels: boot.collectProviderModels,
     ensureProvidersReady: boot.ensureProvidersReady,
     lookupModelMeta: boot.lookupModelMeta,
@@ -123,7 +125,6 @@ export function wireSessionLifecycle(boot) {
   scheduleModelCatalogWarmup();
   scheduleStatuslineUsageWarmup();
   scheduleAutomationAutostart(tunables.remoteAutoStartDelayMs);
-  // Auto effort keeps its judge resident, so it loads now rather than on the
-  // first turn (the worker thread does not hold the process open).
-  if (builtinFeatureActive(rt.config, 'autoEffort')) warmEffortJudge();
+  // Auto effort touches neither network nor memory at boot: the first judged
+  // turn fetches/updates the model and loads the judge (judge-client.mjs).
 }

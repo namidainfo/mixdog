@@ -9,6 +9,11 @@ async function harness(t, fetchFn, save = () => {}) {
     clientId: 'test-client',
     originator: 'test',
     extractAccountId: () => 'test-account',
+    identityFromTokens: (idToken, accessToken) => {
+      assert.equal(idToken, 'test-id');
+      assert.equal(accessToken, 'test-access');
+      return { email: 'test@example.com' };
+    },
     expiryFromAccessToken: () => 123,
     saveTokens: save,
     createServerFn(handler) {
@@ -27,7 +32,7 @@ async function harness(t, fetchFn, save = () => {}) {
   return { login, result, request };
 }
 
-const tokens = () => Response.json({ access_token: 'test-access', refresh_token: 'test-refresh', expires_in: 3600 });
+const tokens = () => Response.json({ access_token: 'test-access', id_token: 'test-id', refresh_token: 'test-refresh', expires_in: 3600 });
 
 test('callback only reports success after exchange and persistence', async t => {
   let release;
@@ -42,6 +47,7 @@ test('callback only reports success after exchange and persistence', async t => 
   assert.equal(page.status, 200);
   assert.match(page.body, /Authentication successful/);
   assert.equal((await h.result).value.account_id, 'test-account');
+  assert.deepEqual((await h.result).value.identity, { email: 'test@example.com' });
 });
 
 test('wrapped TLS failure preserves safe cause code and never shows success', async t => {

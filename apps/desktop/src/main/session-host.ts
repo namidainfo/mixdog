@@ -16,6 +16,7 @@ import type {
   DesktopNewTaskSubmitResult,
   DesktopProjectSummary,
   DesktopPromptContent,
+  DesktopSessionContentMatch,
   DesktopSessionFrameSource,
   DesktopSessionStateUpdate,
   DesktopSessionSummary,
@@ -38,6 +39,7 @@ export type { SessionClient } from './session-host-transport';
 import {
   DESKTOP_TRANSCRIPT_ITEM_LIMIT,
   type MixdogProjectsModule,
+  type MixdogSessionSearchModule,
   type MixdogSessionStoreModule,
   type StatuslineSegmentsModule,
 } from './desktop-support';
@@ -66,6 +68,7 @@ interface SessionHostRuntime {
   }): Promise<SessionClient>;
   loadProjects(): Promise<MixdogProjectsModule>;
   loadSessionStore(): Promise<MixdogSessionStoreModule>;
+  loadSessionSearch?(): Promise<MixdogSessionSearchModule>;
   loadStatuslineSegments(): Promise<StatuslineSegmentsModule>;
   executeCodeGraphTool(name: string, args: Record<string, unknown>, cwd: string): Promise<unknown>;
 }
@@ -195,7 +198,12 @@ export class SessionHost implements DesktopService {
       },
       knownProject: (path) => this.projects.knownPath(path),
       touchProject: async (path) => {
-        await this.projects.touchSelected(path);
+        try {
+          await this.projects.touchSelected(path);
+        } catch {
+          // Recency is advisory, including after the daemon accepts a task.
+          // Registration and explicit mutations keep their strict boundaries.
+        }
       },
       resolveSessionWorkspace: (path) => this.resolveSessionWorkspace(path),
       projectDirectory: (path) => this.projectDirectory(path),
@@ -500,6 +508,13 @@ export class SessionHost implements DesktopService {
     }
   }
 
+  async searchSessionContent(query: string): Promise<DesktopSessionContentMatch[]> {
+    const search = await this.runtime.loadSessionSearch?.();
+    if (!search) return [];
+    const hits = await search.searchSessionMessages(query, { limit: 50 });
+    return Array.isArray(hits) ? hits.map(({ sessionId, snippet, rank }) => ({ sessionId, snippet, rank })) : [];
+  }
+
   async listAgentPool(): Promise<DesktopAgentPoolRow[]> {
     let pending = this.agentPoolRowsPromise;
     if (!pending) {
@@ -525,6 +540,30 @@ export class SessionHost implements DesktopService {
 
   async renameSession(sessionId: string, title: string): Promise<void> {
     return this.lifecycle.renameSession(sessionId, title);
+  }
+
+  async continueSessionInModel(sessionId: string, route: DesktopModelSelection): Promise<boolean> {
+    return this.lifecycle.continueSessionInModel(sessionId, route);
+  }
+
+  async scheduleQuotaResume(sessionId: string): Promise<boolean> {
+    return this.lifecycle.scheduleQuotaResume(sessionId);
+  }
+
+  async cancelQuotaResume(sessionId: string): Promise<boolean> {
+    return this.lifecycle.cancelQuotaResume(sessionId);
+  }
+
+  async getQuotaAutoResume(): Promise<boolean> {
+    return this.lifecycle.getQuotaAutoResume();
+  }
+
+  async setQuotaAutoResume(enabled: boolean): Promise<boolean> {
+    return this.lifecycle.setQuotaAutoResume(enabled);
+  }
+
+  async setSessionFavorite(sessionId: string, favorite: boolean): Promise<void> {
+    return this.lifecycle.setSessionFavorite(sessionId, favorite);
   }
 
   async setSessionArchived(sessionId: string, archived: boolean): Promise<void> {
@@ -562,9 +601,10 @@ export class SessionHost implements DesktopService {
     projectIdOrWorkspaceId: string,
     query: string,
     limit = 50,
-    includeIgnored = false
+    includeIgnored = false,
+    includeDirectories = false
   ): Promise<string[]> {
-    return this.lifecycle.searchProjectFiles(projectIdOrWorkspaceId, query, limit, includeIgnored);
+    return this.lifecycle.searchProjectFiles(projectIdOrWorkspaceId, query, limit, includeIgnored, includeDirectories);
   }
 
   async submitNewTask(
@@ -577,9 +617,10 @@ export class SessionHost implements DesktopService {
 
   async inheritSession(
     sourceSessionId: string,
-    route?: DesktopModelSelection | null
+    route?: DesktopModelSelection | null,
+    options?: { compact: boolean } | null
   ): Promise<{ sessionId: string; snapshot: SessionSnapshot | null }> {
-    return this.lifecycle.inheritSession(sourceSessionId, route);
+    return this.lifecycle.inheritSession(sourceSessionId, route, options);
   }
 
   async submitToSession(
@@ -644,8 +685,10 @@ export class SessionHost implements DesktopService {
 
   private sessionCatalog(): DesktopSessionSummary[] {
     return this.sessionMetadata.withReadCursors(
-      this.sessionMetadata.withArchiveFlags(
-        desktopSessionSummaries(this.rawSessionRows, this.sessionMetadata.titles, this.sessionMetadata.names)
+      this.sessionMetadata.withFavoriteFlags(
+        this.sessionMetadata.withArchiveFlags(
+          desktopSessionSummaries(this.rawSessionRows, this.sessionMetadata.titles, this.sessionMetadata.names)
+        )
       )
     );
   }

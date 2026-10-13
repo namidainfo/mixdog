@@ -1,5 +1,4 @@
-import type { DesktopSessionSummary } from '../shared/contract';
-import type { UserQuestionRequest } from '../shared/contract';
+import type { DesktopQuotaResume, DesktopSessionSummary, UserQuestionRequest } from '../shared/contract';
 
 export type RecordValue = Record<string, unknown>;
 export type Project = string;
@@ -12,10 +11,14 @@ export type TranscriptItem = RecordValue & {
   modelId?: string;
   provider?: string;
   agent?: string;
+  /** Device that submitted this prompt (user rows only). */
+  device?: string;
   name?: string;
   args?: unknown;
   result?: unknown;
   rawResult?: unknown;
+  /** Structured twin of a tool result's text (e.g. the Computer Use capability refusal). */
+  toolMeta?: { code: string; missing: string[] };
   isError?: boolean;
   streaming?: boolean;
   expanded?: boolean;
@@ -26,8 +29,6 @@ export type TranscriptItem = RecordValue & {
   status?: string;
   tone?: string;
   verb?: string;
-  /** Effort Auto reasoning picked for this turn (turndone rows). */
-  autoEffort?: string;
   elapsedMs?: number;
   startedAt?: number;
   completedAt?: number;
@@ -98,6 +99,8 @@ export type Snapshot = RecordValue & {
   queued?: unknown[];
   toolApproval?: Approval | null;
   userQuestion?: UserQuestionRequest | null;
+  toolApprovalResult?: { id: string; approved: boolean; device: string; at: number } | null;
+  promptRestore?: { id: string; ids: string[]; text: string; device: string; at: number } | null;
   cwd?: string;
   project?: Project | null;
   currentProject?: Project | null;
@@ -114,15 +117,22 @@ export type Snapshot = RecordValue & {
   sessionId?: string;
   provider?: string;
   model?: string;
+  sessionProvider?: string | null;
+  sessionModel?: string | null;
   effort?: string;
+  /** Effort the runtime resolved for the turn in flight (Auto judge); null/absent when none. */
+  turnEffort?: string | null;
   fast?: boolean;
   fastCapable?: boolean;
+  /** Per-route Auto reasoning; absent means on, only `false` turns it off. */
+  autoEffort?: boolean;
   modelParameters?: Record<string, string>;
   contextPercent?: number;
   thinking?: unknown;
   spinner?: RecordValue | null;
   commandStatus?: RecordValue | null;
   goal?: GoalSnapshot | null;
+  quotaResume?: DesktopQuotaResume | null;
   promptHistoryList?: unknown[];
   desktopSessionTitle?: string;
   stats?: RecordValue;

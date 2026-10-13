@@ -183,9 +183,7 @@ function splitListedAbsoluteWindowsPaths(value) {
     .trim()
     .replace(/^\[([\s\S]*)\]$/, '$1')
     .replace(/^[\s,;]+|[\s,;]+$/g, '');
-  const pieces = body
-    .split(/[\s,;]+(?=["']?[A-Za-z]:[\\/])/)
-    .map((piece) => piece.replace(/^(["'])(.*)\1$/, '$2'));
+  const pieces = body.split(/[\s,;]+(?=["']?[A-Za-z]:[\\/])/).map((piece) => piece.replace(/^(["'])(.*)\1$/, '$2'));
   return pieces.every((piece) => /^[A-Za-z]:[\\/]/.test(piece) && !/[A-Za-z]:[\\/]/.test(piece.slice(3)))
     ? pieces
     : null;
@@ -448,7 +446,7 @@ function guardGrep(a) {
     }
     if (hasOwn(a, k) && Array.isArray(a[k])) {
       if (a[k].length === 0 || a[k].length > PUBLIC_PATH_BATCH_LIMIT || !a[k].every(isNonEmptyString)) {
-        return `Error: grep arg "${k}" must contain 1-${PUBLIC_PATH_BATCH_LIMIT} non-empty path strings`;
+        return `Error: grep arg "${k}" must contain 1-${PUBLIC_PATH_BATCH_LIMIT} non-empty path strings (${a[k].length} given, max ${PUBLIC_PATH_BATCH_LIMIT})`;
       }
       continue;
     }
@@ -627,10 +625,12 @@ function normalizePublicReadTargets(a) {
     return 'Error: read arg "file_path" must contain at least 1 target';
   }
   const windowValue = (value, fallback) => (value === undefined ? fallback : value);
+  // limit:0 is rejected by the public schema; read it as "no explicit limit".
+  const limitValue = (value, fallback) => (value === 0 ? fallback : windowValue(value, fallback));
   const validOffset = (value) => Number.isSafeInteger(value) && value >= 1;
   const validLimit = (value) => Number.isInteger(value) && value >= 1 && value <= MAX_INT;
   const defaultOffset = windowValue(a.offset, 1);
-  const defaultLimit = windowValue(a.limit, READ_GUARD_DEFAULT_LIMIT);
+  const defaultLimit = limitValue(a.limit, READ_GUARD_DEFAULT_LIMIT);
   if (!validOffset(defaultOffset) || !validLimit(defaultLimit)) {
     return `Error: read ${READ_WINDOW_RANGE_TEXT}`;
   }
@@ -648,7 +648,7 @@ function normalizePublicReadTargets(a) {
       return `Error: read target ${index + 1} must be a path string or {file_path, offset?, limit?}`;
     }
     const offset = windowValue(record.offset, defaultOffset);
-    const limit = windowValue(record.limit, defaultLimit);
+    const limit = limitValue(record.limit, defaultLimit);
     if (!validOffset(offset) || !validLimit(limit)) {
       return `Error: read target ${index + 1} ${READ_WINDOW_RANGE_TEXT}`;
     }
@@ -784,8 +784,11 @@ function guardShell(a) {
   if (unsupported) {
     return `Error: shell arg "${unsupported}" is unsupported; use only command, timeout_ms, and wait_ms`;
   }
-  if (hasOwn(a, 'wait_ms') && (!Number.isInteger(a.wait_ms) || a.wait_ms < 1000 || a.wait_ms > 120000)) {
-    return `Error: shell arg "wait_ms" must be an integer from 1000 to 120000 (got ${describeType(a.wait_ms)})`;
+  // Over-max is an unambiguous "wait as long as allowed"; clamp like the other
+  // saturating integer args instead of failing the call.
+  if (hasOwn(a, 'wait_ms') && Number.isInteger(a.wait_ms) && a.wait_ms > 120000) a.wait_ms = 120000;
+  if (hasOwn(a, 'wait_ms') && (!Number.isInteger(a.wait_ms) || a.wait_ms < 1000)) {
+    return `Error: shell arg "wait_ms" must be an integer from 15000 to 120000, e.g. wait_ms:30000 (got ${JSON.stringify(a.wait_ms)})`;
   }
   if (!hasOwn(a, 'command')) {
     return 'Error: shell requires "command"';

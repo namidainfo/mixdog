@@ -2,6 +2,7 @@ import type React from 'react';
 import type { DesktopModelSelection } from '../../shared/contract';
 import { sessionSummaryTitle } from '../../shared/session-title.mjs';
 import { t } from '../i18n';
+import { chatLinkMainTabMode, getLinkPreview } from '../link-preview-preference';
 import type { NavigationSelection } from '../navigation';
 import { AppConversationPaneSurface } from '../app-conversation-pane-surfaces';
 import { StableSessionTitle } from '../app-shell-components';
@@ -58,7 +59,35 @@ export interface PaneConversationRendererOptions {
   stageNewTaskOrchestrationMode: ReturnType<typeof useDraftPanePreferences>['stageNewTaskOrchestrationMode'];
   conversationSelectProject: (path: string) => void;
   openConversationCommandSurface: ReturnType<typeof useAppShellPanels>['openConversationCommandSurface'];
-  openFileTab: (project: string, rel: string, line?: number, accessToken?: string) => void;
+  openFileTab: (
+    project: string,
+    rel: string,
+    line?: number,
+    accessToken?: string,
+    recordHistory?: boolean,
+    mode?: 'preview' | 'pinned'
+  ) => void;
+  /** Opens a transcript file link in the pane's side dock; absent where the
+   *  surface has no dock, so links keep opening main tabs. */
+  openFileInSideDock?: (
+    leafId: string,
+    project: string,
+    rel: string,
+    line?: number,
+    accessToken?: string,
+    column?: number
+  ) => void;
+  /** Reveals a transcript folder link in the pane's side-dock Files tree;
+   *  absent where the surface has no dock. */
+  openFolderInSideDock?: (leafId: string, project: string, rel: string) => void;
+  /** Opens the pane's side dock on the session diff (the composer island's
+   *  files segment); absent where the surface has no dock. */
+  openSessionDiffInSideDock?: (leafId: string) => void;
+  /** Opens the pane's side dock on the background-jobs list (the island's
+   *  agent/shell segments); absent where the surface has no dock. */
+  openBackgroundJobsInSideDock?: (leafId: string, sessionId: string, kind: 'agent' | 'shell') => void;
+  /** Opens an agent's session (the composer island's jobs panel rows). */
+  openAgentSession: (sessionId: string, title: string, ownerSessionId: string) => void;
   replaceWithInheritedSession: (sessionId: string, route: DesktopModelSelection) => Promise<void>;
 }
 
@@ -162,9 +191,37 @@ export function createPaneConversationRenderer(options: PaneConversationRenderer
           // A chat link carries its line and, for files outside the Project,
           // its file-scoped access token. Dropping either opened the file at
           // line 1, or failed to open it at all.
-          onOpenFile: (project, rel, line, accessToken) => {
+          onOpenFile: (project, rel, line, accessToken, column) => {
             focusPane();
-            options.openFileTab(project, rel, line, accessToken);
+            if (options.openFileInSideDock) {
+              if (column) options.openFileInSideDock(leafId, project, rel, line, accessToken, column);
+              else options.openFileInSideDock(leafId, project, rel, line, accessToken);
+            } else {
+              // No right side layout: a main tab, the preview one under Link preview.
+              options.openFileTab(project, rel, line, accessToken, true, chatLinkMainTabMode(getLinkPreview()));
+            }
+          },
+          onOpenFolder: options.openFolderInSideDock
+            ? (project, rel) => {
+                focusPane();
+                options.openFolderInSideDock?.(leafId, project, rel);
+              }
+            : undefined,
+          onOpenSessionDiff: options.openSessionDiffInSideDock
+            ? () => {
+                focusPane();
+                options.openSessionDiffInSideDock?.(leafId);
+              }
+            : undefined,
+          onOpenBackgroundJobs: options.openBackgroundJobsInSideDock
+            ? (kind) => {
+                focusPane();
+                options.openBackgroundJobsInSideDock?.(leafId, paneSessionId, kind);
+              }
+            : undefined,
+          onOpenAgentSession: (sessionId, title, ownerSessionId) => {
+            focusPane();
+            options.openAgentSession(sessionId, title, ownerSessionId);
           },
           onInheritSession: options.replaceWithInheritedSession,
         }}

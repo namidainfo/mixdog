@@ -93,7 +93,6 @@ async function withKeyboard(t, run) {
     const textarea = useRef(null);
     const composing = useRef(false);
     const suppressLineBreak = useRef(false);
-    const shiftLatch = useRef(false);
     const navigation = useRef({ index: -1, seed: '' });
     const seedAttachments = useRef([]);
     const attachmentsRef = useRef([]);
@@ -103,14 +102,14 @@ async function withKeyboard(t, run) {
       textarea, composingRef: composing, suppressImeLineBreakRef: suppressLineBreak,
       draftRef: ref, setDraft: set, setCaretOffset,
     });
-    Object.assign(ctx, { value, set, textarea, ref, composing, suppressLineBreak, shiftLatch, navigation });
+    Object.assign(ctx, { value, set, textarea, ref, composing, suppressLineBreak, navigation });
     Object.assign(ctx, useComposerKeyboard({
       draft: { value, set, ref, textarea, setCaretOffset },
       slash: ctx.slash, mention: ctx.mention, selector: ctx.selector,
       history: { entries: [], navigation, seedAttachments, attachmentsRef, replaceAttachments: noop },
       queue: { pendingSubmissionId: '', hasRestorableMessages: () => false, restore: noop },
       runtime: { turnBusy: false, attachments: [], escapeClearAt, showNotice: noop },
-      ime: { composing, suppressLineBreak, shiftLatch },
+      ime: { composing, suppressLineBreak },
       actions: { send: async (...args) => ctx.sends.push(args), stop: async () => {}, clearAttachments: noop },
     }));
     return React.createElement('textarea', { ref: textarea, value, onChange: (event) => set(event.target.value) });
@@ -169,7 +168,7 @@ test('keyboard edits list newlines and backward selections but ordinary Enter st
   });
 });
 
-test('plain input, modifier newlines, shift latch and palette ownership are preserved', async (t) => {
+test('plain input, modifier newlines and palette ownership are preserved', async (t) => {
   await withKeyboard(t, async (ctx) => {
     await ctx.seed('plain', 1, 4);
     assert.equal((await ctx.key('Tab')).prevented, false);
@@ -188,11 +187,8 @@ test('plain input, modifier newlines, shift latch and palette ownership are pres
     assert.equal((await ctx.key('Tab', { ctrlKey: true })).prevented, false);
     await ctx.key('A', { shiftKey: true });
     await ctx.key('Enter', { shiftKey: true });
-    assert.equal(ctx.value, '- one');
-    assert.equal(ctx.sends.length, 1);
-    await act(async () => ctx.onKeyUp({ key: 'Shift', shiftKey: false }));
-    await ctx.key('Enter', { shiftKey: true });
     assert.equal(ctx.value, '- one\n- ');
+    assert.equal(ctx.sends.length, 0);
     ctx.slash.open = true;
     await ctx.seed('/h');
     await ctx.key('Tab');

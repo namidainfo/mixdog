@@ -4,14 +4,20 @@ import { liveAgentRows } from './AgentActivityPane';
 import type { GoalSnapshot, GoalTask, Snapshot } from './desktop-types';
 import { t } from './i18n';
 import { MxIcon } from './MxIcon';
+import { useComposerIslandTab } from './composer-island-state';
 import { useGoalAfterSubmission } from './session-goal-submission';
 import {
   goalDisplayStatus,
   goalElapsedLabel,
+  goalElapsedMinutesLabel,
   goalHasBackgroundWork,
+  goalStateKind,
+  goalStateLabel,
   goalStatusLabel,
+  goalTaskProgress,
   goalTimeLabel,
-  type GoalDisplayStatus,
+  type GoalStateKind,
+  type GoalTaskProgress,
 } from './session-goal-presentation';
 import { ComposerGoalDialog } from './ComposerGoalDialog';
 import { useClock } from './use-clock';
@@ -23,21 +29,54 @@ export {
   goalTimeLabel,
 } from './session-goal-presentation';
 
-// No strokeWidth override: the global pixel-snapped icon rule
-// (`svg.lucide { stroke-width: 1px }`, 02-base.css) outranks presentation
-// attributes anyway, so a per-glyph value is dead weight that would also
-// violate the 1px small-glyph standard if it ever won.
-function GoalGlyph({ status, working }: { status: GoalDisplayStatus; working: boolean }) {
-  if (status === 'complete') return <MxIcon name="check" size={16} />;
-  if (status === 'stopped') return <MxIcon name="stop" size={16} />;
-  if (working) return <MxIcon name="loading" size={16} />;
-  if (status === 'paused' || status === 'duration_reached') {
-    return <MxIcon name="paused" size={16} />;
-  }
-  if (status === 'blocked' || status === 'usage_limited') {
-    return <MxIcon name="warning" size={16} />;
-  }
-  return <MxIcon name="goal" size={16} />;
+/** Task progress as a short static bar: the island segment's leading mark.
+ *  It never animates; activity is named by its label, not by motion. */
+function GoalBar({ completed, total, label }: { completed: number; total: number; label?: string }) {
+  const progress = total > 0 ? Math.min(1, completed / total) : 0;
+  return (
+    // biome-ignore lint/a11y/useAriaPropsSupportedByRole: role="img" is set whenever label (the aria-label) is defined
+    <span
+      className="session-goal-bar"
+      role={label ? 'img' : undefined}
+      aria-label={label}
+      aria-hidden={label ? undefined : 'true'}
+      title={label}
+    >
+      <i style={{ width: `${progress * 100}%` }} />
+    </span>
+  );
+}
+
+const TERMINAL_STATE_ICONS: Partial<Record<GoalStateKind, string>> = { complete: 'check', stopped: 'stop' };
+
+/** The segment's leading mark: one glyph whose shape names the state. */
+function GoalStateIcon({ kind, label }: { kind: GoalStateKind; label?: string }) {
+  const name = TERMINAL_STATE_ICONS[kind] ?? `goal-${kind}`;
+  return (
+    // biome-ignore lint/a11y/useAriaPropsSupportedByRole: role="img" is set whenever label (the aria-label) is defined
+    <span
+      className="session-goal-state"
+      data-state={kind}
+      role={label ? 'img' : undefined}
+      aria-label={label}
+      title={label}
+    >
+      <MxIcon name={name} size={14} />
+    </span>
+  );
+}
+
+/** Task progress: one pip per counted task, or the thin bar for a long list. */
+function GoalProgress({ progress, label }: { progress: GoalTaskProgress; label?: string }) {
+  if (!progress.pips) return <GoalBar completed={progress.completed} total={progress.total} label={label} />;
+  return (
+    <span className="session-goal-pips" aria-hidden="true">
+      {progress.pips.map((status, index) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: pips are positional and carry no identity
+        <i key={index} data-status={status} />
+      ))}
+    </span>
+  );
 }
 
 const GOAL_TASK_GLYPHS = {
@@ -50,7 +89,8 @@ const GOAL_TASK_GLYPHS = {
   awaiting_approval: 'paused',
 } as const;
 
-function GoalTaskGlyph({ status }: { status?: GoalTask['status'] }) {
+function GoalTaskGlyph({ status, stalled = false }: { status?: GoalTask['status']; stalled?: boolean }) {
+  if (stalled) return <MxIcon name="goal-blocked" size={14} />;
   const name = (status && GOAL_TASK_GLYPHS[status as keyof typeof GOAL_TASK_GLYPHS]) || 'pending';
   return <MxIcon name={name} size={14} />;
 }
@@ -59,13 +99,14 @@ export function SessionGoalIsland({ snapshot }: { snapshot: Snapshot }) {
   const goal = useGoalAfterSubmission(snapshot.goal || null, String(snapshot.sessionId || ''));
   const active = goal?.status === 'active';
   const clock = useClock(active);
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useComposerIslandTab('goal');
   const [editing, setEditing] = useState<GoalSnapshot | null>(null);
   const [confirmStop, setConfirmStop] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
   const drawerId = useId();
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const editRef = useRef<HTMLButtonElement | null>(null);
   const sessionId = String(snapshot.sessionId || '');
   const agentWorking = liveAgentRows(snapshot).some((agent) => !agent.queued);
   const backgroundWorking = goalHasBackgroundWork(snapshot, agentWorking);
@@ -74,11 +115,8 @@ export function SessionGoalIsland({ snapshot }: { snapshot: Snapshot }) {
     displayStatus === 'responding' ||
     (displayStatus === 'active' &&
       (backgroundWorking || Boolean((snapshot.busy || snapshot.commandBusy) && !snapshot.toolApproval)));
-  let activityLabel: string | undefined;
-  if (displayStatus === 'responding') activityLabel = t('Responding');
-  else if (displayStatus === 'paused') activityLabel = t('Paused');
-  else if (displayStatus === 'active') activityLabel = t('Working');
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: sessionId and goal id are triggers that reset the local UI state, not values read in the effect
   useEffect(() => {
     setOpen(false);
     setEditing(null);
@@ -86,10 +124,9 @@ export function SessionGoalIsland({ snapshot }: { snapshot: Snapshot }) {
     setError('');
   }, [sessionId, goal?.id]);
 
-  // Presence diagnostics (MIXDOG_DESKTOP_PERF=1): the capsule sits in the
-  // composer dock, so every mount/unmount moves the transcript by its height.
-  // A flip within one session names its cause — a lane frame that carried no
-  // goal, or the post-submit mask — so a "goal blinked" report is attributable.
+  // Presence diagnostics (MIXDOG_DESKTOP_PERF=1): a flip within one session
+  // names its cause — a lane frame that carried no goal, or the post-submit
+  // mask — so a "goal blinked" report is attributable.
   const rawGoal = snapshot.goal || null;
   const visible = Boolean(goal);
   const presence = useRef('');
@@ -112,10 +149,11 @@ export function SessionGoalIsland({ snapshot }: { snapshot: Snapshot }) {
 
   // Dismiss on any interaction outside the island (or Escape) so the drawer
   // never lingers over the transcript once attention moves elsewhere.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: setOpen is re-derived each render from the same open state
   useEffect(() => {
     if (!open || editing) return undefined;
     const onPointerDown = (event: PointerEvent) => {
-      const root = rootRef.current;
+      const root = rootRef.current?.closest('.composer-island') ?? rootRef.current;
       if (root && event.target instanceof Node && root.contains(event.target)) return;
       setOpen(false);
     };
@@ -153,12 +191,14 @@ export function SessionGoalIsland({ snapshot }: { snapshot: Snapshot }) {
   };
   if (!goal) return null;
   const tasks = Array.isArray(goal.tasks) ? goal.tasks : [];
-  const tasksTotal = Math.max(tasks.length, Number(goal.tasksTotal) || 0);
-  const tasksCompleted = Math.min(
-    tasksTotal,
-    Math.max(tasks.filter((task) => task.status === 'completed').length, Number(goal.tasksCompleted) || 0)
-  );
-  const progressLabel = `${tasksCompleted}/${tasksTotal}`;
+  const progress = goalTaskProgress(goal);
+  const progressLabel = `${progress.completed}/${progress.total}`;
+  const kind = goalStateKind(goal, displayStatus);
+  const stateLabel = goalStateLabel(goal, kind, displayStatus);
+  // Attention outranks identity: where the title would sit, a state that
+  // needs the user (or has ended) names itself instead.
+  const showStateLabel = kind !== 'active' && kind !== 'paused';
+  const elapsedMinutes = goalElapsedMinutesLabel(goal, clock);
   const title = String(goal.title || goal.objective || t('Goal'));
   const objective = String(goal.objective || '');
   const terminal = goal.status === 'complete' || goal.status === 'stopped';
@@ -169,148 +209,186 @@ export function SessionGoalIsland({ snapshot }: { snapshot: Snapshot }) {
       ref={rootRef}
       className="session-goal-island"
       data-status={displayStatus}
+      data-state={kind}
       data-waiting={waiting ? 'true' : 'false'}
       data-open={open ? 'true' : 'false'}
     >
-      <div className="session-goal-stack">
-        <div className="session-goal-summary">
-          <button
-            type="button"
-            className="session-goal-trigger"
-            aria-expanded={open}
-            aria-controls={drawerId}
-            aria-label={t('Goal: {{objective}}', { objective })}
-            onClick={() => setOpen((value) => !value)}
-          >
-            <span className="session-goal-title-region">
-              <span
-                className="session-goal-glyph"
-                role={activityLabel ? 'img' : undefined}
-                aria-label={activityLabel}
-                title={activityLabel}
-              >
-                <GoalGlyph status={displayStatus} working={waiting} />
-              </span>
-              <span className="session-goal-objective" title={objective}>
-                {title}
+      {/* The island segment: state icon, task pips, title or status label
+          (dropped when the island is crowded), n/m and elapsed minutes. */}
+      <button
+        type="button"
+        className="session-goal-trigger"
+        aria-expanded={open}
+        aria-controls={drawerId}
+        aria-label={t('Goal: {{objective}}, {{status}}, {{completed}} of {{total}} tasks done', {
+          objective,
+          status: stateLabel,
+          completed: progress.completed,
+          total: progress.total,
+        })}
+        onClick={() => setOpen(!open)}
+      >
+        <GoalStateIcon kind={kind} label={stateLabel} />
+        <GoalProgress progress={progress} />
+        <span className="session-goal-objective" data-label={showStateLabel ? 'status' : 'title'} title={objective}>
+          {showStateLabel ? stateLabel : title}
+        </span>
+        <span className="session-goal-meta">
+          <span className="session-goal-progress">{progressLabel}</span>
+          {elapsedMinutes && <span className="session-goal-trigger-time">{elapsedMinutes}</span>}
+        </span>
+      </button>
+      {/* The Goal tab of the expanded island: the task drawer and its
+          pause / edit / stop controls. */}
+      <div className="session-goal-drawer" aria-hidden={open ? 'false' : 'true'} inert={!open}>
+        {/* biome-ignore lint/a11y/noRedundantRoles: the region role is spelled out for the drawer contract the Goal tests read. */}
+        <section id={drawerId} className="session-goal-panel" role="region" aria-label={t('Goal tasks')}>
+          <div className="composer-island-phead">
+            <span className="composer-island-tab" data-active="true">
+              <GoalStateIcon kind={kind} />
+              <GoalProgress progress={progress} />
+              <span className="session-goal-meta">
+                <span className="session-goal-progress">{progressLabel}</span>
+                <span className="session-goal-meta-time">
+                  <span aria-hidden="true">·</span>
+                  <span className="session-goal-time">{elapsedLabel}</span>
+                </span>
               </span>
             </span>
-            <span className="session-goal-meta">
-              <span className="session-goal-progress">{progressLabel}</span>
-              <span aria-hidden="true">·</span>
-              <span className="session-goal-time">{elapsedLabel}</span>
-            </span>
-          </button>
-          {!terminal && (
-            <div className="session-goal-controls">
-              <button
-                type="button"
-                className="session-goal-control"
-                disabled={pending}
-                aria-label={t(active ? 'Pause' : 'Resume')}
-                title={t(active ? 'Pause' : 'Resume')}
-                onClick={() => {
-                  if (!active && exhausted) setEditing({ ...goal });
-                  else void control(active ? 'pause' : 'resume');
-                }}
-              >
-                <MxIcon name={active ? 'paused' : 'play'} size={16} />
-              </button>
-              <button
-                type="button"
-                className="session-goal-control"
-                disabled={pending}
-                aria-label={t('Edit goal')}
-                title={t('Edit goal')}
-                onClick={() => setEditing({ ...goal })}
-              >
-                <MxIcon name="edit" size={16} />
-              </button>
-              <button
-                type="button"
-                className="session-goal-control"
-                disabled={pending}
-                aria-label={t('Stop goal')}
-                title={t('Stop goal')}
-                onClick={() => {
-                  setConfirmStop(true);
-                  setOpen(true);
-                }}
-              >
-                <MxIcon name="stop" size={16} />
-              </button>
-            </div>
-          )}
-        </div>
-        <div className="session-goal-drawer" aria-hidden={open ? 'false' : 'true'} inert={!open}>
-          <div className="session-goal-drawer-clip">
-            <section id={drawerId} className="session-goal-panel" role="region" aria-label={t('Goal tasks')}>
-              <div className="session-goal-content">
-                <div className="session-goal-details" role="status">
-                  {/* The header shows the objective on one ellipsized line; the
+            <button
+              type="button"
+              className="composer-island-close"
+              aria-label={t('Close')}
+              title={t('Close')}
+              onClick={() => setOpen(false)}
+            >
+              <MxIcon name="close-small" size={16} />
+            </button>
+          </div>
+          <div className="session-goal-body">
+            <div className="session-goal-content">
+              <div className="session-goal-details" role="status">
+                {/* The header shows the objective on one ellipsized line; the
                     open drawer is where the full text reads, wrapped. */}
-                  {objective && <p className="session-goal-objective-full">{objective}</p>}
-                  <span>{goalStatusLabel(goal)}</span>
+                {objective && <p className="session-goal-objective-full">{objective}</p>}
+                <span className="session-goal-statusline">
+                  <span className="session-goal-statusline-state">{goalStatusLabel(goal)}</span>
+                  <span aria-hidden="true">·</span>
                   <span>{goalTimeLabel(goal, clock)}</span>
-                </div>
-                <div className="session-goal-tasks">
-                  {tasks.length > 0 ? (
-                    <ul className="session-goal-task-list" aria-label={t('Goal tasks')}>
-                      {tasks.map((task, index) => {
-                        const taskStatus = task.status || 'pending';
-                        return (
-                          <li key={String(task.id || index)} data-status={taskStatus}>
-                            <span>
-                              <GoalTaskGlyph status={taskStatus} />
-                            </span>
-                            <div>
-                              <span>{String(task.text || '')}</span>
-                            </div>
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  ) : (
-                    <p className="session-goal-empty">{t('No tasks yet.')}</p>
-                  )}
-                </div>
-                {goal.blocker ? <p className="session-goal-blocker">{String(goal.blocker)}</p> : null}
-                {error && (
-                  <p role="alert" className="session-goal-blocker">
-                    {error}
-                  </p>
-                )}
-                {confirmStop && !terminal && (
-                  <div className="session-goal-confirm" role="group" aria-label={t('Stop goal')}>
-                    <p className="session-goal-blocker">
-                      {t('Stop this goal? Progress is kept, but it will not resume automatically.')}
-                    </p>
-                    <div className="session-goal-actions">
-                      <button
-                        type="button"
-                        className="composer-tool"
-                        disabled={pending}
-                        onClick={() => setConfirmStop(false)}
-                      >
-                        {t('Cancel')}
-                      </button>
-                      <button
-                        type="button"
-                        className="composer-tool"
-                        disabled={pending}
-                        onClick={async () => {
-                          if (await control('stop')) setConfirmStop(false);
-                        }}
-                      >
-                        {t('Confirm stop')}
-                      </button>
-                    </div>
-                  </div>
+                </span>
+              </div>
+              <div className="session-goal-tasks">
+                {tasks.length === 0 && <p className="session-goal-empty">{t('No tasks yet.')}</p>}
+                {tasks.length > 0 && (
+                  <ul className="session-goal-task-list" aria-label={t('Goal tasks')}>
+                    {tasks.map((task, index) => {
+                      const taskStatus = task.status || 'pending';
+                      // The running row carries the Goal's blocker; the one
+                      // parked on the user asks for the answer.
+                      const stalled = taskStatus === 'in_progress' && kind === 'blocked';
+                      return (
+                        <li
+                          key={String(task.id || index)}
+                          data-status={taskStatus}
+                          data-stalled={stalled ? 'true' : undefined}
+                        >
+                          <span>
+                            <GoalTaskGlyph status={taskStatus} stalled={stalled} />
+                          </span>
+                          <div>
+                            <span>{String(task.text || '')}</span>
+                          </div>
+                          {stalled && (
+                            <em className="session-goal-badge" data-tone="blocked">
+                              {t('Blocked')}
+                            </em>
+                          )}
+                          {taskStatus === 'awaiting_approval' && (
+                            <em className="session-goal-badge" data-tone="waiting">
+                              {t('Needs your answer')}
+                            </em>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
                 )}
               </div>
-            </section>
+              {goal.blocker ? <p className="session-goal-blocker">{String(goal.blocker)}</p> : null}
+              {error && (
+                <p role="alert" className="session-goal-blocker">
+                  {error}
+                </p>
+              )}
+              {confirmStop && !terminal && (
+                // biome-ignore lint/a11y/useSemanticElements: tag must stay a div; a fieldset would change layout and styling
+                <div className="session-goal-confirm" role="group" aria-label={t('Stop goal')}>
+                  <p className="session-goal-blocker">
+                    {t('Stop this goal? Progress is kept, but it will not resume automatically.')}
+                  </p>
+                  <div className="session-goal-actions">
+                    <button
+                      type="button"
+                      className="composer-tool"
+                      disabled={pending}
+                      onClick={() => setConfirmStop(false)}
+                    >
+                      {t('Cancel')}
+                    </button>
+                    <button
+                      type="button"
+                      className="composer-tool"
+                      disabled={pending}
+                      onClick={async () => {
+                        if (await control('stop')) setConfirmStop(false);
+                      }}
+                    >
+                      {t('Confirm stop')}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+            {!terminal && (
+              <div className="session-goal-controls">
+                <button
+                  type="button"
+                  className="session-goal-control"
+                  disabled={pending}
+                  aria-label={t(active ? 'Pause' : 'Resume')}
+                  title={t(active ? 'Pause' : 'Resume')}
+                  onClick={() => {
+                    if (!active && exhausted) setEditing({ ...goal });
+                    else void control(active ? 'pause' : 'resume');
+                  }}
+                >
+                  {t(active ? 'Pause' : 'Resume')}
+                </button>
+                <button
+                  type="button"
+                  ref={editRef}
+                  className="session-goal-control"
+                  disabled={pending}
+                  aria-label={t('Edit goal')}
+                  title={t('Edit goal')}
+                  onClick={() => setEditing({ ...goal })}
+                >
+                  {t('Edit')}
+                </button>
+                <button
+                  type="button"
+                  className="session-goal-control"
+                  disabled={pending}
+                  aria-label={t('Stop goal')}
+                  title={t('Stop goal')}
+                  onClick={() => setConfirmStop(true)}
+                >
+                  {t('Stop')}
+                </button>
+              </div>
+            )}
           </div>
-        </div>
+        </section>
       </div>
       {editing && (
         <ComposerGoalDialog
@@ -319,7 +397,18 @@ export function SessionGoalIsland({ snapshot }: { snapshot: Snapshot }) {
           initialGoal={editing}
           onSave={(value) => control('edit', { ...value, revision: editing.revision })}
           onClose={() => setEditing(null)}
-          returnFocus={() => rootRef.current?.querySelector<HTMLButtonElement>('.session-goal-trigger')?.focus()}
+          returnFocus={() => {
+            // The trigger is hidden while the Goal tab is open; focus lands on
+            // the panel's Edit control there, and on the trigger only when the
+            // tab is closed (the trigger is what shows).
+            const root = rootRef.current;
+            if (!root) return;
+            let target: HTMLButtonElement | null;
+            if (root.dataset.open !== 'true') target = root.querySelector<HTMLButtonElement>('.session-goal-trigger');
+            else if (editRef.current && !editRef.current.disabled) target = editRef.current;
+            else target = root.querySelector<HTMLButtonElement>('.session-goal-panel .composer-island-close');
+            target?.focus();
+          }}
         />
       )}
     </div>

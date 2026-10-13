@@ -1,3 +1,14 @@
+import { statSync } from 'node:fs';
+
+/** The file's modification time in ms; 0 when it cannot be stat-ed. */
+export function fileMtimeMs(path) {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
 export function decodeJwtPayload(token) {
   try {
     const parts = String(token || '').split('.');
@@ -12,6 +23,48 @@ export function decodeJwtPayload(token) {
 export function expiryFromAccessToken(token) {
   const exp = Number(decodeJwtPayload(token)?.exp);
   return Number.isFinite(exp) && exp > 0 ? exp * 1000 : 0;
+}
+
+// The email claim of the id_token / access token a login or refresh already
+// returned; opaque tokens simply yield nothing.
+export function emailFromJwts(...tokens) {
+  for (const token of tokens) {
+    const email = decodeJwtPayload(token)?.email;
+    if (typeof email === 'string' && email.trim()) return email.trim();
+  }
+  return '';
+}
+
+const cleanIdentityText = (value) => (typeof value === 'string' ? value.trim().slice(0, 200) : '');
+
+/**
+ * The real account behind a credential: `id` is the provider's stable account
+ * or user id, `email` its human label. Null when the credential names neither.
+ */
+export function normalizeAccountIdentity(raw) {
+  const id = cleanIdentityText(raw?.id);
+  const email = cleanIdentityText(raw?.email);
+  const organizationId = cleanIdentityText(raw?.organizationId);
+  if (!id && !email) return null;
+  return { ...(id ? { id } : {}), ...(email ? { email } : {}), ...(organizationId ? { organizationId } : {}) };
+}
+
+/** Identity keys a provider's describe() reports (never tokens). */
+export function accountIdentityFields(identity) {
+  const normalized = normalizeAccountIdentity(identity);
+  return {
+    ...(normalized?.email ? { email: normalized.email } : {}),
+    ...(normalized?.id ? { identityId: normalized.id } : {}),
+  };
+}
+
+/** Stable ids decide when both sides have one; email only when an id is missing. */
+export function sameAccountIdentity(a, b) {
+  const left = normalizeAccountIdentity(a);
+  const right = normalizeAccountIdentity(b);
+  if (!left || !right) return false;
+  if (left.id && right.id) return left.id === right.id;
+  return Boolean(left.email && right.email && left.email.toLowerCase() === right.email.toLowerCase());
 }
 
 // expires_at may arrive as a unix number (seconds or milliseconds) or an
@@ -56,6 +109,21 @@ export function oauthCredentialStatus({ hasRefresh, expiresAt, detail, refreshSk
     detail,
     expiresAt,
   };
+}
+
+const TRANSIENT_OAUTH_RE =
+  /\b(?:403|429|50[0-4])\b|rate[ _-]?limit|too many requests|bad gateway|service unavailable|gateway time-?out|timed? ?out|timeout|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|fetch failed|network/i;
+const DEAD_GRANT_RE =
+  /invalid_grant|invalid_token|unauthorized_client|refresh[ _-]?token[^.\n]{0,40}\b(?:expired|revoked)\b/i;
+
+/** True only when the token endpoint definitively rejected the grant (re-login needed). */
+export function isDefinitiveOAuthFailure(text, status = 0) {
+  const s = Number(status) || 0;
+  const body = String(text || '');
+  if (s === 403 || s === 429 || s >= 500) return false;
+  if (TRANSIENT_OAUTH_RE.test(body)) return false;
+  if (DEAD_GRANT_RE.test(body)) return true;
+  return s === 401;
 }
 
 export function scrubOAuthSecrets(text, secretValues = []) {

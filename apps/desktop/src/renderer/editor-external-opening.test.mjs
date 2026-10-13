@@ -63,11 +63,11 @@ test('desktop documents, installers and archives launch the default app without 
     openFilePath: async (...args) => external.push(args),
     readProjectFile: async (...args) => reads.push(args),
   });
-  for (const rel of ['deck.pptx', 'legacy.ppt', 'report.docx', 'sheet.xlsx', 'image.tiff', 'movie.mkv', 'chart.svg', 'Chart.SVG', 'run.exe', 'setup.msi', 'archive.zip']) {
+  for (const rel of ['image.tiff', 'movie.mkv', 'run.exe', 'setup.msi', 'archive.zip']) {
     await act(async () => view.current.value.openFileTab(' C:/Project/demo ', `docs\\${rel}`, undefined, 'grant'));
     assert.deepEqual(external.at(-1), ['C:/Project/demo', `docs/${rel}`, 'grant']);
   }
-  assert.equal(external.length, 11);
+  assert.equal(external.length, 5);
   assert.deepEqual(reads, []);
   assert.deepEqual(view.tabs, []);
   assert.deepEqual(view.opened, []);
@@ -84,7 +84,7 @@ test('a failed external launch reports the error without opening a blank editor'
       throw new Error('No application is associated with this file.');
     },
   });
-  await act(async () => view.current.value.openFileTab('C:/Project/demo', 'chart.svg'));
+  await act(async () => view.current.value.openFileTab('C:/Project/demo', 'image.tiff'));
   assert.equal(notices.length, 1);
   assert.equal(notices[0].tone, 'error');
   assert.match(notices[0].text, /No application is associated/);
@@ -95,7 +95,22 @@ test('a failed external launch reports the error without opening a blank editor'
 test('native previews, text and unsafe files retain editor routing without launching apps', async (t) => {
   const external = [];
   const view = await mountNavigation(t, { openFilePath: async (...args) => external.push(args) });
-  const names = ['image.png', 'report.pdf', 'audio.mp3', 'movie.mp4', 'note.md', 'run.ps1', 'deck.pptm', 'data.bin'];
+  const names = [
+    'image.png',
+    'chart.svg',
+    'Chart.SVG',
+    'report.pdf',
+    'audio.mp3',
+    'movie.mp4',
+    'deck.pptx',
+    'legacy.ppt',
+    'report.docx',
+    'sheet.xlsx',
+    'note.md',
+    'run.ps1',
+    'deck.pptm',
+    'data.bin',
+  ];
   for (const rel of names) {
     await act(async () => view.current.value.openFileTab('C:/Project/demo', rel));
     assert.equal(view.opened.at(-1)[0].rel, rel);
@@ -147,16 +162,18 @@ test('the external-open escape stays visible even for a successfully loaded PDF 
         reverting: false,
         cursorLine: 1,
         outline: [],
-        problemStatus: { errors: 0, warnings: 0 },
         onSave() {},
         onRevert() {},
-        onShowProblems() {},
         onFocusEditor() {},
         onRevealSymbol() {},
       })
     )
   );
-  const button = host.querySelector('.editor-breadcrumb-actions button');
+  await act(async () => host.querySelector('.dock-header-more').click());
+  // The ⋯ menu is portalled to the document body.
+  const button = [...host.ownerDocument.querySelectorAll('.dock-header-menu [role="menuitem"]')].find(
+    (node) => node.textContent === 'Open in default app'
+  );
   assert.ok(button);
   await act(async () => button.click());
   assert.deepEqual(opened, [['C:/Project/demo', 'report.pdf', 'grant']]);

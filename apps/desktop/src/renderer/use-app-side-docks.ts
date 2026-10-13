@@ -15,7 +15,7 @@ import {
   type WorkbenchSideViewId,
 } from './workbench-side-view-layout';
 import { usePaneSideDocks, type PaneSideDockDiff } from './pane-side-dock';
-import { sessionSideDockEntryForSession } from './session-side-surface-policy';
+import { isSessionSidePanelView, sessionSideDockEntryForSession } from './session-side-surface-policy';
 import { useStableEvent } from './use-stable-event';
 import type { usePaneWorkspace } from './pane-workspace-state';
 import type { useSessionPaneSurfaces } from './use-session-pane-surfaces';
@@ -42,6 +42,7 @@ export function useAppSideDocks({ paneWorkspace, sessionSurfaces, applySidebarOp
       ...(desktopFeatureEnabled('sessions') ? ['sessions' as const] : []),
       ...DEFAULT_SIDEBAR_VIEW_ORDER.filter((panel) => desktopSidebarDestinationEnabled(panel)),
       'session-diff' as const,
+      'background-jobs' as const,
       ...(browserFeatureInstalled ? ['browser' as const] : []),
       'terminal' as const,
       ...(['agents', 'search', 'source-control', 'pull-requests'] as const).filter((panel) =>
@@ -90,7 +91,9 @@ export function useAppSideDocks({ paneWorkspace, sessionSurfaces, applySidebarOp
     if (entry.diff?.source === 'session' && sessionId) {
       setSessionDiff(sessionId, null);
     }
-    if (entry.view === 'session-diff' && entry.surface === '' && sessionId) {
+    // The dock shows ONE child: closing folds the whole unit, so a Session
+    // Diff list left under the browser/terminal must not reopen it on close.
+    if (sessionId && sessionPanelViews.get(sessionId)) {
       setSessionPanelView(sessionId, null);
     }
     paneSideDocks.setOpen(leafId, false);
@@ -123,9 +126,9 @@ export function useAppSideDocks({ paneWorkspace, sessionSurfaces, applySidebarOp
       selectedPanelView === null &&
       selectedSurface === null &&
       rawEntry.surface === '' &&
-      rawEntry.view === 'session-diff'
+      isSessionSidePanelView(rawEntry.view)
     ) {
-      setSessionPanelView(sessionId, 'session-diff');
+      setSessionPanelView(sessionId, rawEntry.view);
       paneSideDocks.setOpen(leafId, true);
       return;
     }

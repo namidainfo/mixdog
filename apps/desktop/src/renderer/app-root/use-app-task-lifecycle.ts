@@ -173,7 +173,14 @@ export function useAppTaskLifecycle({
       openSelectionInFocusedPane(nextSelection, replaceKey);
       registerWorkspaceSelection(nextSelection, title, replaceKey);
     },
-    [openSelectionInFocusedPane, registerWorkspaceSelection, viewedSessionRef, unreadViewedSessionRef]
+    [
+      openSelectionInFocusedPane,
+      registerWorkspaceSelection,
+      selectionRef,
+      setSelection,
+      viewedSessionRef,
+      unreadViewedSessionRef,
+    ]
   );
 
   useEffect(() => {
@@ -227,6 +234,7 @@ export function useAppTaskLifecycle({
       newTaskDeferred,
       preferredDraftProjectPath,
       resetNewTaskDraft,
+      selectionRef,
       setComposerFocusRequest,
       setRequestedSessionId,
       tabs,
@@ -297,7 +305,10 @@ export function useAppTaskLifecycle({
     const actualSessionId = String(state?.sessionId || '');
     const actualSession = actualSessionId ? sessions.find((session) => session?.id === actualSessionId) : undefined;
     if (actualSession) {
-      activateSelection({ kind: 'session', id: actualSessionId }, sessionSummaryTitle(actualSession, t('Untitled session')));
+      activateSelection(
+        { kind: 'session', id: actualSessionId },
+        sessionSummaryTitle(actualSession, t('Untitled session'))
+      );
     } else if (actualProject) {
       const project = projects.find((item) => item.path === actualProject);
       activateSelection(
@@ -327,40 +338,47 @@ export function useAppTaskLifecycle({
     stageNewTaskProject(path);
   });
 
-  const replaceWithInheritedSession = useStableEvent(async (sourceSessionId: string, route: DesktopModelSelection) => {
-    const api = window.mixdogDesktop;
-    if (typeof api?.inheritSession !== 'function') {
-      throw new Error('Session inheritance is unavailable on this surface.');
+  const replaceWithInheritedSession = useStableEvent(
+    async (sourceSessionId: string, route: DesktopModelSelection, options?: { compact: boolean }) => {
+      const api = window.mixdogDesktop;
+      if (typeof api?.inheritSession !== 'function') {
+        throw new Error('Session inheritance is unavailable on this surface.');
+      }
+      await inheritSessionInPlace(
+        sourceSessionId,
+        route,
+        {
+          inherit: (id, sel, opts) => api.inheritSession(id, sel, opts),
+          leaves: () => paneLeavesRef.current,
+          focusedLeafId: () => focusedLeafIdRef.current,
+          sourceTitle: () => {
+            const row = sessions.find((entry) => entry?.id === sourceSessionId);
+            return row
+              ? sessionSummaryTitle(row, t('Untitled session'))
+              : tabs.find((tab) => tab.key === `session:${sourceSessionId}`)?.title || '';
+          },
+          refreshSessions,
+          readSession: requestSessionRead,
+          snapshot: (id) => defaultSessionLaneStore.get(id) as SessionSnapshot,
+          prepare: applySessionLaneResult,
+          replace: (leafId, sel, title, sourceKey, focused) => {
+            if (focused) {
+              navigationEpoch.current += 1;
+              setRequestedSessionId('');
+              finishPendingConversationHandoff();
+              activateSelection(sel, title, sourceKey);
+            } else {
+              promoteSelectionInLeaf(leafId, sel, sourceKey);
+              registerWorkspaceSelection(sel, title, sourceKey);
+            }
+          },
+        },
+        options
+      );
+      setCommandSurface(null);
+      setCommandSurfaceSessionId('');
     }
-    await inheritSessionInPlace(sourceSessionId, route, {
-      inherit: (id, sel) => api.inheritSession(id, sel),
-      leaves: () => paneLeavesRef.current,
-      focusedLeafId: () => focusedLeafIdRef.current,
-      sourceTitle: () => {
-        const row = sessions.find((entry) => entry?.id === sourceSessionId);
-        return row
-          ? sessionSummaryTitle(row, t('Untitled session'))
-          : tabs.find((tab) => tab.key === `session:${sourceSessionId}`)?.title || '';
-      },
-      refreshSessions,
-      readSession: requestSessionRead,
-      snapshot: (id) => defaultSessionLaneStore.get(id) as SessionSnapshot,
-      prepare: applySessionLaneResult,
-      replace: (leafId, sel, title, sourceKey, focused) => {
-        if (focused) {
-          navigationEpoch.current += 1;
-          setRequestedSessionId('');
-          finishPendingConversationHandoff();
-          activateSelection(sel, title, sourceKey);
-        } else {
-          promoteSelectionInLeaf(leafId, sel, sourceKey);
-          registerWorkspaceSelection(sel, title, sourceKey);
-        }
-      },
-    });
-    setCommandSurface(null);
-    setCommandSurfaceSessionId('');
-  });
+  );
 
   return {
     selection,

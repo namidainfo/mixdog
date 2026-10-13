@@ -1,27 +1,18 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 import type { DesktopEditorSettings, DesktopTextFileEncoding } from '../shared/contract';
-import { documentPreviewFormatForPath, filePreviewTypeForPath } from '../shared/file-preview';
-import {
-  normalizeEditorModelText,
-  resolveEditorBackup,
-  takeEditorFileLoad,
-  type EditorFileLoad,
-} from './editor-file-loader';
-import { mergeDocumentPreviewPages, type DocumentPreview } from './editor-document-model';
+import { normalizeEditorModelText, type EditorFileLoad } from './editor-file-loader';
 import type { EditorFileHandle, EditorRecovery, FilePreview } from './editor-pane-model';
-import { reportEditorLoadStage } from './renderer-load-metrics';
-import { isRemoteBrowserRenderer } from './remote-ui-projection';
+import { errorMessage, fileAccessError } from './editor-pane-session-errors';
+import { useEditorDiskWatch } from './editor-pane-session-disk-watch';
+import { useEditorSessionLoad } from './editor-pane-session-load';
 import { t } from './i18n';
+import { useEditorBackup } from './use-editor-backup';
+import { useEditorDocumentPages, useEditorPreviewPoll } from './use-editor-document-pages';
 
 type EditorInstance = import('monaco-editor').editor.IStandaloneCodeEditor;
 
-/** A read, stat or write that finds no file means the tab outlived its path
- *  (deleted, or renamed outside this editor): say so instead of the raw
- *  ENOENT text. */
-function fileAccessError(reason: unknown): string {
-  const message = reason instanceof Error ? reason.message : String(reason);
-  return /ENOENT|no such file|cannot find/i.test(message) ? t('File was deleted or renamed on disk.') : message;
-}
+const heldSaveError = () =>
+  t('Rich holds an edit that is not in the file yet. Resolve or discard it in the Rich editor before saving.');
 
 export function useEditorFileSession({
   editorRef,
@@ -57,13 +48,27 @@ export function useEditorFileSession({
     [editorRef, modelRef]
   );
   const [load, setLoad] = useState<EditorFileLoad | null>(null);
+  // Bumped whenever a reload, revert or backup restore replaces the model
+  // text, even when the loaded string is unchanged (edit then revert).
+  const [contentRevision, setContentRevision] = useState(0);
   const [preview, setPreview] = useState<FilePreview | null>(null);
   const [previewLoaded, setPreviewLoaded] = useState(false);
   const [previewError, setPreviewError] = useState('');
-  const [documentPreview, setDocumentPreview] = useState<DocumentPreview | null>(null);
-  const [documentError, setDocumentError] = useState('');
-  const [documentPagesLoading, setDocumentPagesLoading] = useState(false);
-  const documentPagesInFlight = useRef(false);
+  const {
+    documentPreview,
+    setDocumentPreview,
+    documentError,
+    setDocumentError,
+    documentPagesLoading,
+    documentPageErrors,
+    documentGeneration,
+    resetDocument,
+    loadDocumentPages,
+    documentPreviewRef,
+    documentPagesInFlight,
+    documentWidth,
+    documentSettling,
+  } = useEditorDocumentPages({ api, projectPath, relPath, accessToken });
   const [error, setError] = useState('');
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -78,194 +83,131 @@ export function useEditorFileSession({
   const savedText = useRef('');
   const loadedRef = useRef(false);
   const savingRef = useRef(false);
+  const readOnlyRef = useRef(false);
   const saveQueue = useRef<Promise<boolean>>(Promise.resolve(true));
-  const backupTimer = useRef<number | null>(null);
-  const backupQueue = useRef<Promise<void>>(Promise.resolve());
   const skipUnmountBackup = useRef(false);
   const onDirtyRef = useRef(onDirty);
   onDirtyRef.current = onDirty;
   const onSaveHandleRef = useRef(onSaveHandle);
   onSaveHandleRef.current = onSaveHandle;
 
+  // An edit Rich holds is not in the model, yet leaving would lose it: it
+  // keeps the file dirty, so every close path asks first, and blocks saving.
+  const richHeldRef = useRef(false);
+  // While held: the file text with the held edit, which backups keep
+  // instead of the model's (so quitting cannot lose it).
+  const richHeldText = useRef<(() => string | null) | null>(null);
+  // While held: the disk text the held edit was based on. Its backup keeps
+  // this as the expected content, never a newer disk version, so recovery
+  // after an outside change reports the conflict.
+  const richHeldDiskText = useRef<string | null>(null);
   const markDirty = useCallback((next: boolean) => {
-    setDirty(next);
-    onDirtyRef.current(next);
+    const effective = next || richHeldRef.current;
+    setDirty(effective);
+    onDirtyRef.current(effective);
   }, []);
 
-  const enqueueBackup = useCallback((operation: () => Promise<unknown>): Promise<void> => {
-    const run = backupQueue.current
-      .catch(() => undefined)
-      .then(operation)
-      .then(() => undefined);
-    backupQueue.current = run.catch(() => undefined);
-    return run;
-  }, []);
-
-  const writeBackupNow = useCallback(
-    (content: string): Promise<void> => {
-      if (!api?.writeEditorBackup) return Promise.resolve();
-      return enqueueBackup(() =>
-        api.writeEditorBackup!(projectPath, relPath, content, savedDiskText.current, accessToken)
-      );
-    },
-    [accessToken, api, enqueueBackup, projectPath, relPath]
-  );
-
-  const deleteBackup = useCallback((): Promise<void> => {
-    if (backupTimer.current !== null) {
-      window.clearTimeout(backupTimer.current);
-      backupTimer.current = null;
-    }
-    if (!api?.deleteEditorBackup) return Promise.resolve();
-    return enqueueBackup(() => api.deleteEditorBackup!(projectPath, relPath, accessToken));
-  }, [accessToken, api, enqueueBackup, projectPath, relPath]);
-
-  const scheduleBackup = useCallback(
-    (content: string) => {
-      if (backupTimer.current !== null) window.clearTimeout(backupTimer.current);
-      backupTimer.current = window.setTimeout(() => {
-        backupTimer.current = null;
-        void writeBackupNow(content).catch(() => undefined);
-      }, 500);
-    },
-    [writeBackupNow]
-  );
-
+  const { backupTimer, writeBackupNow, deleteBackup, scheduleBackup } = useEditorBackup({
+    api,
+    projectPath,
+    relPath,
+    accessToken,
+    readModel,
+    savedText,
+    savedDiskText,
+    skipUnmountBackup,
+    heldText: richHeldText,
+    heldDiskText: richHeldDiskText,
+  });
+  /** What a backup keeps while Rich holds an edit. */
+  const heldBackupText = useCallback(() => richHeldText.current?.() ?? readModel()?.getValue() ?? null, [readModel]);
+  const heldBackupBase = useCallback(() => richHeldDiskText.current ?? undefined, []);
+  // Bumped by an explicit discard and on unmount: backup work started
+  // before then (with an older generation) must not write afterwards.
+  const backupGeneration = useRef(0);
   useEffect(
     () => () => {
-      if (backupTimer.current !== null) window.clearTimeout(backupTimer.current);
-      const model = readModel();
-      if (model && !skipUnmountBackup.current && model.getValue() !== savedText.current) {
-        void writeBackupNow(model.getValue()).catch(() => undefined);
-      }
+      backupGeneration.current++;
     },
-    [readModel, writeBackupNow]
+    []
+  );
+  /** Brings the backup in line with the model (`modelText` when it differs
+   *  from the saved text, null when clean), for work that started at
+   *  `generation`. A held edit is never left without its backup: held state
+   *  is re-checked after each await, and while held the held text is
+   *  written instead of deleting. Nothing is written once a discard or
+   *  unmount has followed `generation`. */
+  const settleBackup = useCallback(
+    async (modelText: string | null, generation: number): Promise<void> => {
+      if (generation !== backupGeneration.current) return;
+      if (!richHeldRef.current) {
+        if (modelText !== null) await writeBackupNow(modelText);
+        else await deleteBackup();
+        if (generation !== backupGeneration.current || !richHeldRef.current) return;
+      }
+      const held = heldBackupText();
+      if (held !== null) await writeBackupNow(held, heldBackupBase());
+    },
+    [deleteBackup, heldBackupBase, heldBackupText, writeBackupNow]
   );
 
-  // The ordinary text/binary read, extracted so a document whose conversion
-  // fails still lands on the binary notice — with its "open in the default
-  // app" escape — instead of a dead-end error screen.
-  const readFileContents = useCallback(() => {
-    if (!api?.readProjectFile) {
-      setError(t('Desktop file access is unavailable.'));
-      return;
-    }
-    void takeEditorFileLoad(api, projectPath, relPath, accessToken, !loadedRef.current, true)
-      .then(({ file: result, backup }) => {
-        const resolution = resolveEditorBackup(result.content, backup);
-        const content = resolution.content;
-        let nextRecovery: EditorRecovery | null = null;
-        if (!result.binary && !result.tooLarge) {
-          nextRecovery = resolution.recovery;
-          if (resolution.discardBackup) {
-            void deleteBackup().catch(() => undefined);
-          }
-        }
-        loadedRef.current = true;
-        savedMtime.current = result.mtimeMs;
-        savedDiskText.current = result.content;
-        savedText.current = resolution.savedContent;
-        setLoad({ ...result, content });
-        setRecovery(nextRecovery);
-        setDiskChanged(false);
-        const model = readModel();
-        if (model && model.getValue() !== content) model.setValue(content);
-        markDirty(content !== resolution.savedContent);
-      })
-      .catch((reason) => {
-        setError(fileAccessError(reason));
-        if (loadedRef.current) setDiskChanged(true);
-      });
-  }, [accessToken, api, deleteBackup, readModel, markDirty, projectPath, relPath]);
+  const reload = useEditorSessionLoad({
+    api,
+    projectPath,
+    relPath,
+    accessToken,
+    notifyReady,
+    readModel,
+    markDirty,
+    deleteBackup,
+    loadedRef,
+    readOnlyRef,
+    savedMtime,
+    savedDiskText,
+    savedText,
+    load,
+    preview,
+    documentPreview,
+    error,
+    setLoad,
+    setError,
+    setSaveError,
+    setRevertError,
+    setPreview,
+    setPreviewLoaded,
+    setPreviewError,
+    setRecovery,
+    setDiskChanged,
+    setContentRevision,
+    resetDocument,
+    documentGeneration,
+    setDocumentPreview,
+    setDocumentError,
+  });
 
-  const reload = useCallback(() => {
-    setError('');
-    setSaveError('');
-    setRevertError('');
-    setPreviewError('');
-    setPreviewLoaded(false);
-    setPreview(null);
-    setDocumentPreview(null);
-    setDocumentError('');
-    const previewOpened = (result: { mtimeMs: number }): void => {
-      loadedRef.current = true;
-      savedMtime.current = result.mtimeMs;
-      savedDiskText.current = '';
-      savedText.current = '';
-      setLoad({
-        content: '',
-        mtimeMs: result.mtimeMs,
-        binary: true,
-        tooLarge: false,
-        encoding: 'utf8',
-      });
-      setRecovery(null);
-      setDiskChanged(false);
-      markDirty(false);
-    };
-    if (filePreviewTypeForPath(relPath) && api?.previewProjectFile) {
-      void api
-        .previewProjectFile(projectPath, relPath, accessToken)
-        .then((result) => {
-          setPreview(result);
-          previewOpened(result);
-        })
-        .catch((reason) => {
-          setLoad(null);
-          setError(fileAccessError(reason));
-        });
-      return;
-    }
-    // Desktop document clicks use the default app. Restored tabs must not
-    // launch programs on mount or retry the PDF viewer: keep the manual escape.
-    // A paired phone cannot launch the desktop app, so retain its page viewer.
-    const documentFormat = documentPreviewFormatForPath(relPath);
-    const documentFailed = (reason: unknown): void => {
-      setDocumentError(reason instanceof Error ? reason.message : String(reason));
-      readFileContents();
-    };
-    if (documentFormat && isRemoteBrowserRenderer() && api?.previewDocumentPages) {
-      void api
-        .previewDocumentPages(projectPath, relPath, accessToken, { pages: [1] })
-        .then((result) => {
-          setDocumentPreview({
-            format: result.format,
-            mtimeMs: result.mtimeMs,
-            size: result.size,
-            pageCount: result.pageCount,
-            pages: result.pages,
-          });
-          previewOpened(result);
-        })
-        .catch(documentFailed);
-      return;
-    }
-    readFileContents();
-  }, [accessToken, api, markDirty, projectPath, readFileContents, relPath]);
-
-  useEffect(() => {
-    reload();
-  }, [reload]);
-  useEffect(() => {
-    if ((error && !load) || (load && !preview && !documentPreview && (load.binary || load.tooLarge))) {
-      reportEditorLoadStage(projectPath, relPath, accessToken, 'fallback-ready', '', true);
-      notifyReady();
-    }
-  }, [accessToken, error, load, notifyReady, preview, projectPath, relPath]);
-
+  // biome-ignore lint/correctness/useExhaustiveDependencies: api is the window bridge, re-read each render and kept as a dependency so a re-installed bridge re-creates this callback.
   const saveNow = useCallback(
     async (encoding?: DesktopTextFileEncoding): Promise<boolean> => {
       const editor = editorRef.current;
       const model = readModel();
       const writer = api?.writeProjectFile;
-      if (!model || !writer) return false;
+      const generation = backupGeneration.current;
+      if (richHeldRef.current) {
+        setSaveError(heldSaveError());
+        return false;
+      }
+      if (!model || !writer || readOnlyRef.current) return false;
       if (!encoding && model.getValue() === savedText.current) return true;
       if (editorSettings.formatOnSave) {
         try {
           if (formatDocument) await formatDocument();
           else await editor?.getAction('editor.action.formatDocument')?.run();
         } catch (reason) {
-          setSaveError(t('Format on save failed: {{value0}}', { value0: reason instanceof Error ? reason.message : String(reason) }));
+          setSaveError(t('Format on save failed: {{value0}}', { value0: errorMessage(reason) }));
+          return false;
+        }
+        if (richHeldRef.current) {
+          setSaveError(heldSaveError());
           return false;
         }
       }
@@ -294,14 +236,18 @@ export function useEditorFileSession({
           window.clearTimeout(backupTimer.current);
           backupTimer.current = null;
         }
-        if (changedAfterSave) await writeBackupNow(currentContent).catch(() => undefined);
-        else await deleteBackup().catch(() => undefined);
+        await settleBackup(changedAfterSave ? currentContent : null, generation).catch(() => undefined);
         void syncLspRef.current('save');
+        // An edit held during the write is still not in the file.
+        if (richHeldRef.current) {
+          markDirty(true);
+          setSaveError(heldSaveError());
+          return false;
+        }
         return true;
       } catch (reason) {
-        const message = reason instanceof Error ? reason.message : String(reason);
         setSaveError(fileAccessError(reason));
-        if (/changed on disk|ENOENT|no such file|cannot find/i.test(message)) setDiskChanged(true);
+        if (/changed on disk|ENOENT|no such file|cannot find/i.test(errorMessage(reason))) setDiskChanged(true);
         return false;
       } finally {
         savingRef.current = false;
@@ -311,7 +257,7 @@ export function useEditorFileSession({
     [
       accessToken,
       api,
-      deleteBackup,
+      backupTimer,
       editorRef,
       readModel,
       formatDocument,
@@ -319,8 +265,8 @@ export function useEditorFileSession({
       markDirty,
       projectPath,
       relPath,
+      settleBackup,
       syncLspRef,
-      writeBackupNow,
     ]
   );
 
@@ -337,6 +283,7 @@ export function useEditorFileSession({
 
   const discard = useCallback(async (): Promise<void> => {
     skipUnmountBackup.current = true;
+    backupGeneration.current++;
     await deleteBackup();
   }, [deleteBackup]);
 
@@ -349,37 +296,35 @@ export function useEditorFileSession({
     return () => onSaveHandleRef.current?.(null, handle);
   }, [discard]);
 
-  useEffect(() => {
-    if (!active || !load || load.binary || load.tooLarge) return undefined;
-    const timer = window.setInterval(() => {
-      if (document.body.dataset.tabDragging) return;
-      void api
-        ?.statProjectFile?.(projectPath, relPath, accessToken)
-        .then((info) => {
-          if (!info || info.mtimeMs <= savedMtime.current) return;
-          const model = readModel();
-          const isDirty = model ? model.getValue() !== savedText.current : false;
-          if (isDirty) setDiskChanged(true);
-          else reload();
-        })
-        .catch((reason) => {
-          if (!readModel()) return;
-          setDiskChanged(true);
-          setSaveError(fileAccessError(reason));
-        });
-    }, 2_500);
-    return () => window.clearInterval(timer);
-  }, [accessToken, active, api, readModel, load, projectPath, relPath, reload]);
+  useEditorDiskWatch({
+    api,
+    projectPath,
+    relPath,
+    accessToken,
+    active,
+    load,
+    readModel,
+    savedMtime,
+    savedText,
+    held: richHeldRef,
+    reload,
+    setDiskChanged,
+    setSaveError,
+  });
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: api is the window bridge, re-read each render and kept as a dependency so a re-installed bridge re-creates this callback.
   const revertFromDisk = useCallback(async (): Promise<boolean> => {
     const reader = api?.readProjectFile;
     const model = readModel();
+    const generation = backupGeneration.current;
     if (!reader || !model || reverting || savingRef.current) return false;
     setReverting(true);
     setRevertError('');
     try {
       const result = await reader(projectPath, relPath, accessToken);
-      if (result.binary || result.tooLarge) {
+      if (result.binary || result.tooLarge || result.readOnly) {
+        // Do not discard a writable buffer for a disk version we cannot save.
+        setDiskChanged(true);
         throw new Error(t('The disk version can no longer be safely edited as text.'));
       }
       const content = normalizeEditorModelText(result.content);
@@ -393,23 +338,30 @@ export function useEditorFileSession({
       setSaveError('');
       model.setValue(content);
       markDirty(false);
+      setContentRevision((revision) => revision + 1);
       setDiffTick((tick) => tick + 1);
-      await deleteBackup().catch(() => undefined);
+      // A held edit survives the revert (Rich keeps it), and so does its backup.
+      if (backupTimer.current !== null) {
+        window.clearTimeout(backupTimer.current);
+        backupTimer.current = null;
+      }
+      await settleBackup(null, generation).catch(() => undefined);
       editorRef.current?.focus();
       return true;
     } catch (reason) {
-      setRevertError(reason instanceof Error ? reason.message : String(reason));
+      setRevertError(errorMessage(reason));
       return false;
     } finally {
       setReverting(false);
     }
-  }, [accessToken, api, deleteBackup, editorRef, readModel, markDirty, projectPath, relPath, reverting]);
+  }, [accessToken, api, backupTimer, editorRef, readModel, markDirty, projectPath, relPath, reverting, settleBackup]);
 
   const restoreConflictingBackup = useCallback(() => {
     const model = readModel();
     if (!model || !recovery) return;
     model.setValue(recovery.content);
     setRecovery({ ...recovery, restored: true });
+    setContentRevision((revision) => revision + 1);
     markDirty(true);
     scheduleBackup(recovery.content);
     editorRef.current?.focus();
@@ -420,14 +372,17 @@ export function useEditorFileSession({
     void deleteBackup().catch(() => undefined);
   }, [deleteBackup]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: api is the window bridge, re-read each render and kept as a dependency so a re-installed bridge re-creates this callback.
   const keepEdits = useCallback(() => {
     const model = readModel();
     const reader = api?.readProjectFile;
     if (!model || !reader) return;
+    const generation = backupGeneration.current;
     setSaveError('');
     void reader(projectPath, relPath, accessToken)
       .then((result) => {
-        if (result.binary || result.tooLarge) {
+        if (result.binary || result.tooLarge || result.readOnly) {
+          // Keep the original save baseline and the user's dirty buffer.
           throw new Error(t('The disk version can no longer be safely edited as text.'));
         }
         const savedContent = normalizeEditorModelText(result.content);
@@ -439,14 +394,36 @@ export function useEditorFileSession({
         setError('');
         const changed = currentContent !== savedContent;
         markDirty(changed);
-        if (changed) void writeBackupNow(currentContent).catch(() => undefined);
-        else void deleteBackup().catch(() => undefined);
+        void settleBackup(changed ? currentContent : null, generation).catch(() => undefined);
       })
       .catch((reason) => {
         setDiskChanged(true);
         setSaveError(fileAccessError(reason));
       });
-  }, [accessToken, api, deleteBackup, readModel, markDirty, projectPath, relPath, writeBackupNow]);
+  }, [accessToken, api, readModel, markDirty, projectPath, relPath, settleBackup]);
+
+  /** Rich reports whether it holds an edit the model does not have, and
+   *  how to read the file text with it. A held edit is backed up like any
+   *  unsaved edit; once released, the backup follows the model again. */
+  const setRichHeld = useCallback(
+    (held: boolean, heldText?: () => string | null) => {
+      const wasHeld = richHeldRef.current;
+      if (!held && !wasHeld) return;
+      richHeldRef.current = held;
+      richHeldText.current = held ? (heldText ?? null) : null;
+      if (!held) richHeldDiskText.current = null;
+      else if (!wasHeld) richHeldDiskText.current = savedDiskText.current;
+      const model = readModel();
+      const changed = model ? model.getValue() !== savedText.current : false;
+      markDirty(changed);
+      if (held) {
+        skipUnmountBackup.current = false;
+        scheduleBackup(heldBackupText, heldBackupBase);
+      } else if (changed && model) scheduleBackup(model.getValue());
+      else void deleteBackup().catch(() => undefined);
+    },
+    [deleteBackup, heldBackupBase, heldBackupText, markDirty, readModel, scheduleBackup]
+  );
 
   const onEditorChange = useCallback(
     (value: string | undefined) => {
@@ -455,41 +432,36 @@ export function useEditorFileSession({
       skipUnmountBackup.current = false;
       setRevertError('');
       markDirty(changed);
-      if (changed) scheduleBackup(content);
+      if (richHeldRef.current) scheduleBackup(heldBackupText, heldBackupBase);
+      else if (changed) scheduleBackup(content);
       else {
         setRecovery(null);
         void deleteBackup().catch(() => undefined);
       }
     },
-    [deleteBackup, markDirty, scheduleBackup]
+    [deleteBackup, heldBackupBase, heldBackupText, markDirty, scheduleBackup]
   );
 
-  // Page images arrive as the viewer scrolls. One request at a time: the
-  // conversion is shared, but each page is its own rasterization and a phone
-  // gains nothing from three of them racing down the same link.
-  const loadDocumentPages = useCallback(
-    (pages: number[]) => {
-      const reader = api?.previewDocumentPages;
-      if (!reader || pages.length === 0 || documentPagesInFlight.current) return;
-      documentPagesInFlight.current = true;
-      setDocumentPagesLoading(true);
-      void reader(projectPath, relPath, accessToken, { pages })
-        .then((result) => {
-          setDocumentPreview((current) => (current ? mergeDocumentPreviewPages(current, result) : current));
-        })
-        .catch((reason) => {
-          setDocumentError(reason instanceof Error ? reason.message : String(reason));
-        })
-        .finally(() => {
-          documentPagesInFlight.current = false;
-          setDocumentPagesLoading(false);
-        });
-    },
-    [accessToken, api, projectPath, relPath]
-  );
+  // Previews are binary loads, which the text watch above skips.
+  useEditorPreviewPoll({
+    api,
+    projectPath,
+    relPath,
+    accessToken,
+    active,
+    previewWatched: Boolean(documentPreview || (preview && load?.binary)),
+    savedMtime,
+    reload,
+    loadDocumentPages,
+    documentPreviewRef,
+    documentPagesInFlight,
+    documentWidth,
+    documentSettling,
+  });
 
   const completePreview = useCallback(() => {
     setPreviewLoaded(true);
+    setPreviewError('');
     notifyReady();
   }, [notifyReady]);
 
@@ -501,11 +473,13 @@ export function useEditorFileSession({
 
   return {
     load,
+    contentRevision,
     preview,
     previewLoaded,
     previewError,
     documentPreview,
     documentError,
+    documentPageErrors,
     documentPagesLoading,
     loadDocumentPages,
     error,
@@ -520,6 +494,7 @@ export function useEditorFileSession({
     diffTick,
     savedText,
     markDirty,
+    setRichHeld,
     reload,
     save,
     saveRef,

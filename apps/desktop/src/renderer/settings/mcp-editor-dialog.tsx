@@ -83,6 +83,7 @@ function McpStringListEditor({
       <small>{description}</small>
       <div className="extensions-mcp-list-rows">
         {visible.map((value, index) => (
+          // biome-ignore lint/suspicious/noArrayIndexKey: rows are plain strings edited by position and never reorder.
           <div className="extensions-mcp-list-row" key={`${label}-${index}`}>
             <input
               value={value}
@@ -142,6 +143,7 @@ function McpPairListEditor({
       <small>{description}</small>
       <div className="extensions-mcp-list-rows">
         {visible.map((row, index) => (
+          // biome-ignore lint/suspicious/noArrayIndexKey: rows are key/value pairs edited by position and never reorder.
           <div className="extensions-mcp-list-row extensions-mcp-pair-row" key={`${label}-${index}`}>
             <input
               value={row.key}
@@ -197,6 +199,7 @@ export function McpEditorDialog({
   server,
   busy,
   scopeField,
+  takenNames = [],
   onClose,
   onSave,
   onToggle,
@@ -205,8 +208,10 @@ export function McpEditorDialog({
   server: RecordValue | null;
   busy: boolean;
   scopeField?: ReactNode;
+  takenNames?: string[];
   onClose(): void;
-  onSave(payload: RecordValue): void;
+  /** A returned promise keeps the dialog open: its rejection shows in the form. */
+  onSave(payload: RecordValue): unknown;
   onToggle?(): void;
   onRemove?(): void;
 }) {
@@ -246,12 +251,16 @@ export function McpEditorDialog({
         event.preventDefault();
         if (autoDetect) return;
         const data = new FormData(event.currentTarget);
+        const fail = (error: unknown) => setFormError(error instanceof Error ? error.message : String(error));
         try {
           const payload: RecordValue = {
             ...(editing ? { originalName: name } : {}),
             name: String(data.get('mcp-name') || '').trim(),
             type: transport,
           };
+          if (!editing && takenNames.includes(String(payload.name))) {
+            throw new Error(t('MCP server "{{name}}" already exists.', { name: String(payload.name) }));
+          }
           if (transport === 'stdio') {
             payload.command = String(data.get('mcp-command') || '').trim();
             payload.args = args.map((value) => value.trim()).filter(Boolean);
@@ -265,9 +274,9 @@ export function McpEditorDialog({
             payload.env_http_headers = mcpPairRecord(envHeaders, t('Environment-backed headers'));
           }
           setFormError('');
-          onSave(payload);
+          void Promise.resolve(onSave(payload)).catch(fail);
         } catch (error) {
-          setFormError(error instanceof Error ? error.message : String(error));
+          fail(error);
         }
       }}
       footer={
@@ -305,6 +314,7 @@ export function McpEditorDialog({
           name="mcp-name"
           defaultValue={name}
           required
+          // biome-ignore lint/a11y/noAutofocus: the dialog's first field takes focus when creating.
           autoFocus={!editing}
           disabled={busy || autoDetect}
           maxLength={80}
@@ -319,6 +329,7 @@ export function McpEditorDialog({
       >
         {autoDetect && <ExtensionNote>{t('Auto-detect')}</ExtensionNote>}
         {!autoDetect && (
+          // biome-ignore lint/a11y/useSemanticElements: a div button group; <fieldset> would change the element tag.
           <div className="extensions-mcp-transport" role="group" aria-label={t('Transport')}>
             <button
               type="button"

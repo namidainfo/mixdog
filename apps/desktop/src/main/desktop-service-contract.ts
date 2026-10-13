@@ -1,6 +1,7 @@
 import type {
   DesktopAbortOptions,
   DesktopAgentPoolRow,
+  DesktopSessionContentMatch,
   DesktopCapability,
   DesktopCapabilityReadRequest,
   DesktopCapabilityReadResult,
@@ -54,13 +55,22 @@ export interface DesktopService {
   readSessionFinalAnswer(sessionId: string, startedAt: number): Promise<SessionFinalAnswer | null>;
   markSessionRead(sessionId: string, messageCount: number, consumedUnread?: boolean): Promise<boolean>;
   listAgentPool(): Promise<DesktopAgentPoolRow[]>;
+  searchSessionContent(query: string): Promise<DesktopSessionContentMatch[]>;
   renameSession(sessionId: string, title: string): unknown;
+  continueSessionInModel(sessionId: string, route: DesktopModelSelection): Promise<boolean>;
+  scheduleQuotaResume(sessionId: string): Promise<boolean>;
+  cancelQuotaResume(sessionId: string): Promise<boolean>;
+  getQuotaAutoResume(): Promise<boolean>;
+  setQuotaAutoResume(enabled: boolean): Promise<boolean>;
   setSessionArchived(sessionId: string, archived: boolean): unknown;
+  setSessionFavorite(sessionId: string, favorite: boolean): unknown;
   deleteSession(sessionId: string): unknown;
   prefetchSession(sessionId: string, transcriptItemLimit?: number, readTraceId?: string): Promise<boolean>;
   /** Transport-only recovery: capture current projections after refreshing
    * every requested lane, even when the daemon reports unchanged content. */
   replaySessionStates?(sessionIds: string[], deliver: (updates: DesktopSessionStateUpdate[]) => void): Promise<void>;
+  /** Ask the service to forget its delta baseline for one session and re-emit a full frame. */
+  requestSessionStateResync?(sessionId: string): void;
   /** Keep every currently visible pane attached to its external live owner. */
   setVisibleSessions?(sessionIds: string[]): Promise<boolean>;
   /** `legacyTranscript`: the source cannot page transcript history (an old
@@ -70,7 +80,8 @@ export interface DesktopService {
     projectIdOrWorkspaceId: string,
     query: string,
     limit?: number,
-    includeIgnored?: boolean
+    includeIgnored?: boolean,
+    includeDirectories?: boolean
   ): Promise<string[]>;
   submitNewTask(
     prompt: DesktopPromptContent,
@@ -81,7 +92,8 @@ export interface DesktopService {
    *  on the supplied route; the source session is left untouched. */
   inheritSession(
     sourceSessionId: string,
-    route?: DesktopModelSelection | null
+    route?: DesktopModelSelection | null,
+    options?: { compact: boolean } | null
   ): Promise<{ sessionId: string; snapshot: SessionSnapshot | null }>;
   /** Split panes use daemon-owned session addresses directly. Pane actions
    *  never fall back to whichever session happens to be focused. */
@@ -137,8 +149,15 @@ export const DESKTOP_SERVICE_METHODS = [
   'readSessionFinalAnswer',
   'markSessionRead',
   'listAgentPool',
+  'searchSessionContent',
   'renameSession',
+  'continueSessionInModel',
+  'scheduleQuotaResume',
+  'cancelQuotaResume',
+  'getQuotaAutoResume',
+  'setQuotaAutoResume',
   'setSessionArchived',
+  'setSessionFavorite',
   'deleteSession',
   'prefetchSession',
   'setVisibleSessions',
@@ -165,6 +184,9 @@ export interface SerializableDesktopServiceOptions {
   packaged: boolean;
   resourcesPath: string;
   appPath: string;
+  /** This desktop build's version; reported on the relay leg so the relay can
+   *  serve paired phones the web renderer release that matches it. */
+  appVersion?: string;
   rendererDir?: string;
   runtimeRoot?: string;
 }

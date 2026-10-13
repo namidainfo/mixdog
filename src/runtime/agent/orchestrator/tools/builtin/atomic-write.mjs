@@ -6,6 +6,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { getAbortSignalForSession } from '../../session/abort-lookup.mjs';
 import { hashText } from './hash-utils.mjs';
+import { fileVersion, sameFileVersion } from './file-version.mjs';
 import { sleep } from '../../../../shared/sleep.mjs';
 import { ioTraceDone, ioTraceStart } from '../io-trace.mjs';
 
@@ -20,13 +21,7 @@ function expectedTargetSnapshotChanged(currentStat, expected) {
   const currentExists = !!currentStat;
   if (snapshotExists !== currentExists) return true;
   if (!snapshotExists || !currentExists) return false;
-  if (currentStat.size !== expected.size) return true;
-  if (Math.abs(Number(currentStat.mtimeMs) - Number(expected.mtimeMs)) > 1) return true;
-  if (Number.isFinite(expected.ctimeMs)) {
-    if (Math.abs(Number(currentStat.ctimeMs) - Number(expected.ctimeMs)) > 1) return true;
-  }
-  if (Number.isFinite(expected.ino) && Number(currentStat.ino) !== Number(expected.ino)) return true;
-  return false;
+  return !sameFileVersion(currentStat, expected);
 }
 
 function atomicWriteShouldFsync(value) {
@@ -100,16 +95,20 @@ function abortReasonOf(signal) {
 
 // The payload lands in a 'wx' temp file: an existing temp file (random
 // collision or a pre-existing symlink at the temp path) is rejected instead of
-// silently truncated. randomBytes(4) keeps collisions astronomically unlikely,
-// but 'wx' makes the guarantee explicit and protects against symlink-attack
-// scenarios on shared tmp dirs.
+// silently truncated. Failed creation owns nothing: cleanup must leave an
+// existing entry alone, including a symlink at the random temporary path.
 async function writeTempFile(tmp, content, { mode, fsync }) {
   let fh = null;
+  let ownsTemp = false;
   try {
     if (payloadByteLength(content) > STREAMING_THRESHOLD_BYTES) {
       // Streaming path: avoid buffering the entire payload through
       // fh.writeFile (which copies into a single Buffer).
       const ws = createWriteStream(tmp, { flags: 'wx', mode });
+      // Stream construction precedes open; only the open event proves ownership.
+      ws.once('open', () => {
+        ownsTemp = true;
+      });
       let source = content; // assume it's a Readable unless it is bytes/text
       if (Buffer.isBuffer(content)) source = Readable.from([content]);
       else if (typeof content === 'string') source = Readable.from([Buffer.from(content, 'utf-8')]);
@@ -122,6 +121,7 @@ async function writeTempFile(tmp, content, { mode, fsync }) {
       }
     } else {
       fh = await fsPromises.open(tmp, 'wx', mode);
+      ownsTemp = true;
       await fh.writeFile(content);
       if (fsync) await fh.sync();
       await fh.close();
@@ -133,7 +133,7 @@ async function writeTempFile(tmp, content, { mode, fsync }) {
     } catch {
       /* already closed */
     }
-    await unlinkQuietly(tmp);
+    if (ownsTemp) await unlinkQuietly(tmp);
     throw writeErr;
   }
 }
@@ -180,7 +180,17 @@ async function assertExclusiveCreate(writeTarget, targetPath, tmp) {
 }
 
 async function assertTargetUnchanged(writeTarget, expectedTargetSnapshot, tmp) {
-  if (!expectedTargetSnapshotChanged(statOrNull(writeTarget), expectedTargetSnapshot)) return;
+  let currentStat = null;
+  try {
+    currentStat = statSync(writeTarget);
+  } catch (error) {
+    // A failed lookup is not proof of absence, even for create-only writes.
+    if (error?.code !== 'ENOENT') {
+      await unlinkQuietly(tmp);
+      throw error;
+    }
+  }
+  if (!expectedTargetSnapshotChanged(currentStat, expectedTargetSnapshot)) return;
   await unlinkQuietly(tmp);
   const err = new Error(`target changed between preflight and rename (TOCTOU): ${writeTarget}`);
   err.code = 'ESTALE_TARGET';
@@ -236,6 +246,11 @@ export async function atomicWrite(
   content,
   { mode, signal, sessionId, flags, fsync, preserveMetadata = false, expectedTargetSnapshot } = {}
 ) {
+  // Own the caller's expectation before the first await. Missing fields on
+  // an existing target remain incomplete evidence, not an unguarded write.
+  expectedTargetSnapshot = expectedTargetSnapshot
+    ? { exists: expectedTargetSnapshot.exists !== false, ...fileVersion(expectedTargetSnapshot) }
+    : null;
   const traceStart = ioTraceStart();
   const resolvedSignal = await resolveWriteSignal(signal, sessionId);
   if (resolvedSignal?.aborted) throw abortReasonOf(resolvedSignal);

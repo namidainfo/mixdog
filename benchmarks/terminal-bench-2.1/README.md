@@ -152,10 +152,40 @@ cd benchmarks/terminal-bench-2.1
 .\run.ps1 -Preset grok46-xhigh
 .\run.ps1 -Preset opus5-solo
 
-# Full-suite equivalents used for published comparisons
-.\run.ps1 -Preset full-opus5-solo
-.\run.ps1 -Preset full-sol-xhigh
+# Full-suite equivalents used for published comparisons (fixed effort)
+.\run.ps1 -Preset full-opus5-solo -EffortJudge off
+.\run.ps1 -Preset full-sol-xhigh -EffortJudge off
 ```
+
+### Effort judge
+Every preset runs with the product's default Auto effort: a local effort
+judge picks the effort of each turn and re-judges after every tool result.
+`-EffortJudge` switches it for any preset:
+
+| `-EffortJudge` | Effect |
+|---|---|
+| `steps` (default) | the judge picks each turn's effort and re-judges after every tool result, as the product does (needs a step-trained judge) |
+| `on` | the judge picks each turn's effort only |
+| `off` | fixed effort from the route profile, as in the published runs |
+
+The judge runs from `mixdog-prebake/effort-judge-bundle.tar`, built once from
+the release that `src/runtime/effort-judge/model-manifest.json` names (files
+downloaded from the Mixdog GitHub release and sha256-checked). The first real
+run builds it automatically (at `MIXDOG_TB_EFFORT_JUDGE_BUNDLE` when set);
+the manual command stays available:
+```powershell
+.\harness\build-effort-judge-bundle.ps1
+```
+Before launching, the runner checks that the bundle exists, holds that
+release (step-trained for `steps`), and matches its stamp digest. A real run
+rebuilds a missing or stale bundle with that script, re-verifies it, and stops
+with the rebuild hint if the build fails. `-DryRun` never builds: it prints a
+notice that the bundle is missing/stale and continues with the expected command. The judge mode and release are part of the preset
+fingerprint (`off` leaves it unchanged), and every trial records its
+decisions in `agent/effort-decisions.jsonl`. `run.ps1` and `run-tb21.ps1`
+pass the mode to the Harbor adapter as `--ak effort_judge=<mode>`; launching
+`harness.mixdog_agent:MixdogAgent` directly defaults to the same `steps`, so
+add `--ak effort_judge=off` for a fixed-effort run there.
 Each preset pins its task suite, complete model route, concurrency, and repeat
 count. The runner auto-retries infra errors only — agent timeouts and verifier
 failures are never retried. At completion it synchronously writes
@@ -206,14 +236,19 @@ edits a README: the prose above is written by hand from that output, which is
 also where a `clean=false` run or a lower-bound baseline is flagged.
 
 ### Verify the published numbers from the raw artifacts
+Run from `benchmarks/terminal-bench-2.1`. These work from the committed
+`raw-runs/` export alone (a full local `jobs-*` copy is used instead when present):
 ```powershell
 node analysis/verify-source-commit.mjs  # each published run ↔ the source commit it ran
 node analysis/results-table.mjs   # regenerates results.md/.json
-node analysis/final-context.mjs   # final-context medians for all runs
-node analysis/first-context.mjs   # first-request medians (needs the local jobs-* session logs)
 node harness/cost-exact.mjs jobs-full-opus5-solo-20260825-155233/2026-08-26__00-52-35 cc-baseline-plus.json
 node harness/cost-exact.mjs jobs-full-sol-xhigh-k5-20260825-182921/2026-08-26__03-29-24
-
+```
+These read session logs and traces, which `raw-runs/` does not archive, so
+they need the full local `jobs-*` directories and stop with an error without them:
+```powershell
+node analysis/final-context.mjs   # final-context medians for all runs
+node analysis/first-context.mjs   # first-request medians
 # Full-run cost: reprice from raw traces and cross-check every snapshot
 node analysis/trace-cost.mjs jobs-full-opus5-solo-20260825-155233
 node analysis/trace-cost.mjs jobs-full-sol-xhigh-k5-20260825-182921
@@ -235,9 +270,11 @@ entries on shared tasks); the pinned original is unmodified.
 
 Every trial directory under `raw-runs/` archives `result.json` (Harbor verdict),
 `config.json` (agent config + task checksum), the official verifier output, and
-the usage snapshot — each published metric is recomputable from these files
-alone, except two figures read from session logs in the local jobs
-directories: the Codex final-context median, pinned in `presets.json`, and
-the first-request medians of both sides, pinned in
-`analysis/first-context.json`. Full
-session transcripts stay in the local `jobs-*` directories.
+the usage snapshot — scores, verifier results, and priced cost are
+recomputable from these files alone. Figures read from session logs or traces
+need the local `jobs-*` directories: the final-context medians
+(`analysis/final-context.mjs`, pinned for the baselines in `presets.json`), the
+first-request medians (pinned in `analysis/first-context.json`), and the
+trace-priced timeout trials (`analysis/trace-cost.mjs`, archived in
+`analysis/trace-recovered-cost.json`). Full session transcripts stay in the
+local `jobs-*` directories.

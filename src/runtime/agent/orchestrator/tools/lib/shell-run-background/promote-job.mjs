@@ -1,9 +1,9 @@
 /**
  * promote-job.mjs — hand the still-running foreground child to the shell-jobs
- * registry: the bounded promotion attempt, the lease hand-over that follows
- * a successful one, and the kill fallback that follows a failed one.
+ * registry: the bounded promotion attempt, the lease release that follows a
+ * successful one, and the kill fallback that follows a failed one.
  */
-import { attachShellJobResourceLease, promoteForegroundShellJob } from '../../builtin/shell-jobs.mjs';
+import { promoteForegroundShellJob } from '../../builtin/shell-jobs.mjs';
 import { treeKillForceSettle } from '../shell-run-state.mjs';
 
 export async function promoteWithRetry(
@@ -74,17 +74,14 @@ export function killAfterFailedPromotion(run, reason, promotionFailure) {
   );
 }
 
-export async function handOverLease(run, jobId) {
-  const promotedLease = run.resourceLease;
+/**
+ * The promoted job leaves foreground admission: its lease is RELEASED, which
+ * also restores the parent's high-load share. A long-lived server must never
+ * hold a foreground slot for its whole life; background jobs are not counted
+ * against any cap (session/runtime close stops them via shutdownShellJobs).
+ */
+export async function handOverLease(run) {
+  const lease = run.resourceLease;
   run.resourceLease = null;
-  if (!promotedLease) return;
-  try {
-    await promotedLease.detachDependency?.();
-    attachShellJobResourceLease(jobId, promotedLease);
-  } catch (error) {
-    try {
-      await promotedLease.release();
-    } catch {}
-    throw error;
-  }
+  await lease?.release();
 }

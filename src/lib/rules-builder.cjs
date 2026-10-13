@@ -9,7 +9,6 @@
  *   - buildAgentRoleContent             — BP3: agent role/system rules
  *   - buildAgentRetrievalInjectionContent — BP3: narrow read-only retrieval role
  *   - buildLeadMetaContent              — BP2: Lead profile/settings context
- *   - buildInjectionContent             — legacy joined Lead session content
  *
  * 4-BP cache layout (composeSystemPrompt):
  *   BP1 = shared tool policy
@@ -366,7 +365,7 @@ function buildLeadRoleContent({ PLUGIN_ROOT, includeLeadBrief = true }) {
   const RULES_DIR = path.join(PLUGIN_ROOT, 'rules');
   const lead = readOptional(path.join(RULES_DIR, 'lead', 'LEAD.md'));
   if (!lead) return '';
-  // Delegation-free workflows (Solo, headless) never expose the `agent` tool,
+  // Delegation-free sessions (headless, no delegatable agents) never expose the `agent` tool,
   // so Lead guidance marked `<!-- tools: agent -->` (briefing, completion
   // notifications) is dropped there and kept verbatim for delegating workflows.
   return omitToolRoutes(lead, includeLeadBrief ? [] : ['agent']);
@@ -398,27 +397,6 @@ function buildLeadMetaContent({ PLUGIN_ROOT, DATA_DIR }) {
  */
 function buildLeadLanguageContent({ DATA_DIR }) {
   return buildLanguageSection(DATA_DIR);
-}
-
-/**
- * Build the Lead injection content.
- */
-function buildInjectionContent({ PLUGIN_ROOT, DATA_DIR }) {
-  const parts = [];
-
-  const tool = buildSharedToolContent({ PLUGIN_ROOT });
-  if (tool) parts.push(tool);
-
-  const meta = buildLeadMetaContent({ PLUGIN_ROOT, DATA_DIR });
-  if (meta) parts.push(meta);
-
-  const role = buildLeadRoleContent({ PLUGIN_ROOT, DATA_DIR });
-  if (role) parts.push(role);
-
-  const language = buildLeadLanguageContent({ DATA_DIR });
-  if (language) parts.push(language);
-
-  return parts.join('\n\n');
 }
 
 function buildAgentRoleContent({ PLUGIN_ROOT, profile = 'full' }) {
@@ -455,7 +433,6 @@ module.exports = {
   buildLeadMetaContent,
   buildLeadLanguageContent,
   buildAgentRoleContent,
-  buildInjectionContent,
   buildAgentRetrievalInjectionContent,
   omitToolRoutes,
 };

@@ -15,11 +15,21 @@ on:
         type: choice
         options: [auto, force, skip]
         default: auto
+      mobile:
+        description: "Mobile apps (Android APK + iOS TestFlight): auto ships when mobile sources changed since the last mobile-v* tag"
+        required: true
+        type: choice
+        options: [auto, force, skip]
+        default: auto
+      mobile_bump:
+        description: "Mobile version increment from the last mobile-v* tag"
+        required: true
+        type: choice
+        options: [patch, minor]
+        default: patch
 
 permissions:
-  contents: write
-  actions: read
-  id-token: write
+  contents: read
 
 concurrency:
   group: deploy
@@ -29,6 +39,10 @@ jobs:
   plan:
     name: plan-incremental-deploy
     runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read # gh run list / gh run watch for the Release Gate
     outputs:
       app_version: ${{ steps.plan.outputs.app_version }}
       app_tag: ${{ steps.plan.outputs.app_tag }}
@@ -50,11 +64,14 @@ jobs:
       voice_runtime_needed: ${{ steps.plan.outputs.voice_runtime_needed }}
       critical_changed: ${{ steps.plan.outputs.critical_changed }}
       run_critical: ${{ steps.plan.outputs.run_critical }}
+      mobile_release: ${{ steps.mobile.outputs.mobile_release }}
+      mobile_version: ${{ steps.mobile.outputs.mobile_version }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Require the default branch
         env:
@@ -68,10 +85,13 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           node --test scripts/release-gate-test.mjs
 
-      # A release ships only a commit the gate did not reject. The gate starts
-      # on the same push this dispatch usually follows, so wait for its verdict
-      # instead of racing it. A push that touched no gated path starts no gate
-      # run; the release then validates that commit itself (run_critical).
+      # A release ships only a commit the gate passed. The gate starts on the
+      # same push this dispatch usually follows, so wait for its verdict instead
+      # of racing it. Strict: a commit with no Release Gate run (a push that
+      # touched no gated path, or an infra failure that never started it) is
+      # NOT released. Start the gate for it with
+      #   gh workflow run release-gate.yml --ref main
+      # and re-run Deploy once it is green. A manual gate run counts.
       - name: Require a green Release Gate for the release commit
         env:
           GH_TOKEN: ${{ github.token }}
@@ -81,14 +101,14 @@ jobs:
           sha=$(git rev-parse HEAD)
           run_id=""
           for attempt in $(seq 1 12); do
-            run_id=$(gh run list --workflow release-gate.yml --commit "$sha" --event push --limit 1 \
-              --json databaseId --jq '.[0].databaseId // empty')
+            run_id=$(gh run list --workflow release-gate.yml --commit "$sha" --limit 20 \
+              --json databaseId,event --jq '[.[] | select(.event == "push" or .event == "workflow_dispatch")][0].databaseId // empty')
             if [[ -n "$run_id" ]]; then break; fi
             sleep 5
           done
           if [[ -z "$run_id" ]]; then
-            echo "No Release Gate run for ${sha}; the release validates this commit itself."
-            exit 0
+            echo "::error::No Release Gate run exists for ${sha}; refusing to release an ungated commit. Run 'gh workflow run release-gate.yml --ref ${GITHUB_REF_NAME}' and re-run Deploy once it passes."
+            exit 1
           fi
           echo "Waiting for Release Gate run ${run_id} on ${sha}"
           if ! gh run watch "$run_id" --exit-status --interval 15 > /dev/null; then
@@ -109,6 +129,7 @@ jobs:
           import { appendFileSync, readFileSync } from 'node:fs';
           import { execFileSync, spawnSync } from 'node:child_process';
           import { RELEASE_CRITICAL_PATHS } from './scripts/release-paths.mjs';
+          import { checkChangelogLocales } from './scripts/check-changelog-locales.mjs';
 
           const output = process.env.GITHUB_OUTPUT;
           const mode = process.env.NATIVE_MODE;
@@ -172,6 +193,13 @@ jobs:
           const unreleasedBody = unreleasedSection ? unreleasedSection.replace(/^Unreleased[^\n]*\n?/, '').trim() : '';
           if (!resume && !unreleasedBody) {
             throw new Error('CHANGELOG.md: the Unreleased section is empty - a release requires changelog entries');
+          }
+          // Every changelog/<lang>.md must carry the same Unreleased entries.
+          if (!resume) {
+            const localeProblems = checkChangelogLocales({ includeUnreleased: true });
+            if (localeProblems.length) {
+              throw new Error(`Translated changelogs are out of step with CHANGELOG.md:\n${localeProblems.join('\n')}`);
+            }
           }
 
           function component({ name, manifestPath, cargoPath, tagPrefix, paths }) {
@@ -294,11 +322,23 @@ jobs:
           console.log(JSON.stringify({ mode, resume, preBumped, ...values }, null, 2));
           NODE
 
+      # Mobile apps ship with this release when their sources changed since the
+      # newest mobile-v* tag; the version is that tag's next patch (or minor).
+      - name: Plan the mobile release
+        id: mobile
+        env:
+          MOBILE_MODE: ${{ inputs.mobile }}
+          MOBILE_BUMP: ${{ inputs.mobile_bump }}
+        run: node scripts/mobile-release.mjs plan
+
   prepare-native:
     name: prepare-native-tags
     needs: plan
     if: ${{ needs.plan.outputs.native_changed == 'true' }}
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: write # version commit and tag pushes
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -392,45 +432,50 @@ jobs:
     needs: plan
     if: ${{ needs.plan.outputs.runtime_needed == 'true' }}
     uses: ./.github/workflows/build-runtime.yml
+    permissions:
+      contents: write # callee build/aggregate upload releases and push the manifest
     with:
       tag: ${{ needs.plan.outputs.runtime_tag }}
       force_rebuild: ${{ inputs.native == 'force' }}
       refresh_manifest: false
-    secrets: inherit
 
   voice:
     name: incremental-voice-runtime
     needs: plan
     if: ${{ needs.plan.outputs.voice_runtime_needed == 'true' }}
     uses: ./.github/workflows/build-voice-runtime.yml
-    secrets: inherit
+    permissions:
+      contents: write # callee prepares/uploads/publishes releases and pushes the manifest
 
   patch:
     name: incremental-patch
     needs: [plan, prepare-native]
     if: ${{ needs.plan.outputs.patch_build == 'true' }}
     uses: ./.github/workflows/patch-release.yml
+    permissions:
+      contents: write # callee manifest job releases and pushes
     with:
       tag: ${{ needs.plan.outputs.patch_tag }}
-    secrets: inherit
 
   graph:
     name: incremental-graph
     needs: [plan, prepare-native]
     if: ${{ needs.plan.outputs.graph_build == 'true' }}
     uses: ./.github/workflows/graph-release.yml
+    permissions:
+      contents: write # callee prepare/sync create releases and push the manifest
     with:
       tag: ${{ needs.plan.outputs.graph_tag }}
-    secrets: inherit
 
   spawn:
     name: incremental-spawn
     needs: [plan, prepare-native]
     if: ${{ needs.plan.outputs.spawn_build == 'true' }}
     uses: ./.github/workflows/spawn-release.yml
+    permissions:
+      contents: write # callee prepare/sync create releases and push the manifest
     with:
       tag: ${{ needs.plan.outputs.spawn_tag }}
-    secrets: inherit
 
   prepare-app:
     name: prepare-app-release
@@ -447,6 +492,9 @@ jobs:
         && (needs.spawn.result == 'success' || needs.spawn.result == 'skipped')
       }}
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: write # version commit and tag pushes
     outputs:
       sha: ${{ steps.release.outputs.sha }}
     steps:
@@ -476,34 +524,44 @@ jobs:
             npm --prefix apps/desktop version "$VERSION" --no-git-tag-version --ignore-scripts
             npm --prefix apps/relay version "$VERSION" --no-git-tag-version --ignore-scripts
           fi
+          node scripts/sync-client-version-floors.mjs
           node --input-type=module <<'NODE'
-          import { readFileSync, writeFileSync } from 'node:fs';
+          import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
           const version = process.env.VERSION;
           const date = new Date().toISOString().slice(0, 10);
-          let text = readFileSync('CHANGELOG.md', 'utf8');
-          const versionHeading = `## v${version}`;
-          const unreleasedPattern = /^## Unreleased[^\n]*\n([\s\S]*?)(?=^##\s)/m;
-          const unreleased = text.match(unreleasedPattern);
-          const unreleasedBody = unreleased?.[1].trim() || '';
-          if (!text.includes(`\n${versionHeading}`)) {
-            text = text.replace(/^## Unreleased[^\n]*$/m, `## Unreleased\n\n## v${version} - ${date}`);
-            writeFileSync('CHANGELOG.md', text);
-          } else if (unreleasedBody) {
-            // A failed unpublished release can be resumed at the same version.
-            // Fold recovery notes into that version instead of leaving already
-            // shipped fixes in Unreleased after the draft is published.
-            text = text.replace(unreleasedPattern, '## Unreleased\n\n');
-            // The heading line carries its date: keep the whole line and fold below it.
-            const escaped = versionHeading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            text = text.replace(new RegExp(`^${escaped}[^\\n]*$`, 'm'), (heading) => `${heading}\n\n${unreleasedBody}`);
-            writeFileSync('CHANGELOG.md', text);
+          // CHANGELOG.md and every translated changelog/<lang>.md are stamped alike.
+          const files = [
+            'CHANGELOG.md',
+            ...readdirSync('changelog').filter(name => name.endsWith('.md')).sort().map(name => `changelog/${name}`),
+          ];
+          for (const file of files) {
+            let text = readFileSync(file, 'utf8');
+            const versionHeading = `## v${version}`;
+            const unreleasedPattern = /^## Unreleased[^\n]*\n([\s\S]*?)(?=^##\s)/m;
+            const unreleased = text.match(unreleasedPattern);
+            const unreleasedBody = unreleased?.[1].trim() || '';
+            if (!text.includes(`\n${versionHeading}`)) {
+              text = text.replace(/^## Unreleased[^\n]*$/m, `## Unreleased\n\n## v${version} - ${date}`);
+              writeFileSync(file, text);
+            } else if (unreleasedBody) {
+              // A failed unpublished release can be resumed at the same version.
+              // Fold recovery notes into that version instead of leaving already
+              // shipped fixes in Unreleased after the draft is published.
+              text = text.replace(unreleasedPattern, '## Unreleased\n\n');
+              // The heading line carries its date: keep the whole line and fold below it.
+              const escaped = versionHeading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              text = text.replace(new RegExp(`^${escaped}[^\\n]*$`, 'm'), (heading) => `${heading}\n\n${unreleasedBody}`);
+              writeFileSync(file, text);
+            }
           }
           NODE
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package.json package-lock.json CHANGELOG.md \
+          git add package.json package-lock.json CHANGELOG.md changelog \
             apps/desktop/package.json apps/desktop/package-lock.json \
             apps/relay/package.json apps/relay/package-lock.json
+          # Every floor sync-client-version-floors.mjs raised.
+          git add -u -- src/runtime/agent/orchestrator/providers
           if ! git diff --cached --quiet; then
             git commit -m "mixdog ${TAG}"
             git push origin "HEAD:${DEFAULT_BRANCH}"
@@ -526,6 +584,29 @@ jobs:
           fi
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+  # iOS ships beside the release, not inside it: a failed upload or beta-review
+  # submission fails this job (and the run) loudly but holds back neither the
+  # desktop publish nor the relay, and TestFlight review is never awaited.
+  # Android ships inside release.yml because the relay deploy waits for it.
+  mobile-ios:
+    name: release-mobile-ios
+    needs: [plan, prepare-app]
+    # prepare-app's transitive skips would fail the implicit success().
+    if: ${{ !cancelled() && needs.prepare-app.result == 'success' && needs.plan.outputs.mobile_release == 'true' }}
+    uses: ./.github/workflows/mobile-ios.yml
+    permissions:
+      contents: read
+    with:
+      version: ${{ needs.plan.outputs.mobile_version }}
+      ref: ${{ needs.prepare-app.outputs.sha }}
+    secrets:
+      APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      IOS_DIST_P12_BASE64: ${{ secrets.IOS_DIST_P12_BASE64 }}
+      IOS_DIST_P12_PASSWORD: ${{ secrets.IOS_DIST_P12_PASSWORD }}
+      TESTFLIGHT_EXTERNAL_GROUP_ID: ${{ secrets.TESTFLIGHT_EXTERNAL_GROUP_ID }}
+
   release:
     name: release-all-platforms
     needs: [plan, prepare-app]
@@ -534,8 +615,57 @@ jobs:
     # reusable call, so gate only on the two direct release dependencies.
     if: ${{ always() && needs.plan.result == 'success' && needs.prepare-app.result == 'success' }}
     uses: ./.github/workflows/release.yml
+    permissions:
+      contents: write # callee prepare/publish/desktop jobs
+      id-token: write # callee publish: npm --provenance
+      actions: read # callee release-timings
     with:
       tag: ${{ needs.plan.outputs.app_tag }}
       ref: ${{ needs.prepare-app.outputs.sha }}
       run_critical: ${{ needs.plan.outputs.run_critical == 'true' }}
+      mobile_version: ${{ needs.plan.outputs.mobile_version }} # empty: no mobile release
     secrets: inherit
+
+  # Last job: confirm what users will actually see once publish and the relay
+  # deploy are done (Latest pointer, update feeds, npm, relay /app link).
+  # It runs whenever the release call was not cancelled, even if it failed: the
+  # Android release (or the relay deploy) can turn `release` red after the
+  # desktop release is already public, and that state is exactly what needs
+  # checking. The first step skips the checks when no app release was
+  # published (the desktop publish never happened).
+  post-release-check:
+    name: post-release-check
+    needs: [plan, prepare-app, release]
+    if: ${{ always() && needs.plan.result == 'success' && needs.prepare-app.result == 'success' && needs.release.result != 'cancelled' && needs.release.result != 'skipped' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.prepare-app.outputs.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+
+      # 404 (release absent) skips the checks with a notice; auth, transport
+      # and 5xx errors are retried with backoff and then fail the job.
+      - name: Detect whether the app release was published
+        id: published
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.plan.outputs.app_tag }}
+          RELEASE_RESULT: ${{ needs.release.result }}
+        run: node scripts/post-release-check.mjs detect-published
+
+      - name: Verify the published release end to end
+        if: ${{ steps.published.outputs.published == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.plan.outputs.app_tag }}
+          RELAY_DOMAIN: ${{ vars.RELAY_DOMAIN }}
+          MOBILE_VERSION: ${{ needs.plan.outputs.mobile_version }}
+        run: node scripts/post-release-check.mjs

@@ -3,10 +3,32 @@
 // settings (alias, effort, fast, parameters, context budget) layered on top,
 // then the route-provider-first sort.
 import { effortItemsFor } from '../../runtime/agent/orchestrator/runtime-core/effort.mjs';
-import { fastCapableFor, fastPreferenceFor } from '../../runtime/agent/orchestrator/runtime-core/model-capabilities.mjs';
+import {
+  fastCapableFor,
+  fastPreferenceFor,
+  ultrafastCapableFor,
+} from '../../runtime/agent/orchestrator/runtime-core/model-capabilities.mjs';
 import { modelSettingsFor } from '../../runtime/agent/orchestrator/runtime-core/config-helpers.mjs';
-import { effortConfigurationMode } from '../../runtime/agent/orchestrator/providers/effort-configuration.mjs';
+import {
+  customAutoEffortCapable,
+  effortConfigurationMode,
+} from '../../runtime/agent/orchestrator/providers/effort-configuration.mjs';
 import { getProvider } from '../../runtime/agent/orchestrator/providers/registry.mjs';
+import {
+  DAYBREAK_PARAMETER_OPTION,
+  DAYBREAK_PROVIDER,
+  daybreakBlueSupported,
+} from '../../runtime/shared/llm/openai-daybreak.mjs';
+
+const ULTRAFAST_SPEED_OPTION = Object.freeze({
+  id: 'serviceTier',
+  label: 'Speed',
+  kind: 'enum',
+  options: [
+    { value: 'priority', label: 'Fast' },
+    { value: 'ultrafast', label: 'Ultrafast' },
+  ],
+});
 
 export function hydrateProviderModelRow(cfg, row) {
   const saved = modelSettingsFor(cfg, row.provider, row.id);
@@ -14,23 +36,36 @@ export function hydrateProviderModelRow(cfg, row) {
   // replaces the label everywhere the row's `display` is shown; the id and
   // route selection are untouched.
   const alias = typeof saved.alias === 'string' ? saved.alias.trim() : '';
+  const fastCapable = fastCapableFor(row.provider, row);
+  const existingOptions = Array.isArray(row.modelParameterOptions) ? row.modelParameterOptions : [];
+  const addedOptions = [
+    ...(row.provider === DAYBREAK_PROVIDER && daybreakBlueSupported(row) ? [DAYBREAK_PARAMETER_OPTION] : []),
+    ...(fastCapable && ultrafastCapableFor(row.provider, row) ? [ULTRAFAST_SPEED_OPTION] : []),
+  ];
+  const modelParameterOptions = addedOptions.length
+    ? [...existingOptions.filter((option) => !addedOptions.some((added) => added.id === option?.id)), ...addedOptions]
+    : row.modelParameterOptions;
   return {
     ...row,
     ...(alias ? { display: alias, displayAlias: alias } : {}),
+    ...(modelParameterOptions ? { modelParameterOptions } : {}),
     effortOptions: effortItemsFor(row.provider, row, null),
-    fastCapable: fastCapableFor(row.provider, row),
+    fastCapable,
     fastPreferred: Object.hasOwn(saved, 'fast')
       ? saved.fast === true
       : row.defaultFast === true || fastPreferenceFor(cfg, row.provider, row.id),
-    // Auto effort only changes effort where that keeps the prompt cache.
-    autoEffortCapable: Boolean(
-      effortConfigurationMode(row.provider, row.id, {
-        ...(getProvider(row.provider)?.config || {}),
-        modelParameters: saved.modelParameters || {},
-      })
-    ),
+    // Auto effort only changes effort where that keeps the prompt cache, or
+    // per request on a custom Chat/Responses model that declares levels.
+    autoEffortCapable:
+      Boolean(
+        effortConfigurationMode(row.provider, row.id, {
+          ...(getProvider(row.provider)?.config || {}),
+          modelParameters: saved.modelParameters || {},
+        })
+      ) || customAutoEffortCapable(row.provider, cfg?.providers?.[row.provider]?.protocol, row),
     savedEffort: saved.effort || null,
     savedFast: Object.hasOwn(saved, 'fast') ? saved.fast === true : undefined,
+    savedAutoEffort: Object.hasOwn(saved, 'autoEffort') ? saved.autoEffort !== false : undefined,
     savedModelParameters: saved.modelParameters || {},
     savedContextPercent: Number(saved.contextPercent) || undefined,
   };

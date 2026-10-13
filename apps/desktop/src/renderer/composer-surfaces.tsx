@@ -3,6 +3,9 @@
 // composer hooks; these only paint what they are handed.
 import { ArrowUp, Mic, X } from 'lucide-react';
 import React, { useEffect, useRef, type CSSProperties, type MutableRefObject, type RefObject } from 'react';
+import { composerAttachmentSource } from './attachment-menu';
+import { AttachmentCard, composerCardKind, composerCardMeta } from './attachment-card';
+import { useAttachmentContextMenu, type AttachmentOpenFile } from './attachment-context-menu';
 import { queuedFollowupPreview, type ComposerAttachment } from './composer-support';
 import { ComposerPalette } from './ComposerPalette';
 import { t } from './i18n';
@@ -124,7 +127,8 @@ export function SlashPalette({
 }
 
 function splitMentionPath(path: string): { directory: string; filename: string } {
-  const separator = path.lastIndexOf('/');
+  // Folder rows end in `/`; the folder's own name is the bold part.
+  const separator = path.lastIndexOf('/', path.length - 2);
   if (separator < 0) return { directory: '', filename: path };
   return { directory: path.slice(0, separator + 1), filename: path.slice(separator + 1) };
 }
@@ -172,7 +176,7 @@ export function MentionPalette({
             onMouseEnter={() => setIndex(rowIndex)}
             onClick={() => onSelect(path)}
           >
-            <MxIcon name="open-file" size={14} />
+            <MxIcon name={path.endsWith('/') ? 'folder' : 'open-file'} size={14} />
             <span className="mention-path">
               <span>{directory}</span>
               <strong>{filename}</strong>
@@ -203,43 +207,41 @@ async function openAttachmentImage(attachment: ComposerAttachment, onError: (mes
 export function AttachmentChips({
   attachments,
   onRemove,
+  onEdit,
   onError,
+  onOpenFile,
 }: {
+  /** Same editor-pane opener the transcript's file links use. */
+  onOpenFile?: AttachmentOpenFile;
   attachments: ComposerAttachment[];
   onRemove: (attachment: ComposerAttachment) => void;
+  /** Opens the editor for a folded paste chip. */
+  onEdit: (attachment: ComposerAttachment) => void;
   onError: (message: string) => void;
 }) {
+  const { menuProps, menuElement } = useAttachmentContextMenu(onOpenFile);
   return (
+    // biome-ignore lint/a11y/useAriaPropsSupportedByRole: the chip list container keeps its tag; the label names the attachments
     <div className="composer-attachments" aria-label={t('Attachments')}>
-      {attachments.map((attachment) => (
-        <div className={`attachment-chip ${attachment.kind}`} key={attachment.id}>
-          {attachment.kind === 'image' ? (
-            <button
-              type="button"
-              className="attachment-open"
-              aria-label={t('Open image')}
-              title={attachment.name}
-              onClick={() => void openAttachmentImage(attachment, onError)}
-            >
-              <img src={`data:${attachment.mimeType};base64,${attachment.data}`} alt="" />
-            </button>
-          ) : (
-            <span>
-              <MxIcon name="open-file" size={16} />
-            </span>
-          )}
-          <span data-tooltip={attachment.name}>{attachment.name}</span>
-          <button
-            type="button"
-            aria-label={t('Remove {{name}}', { name: attachment.name })}
-            onClick={() => onRemove(attachment)}
-            className="attachment-remove"
-            data-tooltip={t('Remove')}
-          >
-            <X size={14} aria-hidden="true" />
-          </button>
-        </div>
-      ))}
+      {menuElement}
+      {attachments.map((attachment) => {
+        const editable = attachment.kind === 'text' && attachment.source === 'paste';
+        const image = attachment.kind === 'image';
+        return (
+          <AttachmentCard
+            key={attachment.id}
+            kind={composerCardKind(attachment)}
+            name={attachment.name}
+            imageUrl={image ? `data:${attachment.mimeType};base64,${attachment.data}` : undefined}
+            content={image ? undefined : attachment.data}
+            meta={composerCardMeta(attachment)}
+            menu={menuProps(composerAttachmentSource(attachment))}
+            onOpen={image ? () => void openAttachmentImage(attachment, onError) : undefined}
+            onEdit={editable ? () => onEdit(attachment) : undefined}
+            onRemove={() => onRemove(attachment)}
+          />
+        );
+      })}
     </div>
   );
 }
@@ -269,6 +271,7 @@ function DictationMeter({ levelRef }: { levelRef: MutableRefObject<number> }) {
   return (
     <span className="composer-dictation-meter" ref={host} aria-hidden="true">
       {DICTATION_BAR_GAINS.map((gain, index) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: fixed meter bars are positional and never reorder
         <span key={index} style={{ '--mx-dictation-gain': gain } as CSSProperties} />
       ))}
     </span>
@@ -279,6 +282,7 @@ function DictationProgress() {
   return (
     <span className="composer-dictation-progress" aria-hidden="true">
       {DICTATION_BAR_GAINS.map((_, index) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: fixed progress bars are positional and never reorder
         <span key={index} />
       ))}
     </span>

@@ -3,6 +3,7 @@ import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
 import type { DesktopModelOption } from '../shared/contract';
 import { t, tExisting } from './i18n';
 import { wrappedNavigationIndex } from './list-navigation';
+import type { RouteSpeed } from './model-route-utils';
 import { formatContextWindow } from './provider-display';
 import { ROUTE_SHEET_ROW_HEIGHT, routeSheetWidth, type RouteSheetPane } from './route-editor-logic';
 
@@ -159,27 +160,38 @@ export function routeEffortPane({
   });
 }
 
+/** The speed word's ink, shared with the model chip: Fast blue, Ultrafast orange. */
+export function routeSpeedClassName(speed: RouteSpeed): string | undefined {
+  if (speed === 'fast') return 'model-route-label-fast';
+  if (speed === 'ultrafast') return 'model-route-label-ultra';
+  return undefined;
+}
+
 export function routeSpeedPane({
-  fast,
+  speed,
   fastAvailable,
+  ultrafastAvailable,
   tuningDisabled,
-  onChangeFast,
+  onChangeSpeed,
   onOptionKeyDown,
 }: {
-  fast: boolean;
+  speed: RouteSpeed;
   fastAvailable: boolean;
+  ultrafastAvailable: boolean;
   tuningDisabled: boolean;
-  onChangeFast(enabled: boolean): void;
+  onChangeSpeed(speed: RouteSpeed): void;
   onOptionKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>): void;
 }): ReactNode {
-  return (
-    [
-      { value: false, label: t('Standard'), description: t('Default speed') },
-      { value: true, label: t('Fast'), description: t('Increased speed, increased usage') },
-    ] as const
-  ).map((option) => {
-    const selected = option.value === fast;
-    const disabled = tuningDisabled || (option.value && !fastAvailable);
+  const options: Array<{ value: RouteSpeed; label: string; description: string }> = [
+    { value: 'standard', label: t('Standard'), description: t('Default speed') },
+    { value: 'fast', label: t('Fast'), description: t('Increased speed, increased usage') },
+  ];
+  if (ultrafastAvailable) {
+    options.push({ value: 'ultrafast', label: t('Ultrafast'), description: t('Fastest speed, highest usage') });
+  }
+  return options.map((option) => {
+    const selected = option.value === speed;
+    const disabled = tuningDisabled || (option.value !== 'standard' && !fastAvailable);
     return (
       <button
         type="button"
@@ -189,12 +201,12 @@ export function routeSpeedPane({
         aria-checked={selected}
         disabled={disabled}
         onClick={() => {
-          if (option.value !== fast) onChangeFast(option.value);
+          if (option.value !== speed) onChangeSpeed(option.value);
         }}
         onKeyDown={onOptionKeyDown}
       >
         <span className="route-sheet-option-copy">
-          <span>{option.label}</span>
+          <span className={routeSpeedClassName(option.value)}>{option.label}</span>
           <small>{option.description}</small>
         </span>
         {selected && <RouteSelectionCheck />}

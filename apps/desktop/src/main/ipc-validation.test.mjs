@@ -5,7 +5,9 @@ import {
   requiredDesktopCapabilityReadRequests,
   requiredDesktopCapabilityRequest,
   requiredGitBranchName,
+  requiredModelSelection,
   requiredNewTaskDraft,
+  requiredSubmitOptions,
   requiredTextFileEncoding,
 } from './ipc-validation.ts';
 
@@ -21,6 +23,34 @@ test('an editor save without an encoding change passes the IPC and remote bounda
   }
 });
 
+test('a model route selection carries the per-route autoEffort boolean like fast', () => {
+  const base = { provider: 'openai', model: 'gpt-test', effort: 'high', fast: true };
+  assert.deepEqual(requiredModelSelection({ ...base, autoEffort: false }), { ...base, autoEffort: false });
+  assert.deepEqual(requiredModelSelection(base), base);
+  assert.throws(() => requiredModelSelection({ ...base, autoEffort: 'off' }), /autoEffort must be a boolean/);
+});
+
+test('saveStarterGuideState passes only a well-formed guide state', () => {
+  const save = (state) => requiredDesktopCapabilityRequest({ capability: 'saveStarterGuideState', args: [state] });
+  assert.deepEqual(save({ closed: true, welcomed: true, visited: ['provider', 'remote'] }).args, [
+    { closed: true, welcomed: true, visited: ['provider', 'remote'] },
+  ]);
+  for (const bad of [
+    'junk',
+    null,
+    [],
+    {},
+    { closed: 1, welcomed: true, visited: [] },
+    { closed: false, welcomed: false },
+    { closed: false, welcomed: false, visited: ['nope'] },
+    { closed: false, welcomed: false, visited: [7] },
+    { closed: false, welcomed: false, visited: [], extra: true },
+  ]) {
+    assert.throws(() => save(bad), TypeError, JSON.stringify(bad));
+  }
+  assert.throws(() => requiredDesktopCapabilityRequest({ capability: 'saveStarterGuideState', args: [] }), TypeError);
+});
+
 test('the turn review bar reaches its diff with only a boolean refresh option', () => {
   for (const args of [
     [],
@@ -28,6 +58,7 @@ test('the turn review bar reaches its diff with only a boolean refresh option', 
     [{ refresh: true }],
     [{ refresh: false, known: 'a'.repeat(32) }],
     [{ refresh: true, summary: true }],
+    [{ refresh: true, summary: true, poll: 'background' }],
   ]) {
     assert.doesNotThrow(() => requiredDesktopCapabilityRequest({ capability: 'getTurnReviewDiff', args }));
   }
@@ -36,6 +67,8 @@ test('the turn review bar reaches its diff with only a boolean refresh option', 
     [{ cwd: 'C:/' }],
     [{ known: 'not-a-tag' }],
     [{ summary: 'yes' }],
+    [{ poll: 'foreground' }],
+    [{ poll: true }],
     [null],
     [[]],
     [{ refresh: true }, {}],
@@ -174,4 +207,60 @@ test('git branch validation trims surrounding whitespace without weakening rejec
   for (const value of [' \t\n', 'x'.repeat(513), ' -main ', 'fea\0ture', 'fea\nture', 'fea\rture']) {
     assert.throws(() => requiredGitBranchName(value), { name: 'TypeError', message: 'git branch is invalid.' });
   }
+});
+
+test('save-as sources accept only http(s) and data URLs', async () => {
+  const { requiredSaveSource, requiredAttachmentFile, sanitizedFileName } = await import('./ipc-validation.ts');
+  assert.equal(requiredSaveSource('https://example.com/a.txt').kind, 'http');
+  assert.equal(requiredSaveSource('data:text/plain;base64,aGk=').bytes.toString(), 'hi');
+  assert.equal(requiredSaveSource('data:text/plain,h%20i').bytes.toString(), 'h i');
+  for (const bad of ['file:///etc/passwd', 'javascript:alert(1)', 'ftp://x/y', '', 'nope', 5]) {
+    assert.throws(() => requiredSaveSource(bad), TypeError);
+  }
+  assert.equal(sanitizedFileName('a/b\\c:d.txt'), 'a-b-c-d.txt');
+  assert.equal(sanitizedFileName(''), 'download');
+  const pdf = requiredAttachmentFile('data:application/pdf;base64,aGk=', 'My Report.PDF');
+  assert.equal(pdf.extension, 'pdf');
+  assert.equal(pdf.baseName, 'My-Report');
+  assert.equal(requiredAttachmentFile('data:application/pdf;base64,aGk=', 'noext').extension, 'pdf');
+  // Text-kind attachments off the allowlist open as .txt.
+  assert.equal(requiredAttachmentFile('data:text/html;base64,aGk=', 'x.html').extension, 'txt');
+  assert.equal(requiredAttachmentFile('data:text/plain;base64,aGk=', 'run.bat').extension, 'txt');
+  assert.equal(requiredAttachmentFile('data:text/x-python;base64,aGk=', 'a.py').extension, 'txt');
+  assert.equal(requiredAttachmentFile('data:text/plain;base64,aGk=', 'notes.md').extension, 'md');
+  assert.equal(
+    requiredAttachmentFile(
+      'data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,aGk=',
+      'a.docx'
+    ).extension,
+    'docx'
+  );
+  // Anything else off the allowlist is rejected.
+  for (const [mime, file] of [
+    ['application/octet-stream', 'x.cpl'],
+    ['application/octet-stream', 'x.msc'],
+    ['application/java-archive', 'x.jar'],
+    ['application/octet-stream', 'x.py'],
+    ['application/x-msdownload', 'x.exe'],
+    ['application/octet-stream', 'noext'],
+  ]) {
+    assert.throws(() => requiredAttachmentFile(`data:${mime};base64,aGk=`, file), TypeError, `${mime} ${file}`);
+  }
+  assert.throws(() => requiredAttachmentFile('http://x/', 'a.txt'), TypeError);
+});
+
+test('submit options accept the renderer retryFailedTurn field at the IPC boundary', () => {
+  // Conversation.tsx resubmits failed turns (and model-switch continuation)
+  // with `retryFailedTurn: true`; the allowlist must pass it through.
+  assert.doesNotThrow(() => requiredSubmitOptions({ retryFailedTurn: true }));
+  assert.doesNotThrow(() => requiredSubmitOptions({ retryFailedTurn: false }));
+  assert.deepEqual(requiredSubmitOptions({ id: 'abc', retryFailedTurn: true }), {
+    id: 'abc',
+    retryFailedTurn: true,
+  });
+  assert.throws(() => requiredSubmitOptions({ retryFailedTurn: 'yes' }), /submit retryFailedTurn is invalid/);
+  assert.throws(() => requiredSubmitOptions({ retryFailedTurn: 1 }), /submit retryFailedTurn is invalid/);
+  // Unknown fields are still rejected.
+  assert.throws(() => requiredSubmitOptions({ retryFailedTurns: true }), TypeError);
+  assert.throws(() => requiredSubmitOptions({ device: 'studio' }), TypeError);
 });

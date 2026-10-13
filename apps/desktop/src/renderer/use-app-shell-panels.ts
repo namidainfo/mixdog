@@ -95,7 +95,7 @@ export function useAppShellPanels(activeBottomPanelPaneId: string) {
   // instead (user: /context가 0으로 나온다). A surface that owns no
   // conversation simply passes nothing.
   const openConversationCommandSurface = useCallback((surface: CommandSurfaceName, sessionId = '') => {
-    if (surface === 'usage' && !desktopFeatureEnabled('usage')) return;
+    if (surface === 'stats' && !desktopFeatureEnabled('usage')) return;
     setSettingsOpen(false);
     setCommandSurfaceSessionId(surface === 'context' || surface === 'inherit' ? sessionId : '');
     setCommandSurface(surface);
@@ -132,6 +132,7 @@ export function useAppShellPanels(activeBottomPanelPaneId: string) {
     [bottomPanel]
   );
   const appliedSidePanelMode = useRef(activeSidePanelMode);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: applies only when the side-panel mode changes; layout and applySidebarOpen are read at that moment
   useEffect(() => {
     // Existing installs retain their last folding state on launch. A mode
     // CHANGE applies immediately; navigation applies the same exact policy.

@@ -9,6 +9,7 @@ import type {
 
 import { PaneSurfaceGate } from '../PaneSurfaceGate';
 import { preferredModelEffort } from '../model-route-utils';
+import { routeAutoEffortCapable } from '../auto-effort-store';
 import { showDesktopToast, useErrorToast } from '../notifications';
 import { ErrorNotice } from '../ErrorNotice';
 import { t } from '../i18n';
@@ -24,6 +25,8 @@ import {
   preloadCapabilitySettings,
 } from './capability-data';
 import { CategoryPanel } from './capability-panels';
+import { friendlyCapabilityError } from './remote-capability-guard';
+import { errorMessage } from '../editor-pane-session-errors';
 export { getCachedCapabilitySettings, preloadCapabilitySettings } from './capability-data';
 export { OAuthControl } from './capability-panels';
 
@@ -93,6 +96,7 @@ export const CapabilitySettings = memo(function CapabilitySettings({
     [api]
   );
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: api, refreshNonce and revision are re-read triggers; load itself only reads api.
   useEffect(() => {
     // A hidden panel adopts the shared cache without another sweep. Every
     // opening refreshes it: a two-second cache grace period could otherwise
@@ -174,9 +178,10 @@ export const CapabilitySettings = memo(function CapabilitySettings({
           invalidateSidebarReferenceForMutation(capability);
           if (refresh) setRevision((value) => value + 1);
           return result.value;
-        } catch (reason) {
+        } catch (rawReason) {
+          const reason = friendlyCapabilityError(rawReason);
           if (errorMode === 'throw') throw reason;
-          if (!silent) setError(reason instanceof Error ? reason.message : String(reason));
+          if (!silent) setError(errorMessage(reason));
           return undefined;
         } finally {
           if (!silent) setPending('');
@@ -200,7 +205,7 @@ export const CapabilitySettings = memo(function CapabilitySettings({
       latestUpdaterState.current = next;
       if (activeRef.current) setUpdaterState(next);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(errorMessage(reason));
     } finally {
       setPending('');
     }
@@ -215,7 +220,7 @@ export const CapabilitySettings = memo(function CapabilitySettings({
       latestUpdaterState.current = next;
       if (activeRef.current) setUpdaterState(next);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(errorMessage(reason));
     } finally {
       setPending('');
     }
@@ -251,15 +256,21 @@ export const CapabilitySettings = memo(function CapabilitySettings({
           else if (typeof model.savedFast === 'boolean') fast = model.savedFast;
           else fast = model.fastPreferred;
         }
+        let autoEffort: boolean | undefined;
+        if (routeAutoEffortCapable(model)) {
+          if (isActiveRoute && typeof active.autoEffort === 'boolean') autoEffort = active.autoEffort;
+          else autoEffort = model.savedAutoEffort ?? true;
+        }
         await api.setModelRoute({
           provider: model.provider,
           model: model.model,
           ...(effort ? { effort } : {}),
           ...(fast === undefined ? {} : { fast }),
+          ...(autoEffort === undefined ? {} : { autoEffort }),
         });
         setRevision((value) => value + 1);
       } catch (reason) {
-        setError(reason instanceof Error ? reason.message : String(reason));
+        setError(errorMessage(reason));
       } finally {
         setPending('');
       }
@@ -276,7 +287,7 @@ export const CapabilitySettings = memo(function CapabilitySettings({
         await api.setFast(enabled);
         setRevision((value) => value + 1);
       } catch (reason) {
-        setError(reason instanceof Error ? reason.message : String(reason));
+        setError(errorMessage(reason));
       } finally {
         setPending('');
       }

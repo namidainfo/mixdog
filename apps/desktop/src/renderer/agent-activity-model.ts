@@ -120,7 +120,12 @@ interface LiveAgentSummary {
   provider: string;
   effort: string;
   fast: boolean;
+  /** The route's model parameters (service tier, Daybreak…); absent when it has none. */
+  modelParameters?: Record<string, string>;
+  /** Per-route Auto reasoning; only an explicit `false` opts out. */
+  autoEffort: boolean;
   tag: string;
+  title: string;
   status: string;
   /** Lifecycle the surface must paint. `cancel-unconfirmed` rows stay live on
    *  purpose: their process is not proven gone. */
@@ -199,7 +204,12 @@ function liveAgentSummary(
     provider: String(entry.provider || '').trim(),
     effort: String(entry.effort || '').trim(),
     fast: entry.fast === true,
+    ...(Object.keys(record(entry.modelParameters)).length
+      ? { modelParameters: record(entry.modelParameters) as Record<string, string> }
+      : {}),
+    autoEffort: entry.autoEffort !== false,
     tag: tag || taskId,
+    title: String(entry.title || '').trim(),
     status: unconfirmed || desktopAgentStatus(entry),
     state,
     // An unproven cancel is not queued work, whatever stage the row still says.
@@ -222,7 +232,12 @@ function mergeLiveAgentSummary(current: LiveAgentSummary, next: LiveAgentSummary
     provider: current.provider || next.provider,
     effort: current.effort || next.effort,
     fast: current.fast || next.fast,
+    ...(current.modelParameters || next.modelParameters
+      ? { modelParameters: current.modelParameters || next.modelParameters }
+      : {}),
+    autoEffort: current.autoEffort && next.autoEffort,
     tag: current.tag || next.tag,
+    title: current.title || next.title,
     // Keeping the earlier status is safe ONLY because a confirmed cancel
     // never reaches this merge (see agentCancelSignals) and an unconfirmed
     // one wins here: whichever twin reports it, the merge can never fall
@@ -232,7 +247,12 @@ function mergeLiveAgentSummary(current: LiveAgentSummary, next: LiveAgentSummary
       (current.queued && !next.queued)
         ? next.status
         : current.status,
-    state: next.state === 'cancel-unconfirmed' ? next.state : current.state,
+    // A twin that reports a pending user approval wins over plain work: the
+    // agent is blocked on the user whichever row saw it first.
+    state:
+      next.state === 'cancel-unconfirmed' || (next.state === 'needs-user' && current.state !== 'cancel-unconfirmed')
+        ? next.state
+        : current.state,
     queued: current.queued && next.queued,
     startedAt: current.startedAt || next.startedAt,
     turnStartedAt: current.turnStartedAt || next.turnStartedAt,
@@ -495,7 +515,7 @@ export function visibleAgentTreeRows(
 }
 
 /** Seed placement for a group the dock has never ranked: the moment it was
- *  CREATED (user decision: 생성기준으로 정렬). A row that already settled
+ *  CREATED. A row that already settled
  *  carries its idle stamp instead, so a completed session seeds where its
  *  work actually finished rather than where it began. */
 function poolRowSeedAt(agent: DesktopAgentPoolRow): number {
@@ -503,16 +523,16 @@ function poolRowSeedAt(agent: DesktopAgentPoolRow): number {
   if (idle) return idle;
   // A working row has NO idle stamp, and its updatedAt is the live heartbeat:
   // ranking on it made every running session climb on each tick, so cards
-  // leapfrogged mid-turn (user: 위아래로 튄다). Creation is frozen for the
-  // whole lifetime, so a live row holds its place until it stops.
+  // leapfrogged mid-turn. Creation is frozen for the whole lifetime, so a
+  // live row holds its place until it stops.
   return timeMs(agent.createdAt) || timeMs(agent.startedAt) || timeMs(agent.turnStartedAt);
 }
 
 /** Sticky ordering stamp for one owner group. The pool decides `working` from
  *  a 2-minute heartbeat freshness window, so `idleSince` can vanish and come
- *  back mid-turn and a raw ranking swapped rows on every flip (user: 하트비트
- *  때문에 뒤죽박죽). A group's stamp therefore only ever ADVANCES, and only
- *  when a genuinely newer turn start or completion lands. */
+ *  back mid-turn and a raw ranking swapped rows on every flip. A group's stamp
+ *  therefore only ever ADVANCES, and only when a genuinely newer turn start or
+ *  completion lands. */
 export function stickyGroupOrder(
   previous: ReadonlyMap<string, number>,
   ownerId: string,
@@ -520,7 +540,7 @@ export function stickyGroupOrder(
 ): number {
   const prior = previous.get(ownerId) || 0;
   // Two moments move a group, and both are FROZEN values: the turn it started
-  // and the moment it went idle (user decision: 작업 시작 시 1회, 완료 시 1회).
+  // and the moment it went idle.
   // The live heartbeat in updatedAt stays out of the ranking, so a running
   // session climbs once and then holds its slot for the whole turn.
   const moment = Math.max(0, ...agents.map((agent) => Math.max(timeMs(agent.idleSince), timeMs(agent.turnStartedAt))));

@@ -6,6 +6,7 @@
 // shell prints its environment once, before the daemon starts. Windows GUI
 // launches already carry the registry environment and skip the read.
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 
 const MARK = '__MIXDOG_LOGIN_ENV__';
@@ -77,6 +78,24 @@ export function loginShellOverrides(
     if (inherited[key] !== value) overrides[key] = value;
   }
   return overrides;
+}
+
+// Homebrew's prefixes (Apple Silicon, then Intel). A shell read that failed or
+// a profile that never runs `brew shellenv` leaves them off a GUI launch PATH.
+const HOMEBREW_PATH_DIRS = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin', '/usr/local/sbin'];
+
+/** PATH with every existing Homebrew directory it lacks appended — never
+ *  prepended, so the order the user's shell chose keeps winning. The original
+ *  string is kept verbatim, empty components (the current directory) included. */
+export function withHomebrewPath(
+  path: string | undefined,
+  exists: (dir: string) => boolean = existsSync
+): { path: string; added: string[] } {
+  const original = path ?? '';
+  const segments = original.split(':');
+  const added = HOMEBREW_PATH_DIRS.filter((dir) => !segments.includes(dir) && exists(dir));
+  if (!added.length) return { path: original, added };
+  return { path: original ? `${original}:${added.join(':')}` : added.join(':'), added };
 }
 
 function readShell(shell: string, timeoutMs: number): Promise<Record<string, string> | string> {

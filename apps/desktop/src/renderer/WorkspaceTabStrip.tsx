@@ -14,15 +14,17 @@ import React, {
 import { createPortal } from 'react-dom';
 import { clampOverlayIntoView } from './anchored-panel';
 import { explorerAbsolutePath } from './explorer-tree-model';
-import { FileText, FileDiff, Folder, MessageCircle, Plus, Sparkles, Terminal, X } from 'lucide-react';
+import { isRemoteHostRenderer } from './remote-ui-projection';
+import { FileText, FileDiff, Folder, Globe, MessageCircle, Plus, Sparkles, Terminal, X } from 'lucide-react';
 
 import type { DesktopSessionSummary } from '../shared/contract';
 import type { WorkspaceTab } from './nav-types';
 import { t } from './i18n';
 import { prefetchSurfaceForSelection } from './lazy-widgets';
-import { isMobileRemoteSurface } from './MobileTabOverview';
+import { useMobileRemoteSurface } from './mobile-surface';
 import { useMobileBack } from './mobile-back';
 import { ProgressSpinner } from './ProgressSpinner';
+import { RemotePcBrandDot } from './RemotePcSwitcher';
 import { useTabStripReveal } from './use-tab-strip-reveal';
 import {
   acceptPaneDrag,
@@ -100,6 +102,8 @@ function tabGlyph(tab: WorkspaceTab, size = 14) {
       return <Sparkles size={size} />;
     case 'terminal':
       return <Terminal size={size} />;
+    case 'browser':
+      return <Globe size={15} />;
     default:
       // Chat/new-task tabs keep the bubble icon (user: 탭 앞 아이콘은 롤백).
       return <MessageCircle size={size} />;
@@ -134,6 +138,7 @@ function workspaceTabHomeButton() {
         </g>
         <polygon points="128,112 133,123 144,128 133,133 128,144 123,133 112,128 123,123" fill="currentColor" />
       </svg>
+      <RemotePcBrandDot />
     </button>
   );
 }
@@ -247,6 +252,7 @@ function workspaceTabNode({
   onPinTab?(tab: WorkspaceTab): void;
 }) {
   return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: the tab wrapper only carries drag, middle-click and context menu; its inner button is the control.
     <div
       key={tab.key}
       ref={(node) => setTabNode(tab.key, node)}
@@ -296,6 +302,8 @@ function workspaceTabNode({
           selectTab(tab);
         }}
         aria-current={active ? 'page' : undefined}
+        // Compact tabs hide the title text; the name must not depend on it.
+        aria-label={tab.title}
         data-tooltip={tab.tooltip || tab.title}
       >
         {/* While the session works, the tab GLYPH becomes the
@@ -396,12 +404,16 @@ function workspaceTabContextMenu({
               void navigator.clipboard?.writeText(fileTarget.rel)?.then(undefined, () => {});
             },
           },
-          {
-            label: t('Reveal in Explorer'),
-            run: () => {
-              void window.mixdogDesktop?.revealFile?.(fileTarget.project, fileTarget.rel, fileTarget.accessToken);
-            },
-          },
+          ...(isRemoteHostRenderer()
+            ? []
+            : [
+                {
+                  label: t('Reveal in Explorer'),
+                  run: () => {
+                    void window.mixdogDesktop?.revealFile?.(fileTarget.project, fileTarget.rel, fileTarget.accessToken);
+                  },
+                },
+              ]),
         ]
       : []),
   ];
@@ -485,7 +497,7 @@ export function WorkspaceTabStrip({
   // 헤더가 완전 다르다): real tabs, X, + and the dock toggles. Its only
   // addition is the brand mark at the front, which opens the session drawer
   // the desktop reaches through its activity rail.
-  const mobile = isMobileRemoteSurface();
+  const mobile = useMobileRemoteSurface();
   // Layout INPUT: the width the tab run may spend — the shell minus the
   // home slot, the fixed + slot and the three-control trailing safe zone.
   const measureWidths = useCallback(() => {
@@ -523,6 +535,7 @@ export function WorkspaceTabStrip({
   useMobileBack(Boolean(tabMenu), () => setTabMenu(null));
   // Shell width drives the Chrome tab-width ladder.
   const hasTrailing = Boolean(trailing);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: hasTrailing re-attaches the observer when the trailing box mounts or unmounts
   useLayoutEffect(() => {
     const shell = shellNode.current;
     if (!shell || typeof ResizeObserver === 'undefined') return undefined;
@@ -539,11 +552,13 @@ export function WorkspaceTabStrip({
   }, [measureWidths, hasTrailing]);
   // Tab-count changes move the available width without resizing the shell —
   // re-measure on those renders too.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: tab count and trailing presence move the available width without resizing the shell
   useLayoutEffect(() => {
     measureWidths();
   }, [tabs.length, hasTrailing, measureWidths]);
   // Menus can anchor hard against the window's right edge; the measured box
   // is what keeps them on screen.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the menu box is re-clamped whenever a menu opens or moves
   useLayoutEffect(() => {
     clampOverlayIntoView(tabMenuNode.current);
   }, [tabMenu]);
@@ -571,6 +586,7 @@ export function WorkspaceTabStrip({
   }, [tabs, activeKey]);
   // One beat after the last change the ghosts unmount and the entering marks
   // drop; a change inside the beat restarts it so every tab settles together.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a tab list change restarts the settle beat
   useEffect(() => {
     if (!closingTabs.current.size && !enteringKeys.current.size) return undefined;
     const timer = window.setTimeout(() => {
@@ -803,7 +819,7 @@ export function WorkspaceTabStrip({
               이질감이 있네). */}
         {/* 15px → a ~8.8px cross on the strip's 1.5px line: at 18px the +
               out-sized the 14px tab labels (user: +가 너무 크다). */}
-        <Plus size={16} aria-hidden="true" />
+        <Plus size={15} aria-hidden="true" />
       </button>
       {tabMenu &&
         workspaceTabContextMenu({

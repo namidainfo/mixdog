@@ -232,12 +232,13 @@ test('provider-reported ticket expiries survive account caching; aggregate expir
   value.rows[0].accounts[0].resetCredits = credits;
   await renderUsage(t, {}, value);
   assert.deepEqual(getUsageDashboardSnapshot().dashboard.rows[0].accounts[0].resetCredits, credits);
-  const summaries = [...document.querySelectorAll('.sidebar-usage-reset-summary small')].map((node) => node.textContent);
-  assert.match(summaries[0], /Expires/);
-  assert.equal(summaries[1], 'Expiry unavailable');
+  await act(async () => document.querySelector('[aria-label="Reset credit details"]').click());
+  const summaries = () => [...document.querySelectorAll('.sidebar-usage-reset-popover li small')].map((node) => node.textContent);
+  assert.match(summaries()[0], /Expires/);
+  assert.equal(summaries()[1], 'Expiry unavailable');
   assert.match(document.querySelector('.sidebar-usage-reset-credit').textContent, /Next reset credit expiry: Expires/);
   credits.availableCredits = [];
   await act(async () => publishUsageDashboard(value));
-  assert.deepEqual([...document.querySelectorAll('.sidebar-usage-reset-summary small')].map((node) => node.textContent), ['Expiry unavailable', 'Expiry unavailable']);
+  assert.deepEqual(summaries(), ['Expiry unavailable', 'Expiry unavailable']);
   assert.match(document.querySelector('.sidebar-usage-reset-credit').textContent, /Next reset credit expiry: Expires/);
 });

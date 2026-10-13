@@ -1,7 +1,14 @@
 import type { DesktopModelOption, DesktopModelSelection } from '../shared/contract';
+import { routeAutoEffortCapable, useAutoEffortRoute } from './auto-effort-store';
 import { t } from './i18n';
-import { preferredModelEffort, preferredModelParameters } from './model-route-utils';
-import { modelDisplayName, modelFastAvailable } from './provider-display';
+import {
+  modelOffersUltrafast,
+  preferredModelEffort,
+  preferredModelParameters,
+  speedRouteFields,
+} from './model-route-utils';
+import { contextSliderPercent, contextTokensForPercent, defaultContextPercent } from './model-controls';
+import { modelContextWindow, modelDisplayName, modelFastAvailable, modelMaxContextWindow } from './provider-display';
 import { RouteEditor } from './RouteEditor';
 
 export function ModelRouteEditor({
@@ -14,9 +21,15 @@ export function ModelRouteEditor({
   catalogError = '',
   providerSetupError = '',
   labelForModel,
+  composerParity = false,
+  autoEffortSwitch = false,
   onChange,
   onOpenProviders,
 }: {
+  /** Show the composer picker's Context slider and Auto effort switch. */
+  composerParity?: boolean;
+  /** Show the Auto effort switch without the rest of the composer parity set. */
+  autoEffortSwitch?: boolean;
   models: DesktopModelOption[];
   value: DesktopModelSelection;
   disabled?: boolean;
@@ -38,6 +51,7 @@ export function ModelRouteEditor({
   const modelParameters = preferredModelParameters(selected, value.modelParameters || {});
   const fastAvailable = modelFastAvailable(selected, effort, modelParameters);
   const fast = fastAvailable && (typeof value.fast === 'boolean' ? value.fast : selected?.fastPreferred === true);
+  const routeAutoEffort = value.autoEffort !== false;
   let triggerModel = t('Select model');
   if (selected) {
     triggerModel = labelForModel?.(selected) || modelDisplayName(selected.model, selected.provider, selected.display);
@@ -53,15 +67,40 @@ export function ModelRouteEditor({
     const nextParameters = patch.modelParameters ?? preferredModelParameters(option, sameModel ? modelParameters : {});
     const requestedFast = patch.fast ?? (sameModel ? fast : option.fastPreferred);
     const nextFast = modelFastAvailable(option, nextEffort, nextParameters) && requestedFast === true;
+    const nextContextPercent = patch.contextPercent ?? (sameModel ? value.contextPercent : undefined);
+    const nextAutoEffort =
+      patch.autoEffort ?? (sameModel ? routeAutoEffort : (option.savedAutoEffort ?? true));
     return {
       provider: option.provider,
       model: option.model,
       ...(nextEffort ? { effort: nextEffort } : {}),
       ...(option.fastCapable ? { fast: nextFast } : {}),
+      ...(routeAutoEffortCapable(option) ? { autoEffort: nextAutoEffort } : {}),
       ...(option.modelParameterOptions?.length ? { modelParameters: nextParameters } : {}),
-      ...(value.contextPercent ? { contextPercent: value.contextPercent } : {}),
+      ...(nextContextPercent ? { contextPercent: nextContextPercent } : {}),
     };
   };
+  const defaultWindow = selected ? modelContextWindow(selected) : 0;
+  const maxWindow = selected ? modelMaxContextWindow(selected) : 0;
+  const contextVisible = composerParity && maxWindow > 0;
+  const autoEffortRoute = useAutoEffortRoute(
+    (composerParity || autoEffortSwitch) && selected?.autoEffortCapable === true,
+    value.autoEffort,
+    (enabled) => {
+      if (selected) onChange(selectionFor(selected, { autoEffort: enabled }));
+    }
+  );
+  const contextDefaultPercent = defaultContextPercent(defaultWindow, maxWindow);
+  const contextPercent = contextVisible
+    ? contextSliderPercent(Number(value.contextPercent) || contextDefaultPercent)
+    : 100;
+  const contextTokens = contextVisible
+    ? contextTokensForPercent(contextPercent, {
+        defaultPercent: contextDefaultPercent,
+        defaultTokens: defaultWindow,
+        maxTokens: maxWindow,
+      })
+    : 0;
 
   return (
     <RouteEditor
@@ -74,12 +113,12 @@ export function ModelRouteEditor({
       fast={fast}
       fastVisible={selected?.fastCapable === true}
       fastAvailable={fastAvailable}
-      contextVisible={false}
-      contextPercent={100}
-      contextDefaultPercent={100}
-      contextTokens={0}
-      contextMaxTokens={0}
-      contextDefaultTokens={0}
+      contextVisible={contextVisible}
+      contextPercent={contextPercent}
+      contextDefaultPercent={contextVisible ? contextDefaultPercent : 100}
+      contextTokens={contextTokens}
+      contextMaxTokens={contextVisible ? maxWindow : 0}
+      contextDefaultTokens={contextVisible ? defaultWindow : 0}
       modelParameterOptions={selected?.modelParameterOptions || []}
       modelParameters={modelParameters}
       catalogLoaded={catalogLoaded}
@@ -93,10 +132,14 @@ export function ModelRouteEditor({
       onChangeEffort={(nextEffort) => {
         if (selected) onChange(selectionFor(selected, { effort: nextEffort }));
       }}
-      onChangeFast={(nextFast) => {
-        if (selected) onChange(selectionFor(selected, { fast: nextFast }));
+      onChangeSpeed={(speed) => {
+        if (!selected) return;
+        const next = speedRouteFields(speed, modelParameters, modelOffersUltrafast(selected));
+        onChange(selectionFor(selected, next));
       }}
-      onChangeContext={() => {}}
+      onChangeContext={(nextPercent) => {
+        if (selected && contextVisible) onChange(selectionFor(selected, { contextPercent: nextPercent }));
+      }}
       onChangeModelParameter={(id, nextValue) => {
         if (!selected) return;
         onChange(
@@ -106,6 +149,9 @@ export function ModelRouteEditor({
         );
       }}
       onOpenProviders={onOpenProviders}
+      autoEffort={autoEffortRoute.autoEffort}
+      onChangeAutoEffort={autoEffortRoute.onChangeAutoEffort}
+      onOpenSheet={autoEffortRoute.onOpenSheet}
     />
   );
 }

@@ -45,10 +45,11 @@ export function buildJobNotFoundMessage(jobId) {
   return `Error: task not found: ${jobId}`;
 }
 
+// Running promoted jobs, for the runtime-wide read-only counts `task list`
+// shows; each leaves when its native task settles (trackShellJobRecord).
+const promotedJobIds = new Set();
 const backgroundShellJobWatchers = new Map();
 const jobNotifyCtxByJobId = new Map();
-const shellJobResourceLeases = new Map();
-const shellJobResourceLeaseSubscriptions = new Map();
 
 function demoteBackgroundShellPriority(pid) {
   if (process.env.MIXDOG_BG_PRIORITY === '0') return;
@@ -72,25 +73,11 @@ function trackShellJobRecord(task, options) {
     try {
       unsubscribe?.();
     } catch {}
+    promotedJobIds.delete(jobId);
     void completeShellJobRecord(jobId, normalizeShellJobDetail(detail));
   };
   unsubscribe = subscribeNativeTask(jobId, settle);
   settle(getNativeTask(jobId) || task);
-}
-
-function releaseShellJobResourceLease(jobId) {
-  const unsubscribe = shellJobResourceLeaseSubscriptions.get(jobId);
-  shellJobResourceLeaseSubscriptions.delete(jobId);
-  try {
-    unsubscribe?.();
-  } catch {}
-  const lease = shellJobResourceLeases.get(jobId);
-  if (!lease) return false;
-  shellJobResourceLeases.delete(jobId);
-  try {
-    Promise.resolve(lease.release()).catch(() => {});
-  } catch {}
-  return true;
 }
 
 /** Native task status → background-task status. A non-zero exit is a COMMAND
@@ -262,24 +249,6 @@ export function killShellJob(jobId) {
   return { ...attachJobInsights(normalizeShellJobDetail(detail)), killed: wasRunning };
 }
 
-export function attachShellJobResourceLease(jobId, lease) {
-  if (!jobId || !lease || typeof lease.release !== 'function') return false;
-  const detail = getNativeTask(jobId);
-  if (detail?.status !== 'running') {
-    try {
-      Promise.resolve(lease.release()).catch(() => {});
-    } catch {}
-    return false;
-  }
-  releaseShellJobResourceLease(jobId);
-  shellJobResourceLeases.set(jobId, lease);
-  const unsubscribe = subscribeNativeTask(jobId, (task) => {
-    if (task?.status !== 'running') releaseShellJobResourceLease(jobId);
-  });
-  shellJobResourceLeaseSubscriptions.set(jobId, unsubscribe);
-  return true;
-}
-
 export function clearShellJobNotifyCtx(jobId) {
   jobNotifyCtxByJobId.delete(jobId);
 }
@@ -319,7 +288,6 @@ export function watchBackgroundShellJob(jobId, notifyCtx) {
     unsubscribe();
     backgroundShellJobWatchers.delete(jobId);
     jobNotifyCtxByJobId.delete(jobId);
-    releaseShellJobResourceLease(jobId);
     const enriched = attachJobInsights(normalizeShellJobDetail(detail));
     const completion = buildShellCompletion(jobId, enriched);
     const completedTask = completeBackgroundTask(jobId, {
@@ -407,8 +375,24 @@ export async function promoteForegroundShellJob({
     native.stdoutPath = stdoutPath || null;
     native.stderrPath = stderrPath || null;
   }
+  // Added before tracking: the record's settlement removes it again.
+  promotedJobIds.add(native.jobId);
   trackShellJobRecord(native, { ownerSessionId, clientHostPid, startedAtMs: started });
   return native;
+}
+
+/** Running background shell jobs owned by sessions outside `ownSessionIds`. */
+export function otherSessionBackgroundShellJobCount(ownSessionIds) {
+  let count = 0;
+  for (const jobId of [...promotedJobIds]) {
+    const task = getNativeTask(jobId);
+    if (task?.status !== 'running') {
+      promotedJobIds.delete(jobId);
+      continue;
+    }
+    if (!ownSessionIds.has(String(task.ownerSessionId || ''))) count += 1;
+  }
+  return count;
 }
 
 /** Live record for a command still running in the FOREGROUND. Background jobs
@@ -518,7 +502,10 @@ export async function shutdownShellJobs(_reason = 'runtime-close', { scope = nul
     jobNotifyCtxByJobId.delete(task.jobId);
   }
   const settled = await Promise.all(jobs.map((task) => waitNativeTask(task.jobId, 1_200).catch(() => null)));
-  for (const task of jobs) releaseShellJobResourceLease(task.jobId);
+  // A process still running after the wait is not forgotten: it keeps being
+  // stopped until its exit is confirmed.
+  const unconfirmed = jobs.filter((_, index) => settled[index]?.status === 'running').map((task) => task.jobId);
+  for (const jobId of unconfirmed) retryShutdownSurvivor(jobId, 1);
   if (scoped) {
     // The owning session is gone: nothing can query its tasks again, so
     // drop ALL of its retained state — not only the ones that happened to
@@ -532,16 +519,79 @@ export async function shutdownShellJobs(_reason = 'runtime-close', { scope = nul
       } catch {}
     }
   }
-  if (!scoped) {
-    for (const jobId of [...shellJobResourceLeases.keys()]) {
-      releaseShellJobResourceLease(jobId);
-    }
-    jobNotifyCtxByJobId.clear();
-  }
+  if (!scoped) jobNotifyCtxByJobId.clear();
   return {
     killed: jobs.length,
     cancelledJobs: jobs.length,
     confirmedJobs: settled.filter((task) => task && task.status !== 'running').length,
+    unconfirmedJobs: unconfirmed,
     cancelledWatchers,
   };
+}
+
+// Shutdown survivors: re-issue the stop every SURVIVOR_RETRY_MS until the
+// native runner confirms the exit, at most SURVIVOR_MAX_ATTEMPTS times, each
+// step logged. A survivor that outlives every attempt stays listed.
+const SURVIVOR_RETRY_MS = 5_000;
+const SURVIVOR_MAX_ATTEMPTS = 10;
+const shutdownSurvivors = new Map();
+
+function logShellJobs(message) {
+  try {
+    process.stderr.write(`[shell-jobs] ${message}\n`);
+  } catch {}
+}
+
+function dropShutdownSurvivor(jobId) {
+  const entry = shutdownSurvivors.get(jobId);
+  if (!entry) return;
+  shutdownSurvivors.delete(jobId);
+  clearTimeout(entry.timer);
+  try {
+    entry.unsubscribe();
+  } catch {}
+}
+
+function retryShutdownSurvivor(jobId, attempts) {
+  let entry = shutdownSurvivors.get(jobId);
+  if (entry) clearTimeout(entry.timer);
+  else {
+    entry = { attempts, timer: null, unsubscribe: () => {} };
+    shutdownSurvivors.set(jobId, entry);
+    // The native terminal event confirms the exit at any time — also after
+    // the last retry — and drops the entry.
+    entry.unsubscribe = subscribeNativeTask(jobId, (task) => {
+      if (task?.status === 'running') return;
+      dropShutdownSurvivor(jobId);
+      logShellJobs(`${jobId} exit confirmed after shutdown`);
+    });
+  }
+  entry.attempts = attempts;
+  logShellJobs(`shutdown could not confirm ${jobId} exited (attempt ${attempts}); retrying`);
+  entry.timer = setTimeout(() => {
+    if (getNativeTask(jobId)?.status !== 'running') {
+      dropShutdownSurvivor(jobId);
+      logShellJobs(`${jobId} exit confirmed after shutdown`);
+      return;
+    }
+    if (attempts >= SURVIVOR_MAX_ATTEMPTS) {
+      entry.timer = null;
+      logShellJobs(`giving up stopping ${jobId} after ${attempts} attempts; it is still running`);
+      return;
+    }
+    try {
+      cancelNativeTask(jobId);
+    } catch {}
+    retryShutdownSurvivor(jobId, attempts + 1);
+  }, SURVIVOR_RETRY_MS);
+  entry.timer.unref?.();
+}
+
+/** Shutdown survivors whose termination is not yet confirmed. */
+export function shellShutdownSurvivors() {
+  // Reconcile against native state: an exit whose event was missed still ends the entry.
+  for (const jobId of [...shutdownSurvivors.keys()]) {
+    if (getNativeTask(jobId)?.status !== 'running') dropShutdownSurvivor(jobId);
+  }
+  return [...shutdownSurvivors].map(([jobId, entry]) => ({ jobId, attempts: entry.attempts }));
 }

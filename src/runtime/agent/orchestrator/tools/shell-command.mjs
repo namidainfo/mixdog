@@ -1,22 +1,13 @@
 // Async one-shot shell runner.
 //
-// Replaces the legacy spawnSync path in builtin.mjs shell execution. The
-// improvements over spawnSync are:
-//   - native process-tree termination on timeout / abort.
-//   - automatic spill to $PLUGIN_DATA/shell-output/<taskId>.* once the
-//     in-memory buffers exceed SHELL_OUTPUT_INLINE_CAP bytes. The caller
-//     receives an outputFilePath marker the model can FileRead later
-//     instead of losing the tail past the inline cap.
-//   - external AbortSignal hookup so a session-scoped abort (ESC, new
-//     prompt) cancels in-flight bash work without orphaning the child.
-//
 // One run is an explicit state record (lib/shell-run-state.mjs) driven
 // through three phases: spawn (lib/shell-run-spawn.mjs), settle
 // (lib/shell-run-settle.mjs) and the auto-background promotion
 // (lib/shell-run-background.mjs). This module owns admission, preflight and
 // the wiring between those phases.
-import { startBackgroundTask } from '../../../shared/background-tasks.mjs';
+import { getBackgroundTask, startBackgroundTask } from '../../../shared/background-tasks.mjs';
 import { resourceAdmission } from '../../../shared/resource-admission.mjs';
+import { buildShellCompletion, killShellJob, peekShellJob, subscribeShellJobSettled } from './builtin/shell-jobs.mjs';
 import { ExecResult, treeKill } from './shell-exec-output.mjs';
 import {
   clearForegroundTimers,
@@ -50,25 +41,49 @@ const _envAdmissionWait = Math.floor(Number(process.env.MIXDOG_SHELL_ADMISSION_W
 const SHELL_ADMISSION_WAIT_MS =
   Number.isFinite(_envAdmissionWait) && _envAdmissionWait >= 0 ? _envAdmissionWait : 30_000;
 
-function _admissionSaturationError(admission, waitMs) {
+// Foreground leases are labeled `[task_id: X] command` at spawn (X is the id
+// the command keeps once promoted, or its queued task's id).
+const LEASE_TASK_ID = /^\[task_id: ([^\]\s]+)\]/;
+
+// Only the caller's OWN holders are described (oldest first, with task_id and
+// an exact `task cancel` call when cancellable). Other sessions' holders are
+// reported as a count with ages: their command text is never shown here.
+function _admissionSaturationError(admission, waitMs, ownerKey = null) {
+  const own = String(ownerKey || '');
   let detail = '';
   try {
     const snap = admission.snapshot();
-    const held = (snap.activeLeases || [])
+    const holders = (snap.activeLeases || [])
       .filter((lease) => lease.kind === 'shell')
-      .map((lease) => `[${Math.round(lease.ageMs / 1000)}s] ${String(lease.label || '(unlabeled)')}`)
-      .join(' | ');
+      .sort((a, b) => b.ageMs - a.ageMs);
+    const rows = [];
+    const cancels = [];
+    const otherAges = [];
+    for (const lease of holders) {
+      const age = `${Math.round(lease.ageMs / 1000)}s`;
+      if (!own || lease.ownerKey !== own) {
+        otherAges.push(age);
+        continue;
+      }
+      const label = String(lease.label || '(unlabeled)');
+      const taskId = LEASE_TASK_ID.exec(label)?.[1] || null;
+      const cancellable = taskId && getBackgroundTask(taskId);
+      if (cancellable) cancels.push(`task cancel task_id=${taskId}`);
+      rows.push(`[${age}] ${label}${cancellable ? '' : ' (foreground call)'}`);
+    }
     detail =
-      ` ${snap.active.shell}/${snap.limits.maxShells} shell leases active` +
-      (held ? ` (${held})` : '') +
-      `, ${snap.queued} queued.`;
+      ` ${snap.active.shell}/${snap.limits.maxShells} shell leases active, ${snap.queued} queued.` +
+      (rows.length ? ` Your holders, oldest first: ${rows.join(' | ')}.` : '') +
+      (cancels.length ? ` Free your own slots: ${cancels.join('; ')}.` : '') +
+      (otherAges.length
+        ? ` ${otherAges.length} holder(s) belong to other sessions of this runtime (ages ${otherAges.join(', ')}); only their owners can cancel them.`
+        : '');
   } catch {
     /* diagnostics must not mask the timeout */
   }
   const error = new Error(
     `shell admission wait exceeded ${waitMs}ms —${detail} ` +
-      'Long-held leases usually mean stuck background shell process trees: ' +
-      'check task list, cancel stale tasks, kill lingering child processes, or restart the CLI.'
+      'A lease returns when its call ends or is promoted to the background; background jobs hold none.'
   );
   error.code = 'ERESOURCEPRESSURE';
   error.admissionSaturated = true;
@@ -168,7 +183,7 @@ async function acquireShellLeaseBounded(
   const deadlineAt = Date.now() + waitMs;
   const deadline = setTimeout(() => {
     try {
-      ctl.abort(_admissionSaturationError(admission, waitMs));
+      ctl.abort(_admissionSaturationError(admission, waitMs, ownerKey));
     } catch {}
   }, waitMs);
   if (deadline.unref) deadline.unref();
@@ -223,7 +238,7 @@ async function admitAndSpawn(run, params, { admissionWaitMs, onSaturated }) {
     run.resourceLease = await acquireShellLeaseBounded(admission, {
       abortSignal,
       waitMs: admissionWaitMs,
-      label: String(command || '').slice(0, 120),
+      label: `[task_id: ${run.foregroundRecordId}] ${String(command || '').slice(0, 120)}`,
       ownerKey: ownerSessionId,
     });
     const policyErr = await _execPolicyBlockMessage(command);
@@ -252,36 +267,62 @@ async function admitAndSpawn(run, params, { admissionWaitMs, onSaturated }) {
   }
 }
 
+// A queued command that outlived its foreground window was promoted under the
+// queued task's id; the task settles with that job.
+async function settleQueuedPromotion(jobId) {
+  await new Promise((resolve) => {
+    if (!subscribeShellJobSettled(jobId, resolve)) resolve();
+  });
+  const completion = buildShellCompletion(jobId, peekShellJob(jobId));
+  if (completion.taskStatus !== 'completed') {
+    throw new Error(completion.error || `shell task ${completion.taskStatus}`);
+  }
+  return completion.result;
+}
+
 // A saturated shell lane must not fail the call: the command becomes a tracked
-// background task that waits (no admission ceiling) for a lease, runs, and
-// completes like any other task. The call returns its task_id immediately.
+// background task that waits (no admission ceiling) for a lease and then runs
+// as a normal foreground-then-promote command under the task's id, so a
+// long-lived one releases its lease at promotion like any other. The call
+// returns its task_id immediately.
 function queueSaturatedAsTask(run, saturation, spec) {
   const queuedAbort = new AbortController();
+  const taskId = run.foregroundRecordId;
   let task;
   try {
     task = startBackgroundTask({
-      taskId: run.taskId,
+      taskId,
       surface: 'shell',
       operation: 'shell',
-      label: String(spec.command || '').replace(/\s+/g, ' ').slice(0, 120),
+      label: String(spec.command || '')
+        .replace(/\s+/g, ' ')
+        .slice(0, 120),
       context: { callerSessionId: spec.ownerSessionId, clientHostPid: spec.clientHostPid },
       input: { command: spec.command, cwd: spec.cwd },
-      meta: { task_id: run.taskId, stdout: null, stderr: null, cwd: spec.cwd, timeoutMs: spec.timeoutMs },
+      meta: { task_id: taskId, stdout: null, stderr: null, cwd: spec.cwd, timeoutMs: spec.backgroundDeadlineMs || 0 },
       resultType: 'shell_task_result',
-      cancel: () => queuedAbort.abort(),
+      cancel: () => {
+        queuedAbort.abort();
+        try {
+          killShellJob(taskId);
+        } catch {}
+      },
       run: async () => {
         const result = await execShellCommand({
           ...spec,
+          jobId: taskId,
           abortSignal: queuedAbort.signal,
-          autoBackgroundMs: 0,
-          backgroundOnTimeout: false,
           admissionWaitMs: 0,
+          // The call already returned: nobody renders live progress.
+          onProgress: null,
+          onOutputTail: null,
         });
+        if (result.backgrounded && result.jobId) return settleQueuedPromotion(result.jobId);
         const output = [result.stdout, result.stderr].filter(Boolean).join('\n');
         if (result.exitCode !== 0) {
           throw new Error(`exit code ${result.exitCode ?? result.signal ?? 'unknown'}${output ? `\n${output}` : ''}`);
         }
-        return { task_id: run.taskId, status: 'completed', exit_code: 0, output };
+        return { task_id: taskId, status: 'completed', exit_code: 0, output };
       },
     });
   } catch {
@@ -474,72 +515,64 @@ function armDeadlines(run, { timeoutMs, autoBackgroundMs, backgroundOnTimeout, a
 
 // Run one command to a terminal ExecResult. Spawn-time EPERM retries (Windows
 // Defender scanning the child image) live in lib/shell-spawn-retry.mjs.
-export function execShellCommand({
-  shell,
-  shellArg,
-  shellArgs,
-  command,
-  env,
-  cwd,
-  timeoutMs,
-  abortSignal,
-  autoBackgroundMs,
-  onProgress,
-  onOutputTail,
-  clientHostPid,
-  ownerSessionId,
-  backgroundOnTimeout,
-  promotedTimeoutMs = 0,
-  backgroundDeadlineMs = 0,
-  admissionWaitMs = SHELL_ADMISSION_WAIT_MS,
-  admission = resourceAdmission,
-  directArgv = null,
-  // What the shell PARSES, when that must differ from what the caller shows.
-  // `command` stays the display/record text (job labels, telemetry, shell-job
-  // rows); `execScript` is the argv payload. They diverge only when a caller
-  // hands the script to the shell out-of-band — see the POSIX env+eval path in
-  // bash-tool.mjs, which keeps the command body out of the child's argv.
-  execScript = null,
-}) {
+export function execShellCommand(options) {
+  const {
+    shell,
+    shellArg,
+    shellArgs,
+    command,
+    env,
+    cwd,
+    timeoutMs,
+    abortSignal,
+    autoBackgroundMs,
+    onProgress,
+    onOutputTail,
+    clientHostPid,
+    ownerSessionId,
+    backgroundOnTimeout,
+    promotedTimeoutMs = 0,
+    backgroundDeadlineMs = 0,
+    // Fixed task_id for the run (a queued command reuses its task's id).
+    jobId = null,
+    admissionWaitMs = SHELL_ADMISSION_WAIT_MS,
+    admission = resourceAdmission,
+    directArgv = null,
+    // What the shell PARSES, when that must differ from what the caller shows.
+    // `command` stays the display/record text (job labels, telemetry, shell-job
+    // rows); `execScript` is the argv payload. They diverge only when a caller
+    // hands the script to the shell out-of-band — see the POSIX env+eval path in
+    // bash-tool.mjs, which keeps the command body out of the child's argv.
+    execScript = null,
+  } = options;
   return new Promise(async (resolve) => {
-    const run = createShellRun({ abortSignal, resolve });
+    const run = createShellRun({ abortSignal, resolve, jobId });
     // An async executor's throw is NOT routed to this Promise — it becomes an
     // unhandled rejection of the executor's own promise while the awaiting
     // caller hangs forever. Every path below therefore has to settle the run
     // itself, including the unexpected one.
     try {
-      const spawned = await admitAndSpawn(run, {
-        admission,
-        shell,
-        shellArg,
-        shellArgs,
-        command,
-        env,
-        cwd,
-        abortSignal,
-        directArgv,
-        execScript,
-        ownerSessionId,
-        clientHostPid,
-      }, {
-        admissionWaitMs,
-        onSaturated: (err) =>
-          backgroundOnTimeout &&
-          queueSaturatedAsTask(run, err, {
-            shell,
-            shellArg,
-            shellArgs,
-            command,
-            env,
-            cwd,
-            timeoutMs: backgroundDeadlineMs,
-            clientHostPid,
-            ownerSessionId,
-            admission,
-            directArgv,
-            execScript,
-          }),
-      });
+      const spawned = await admitAndSpawn(
+        run,
+        {
+          admission,
+          shell,
+          shellArg,
+          shellArgs,
+          command,
+          env,
+          cwd,
+          abortSignal,
+          directArgv,
+          execScript,
+          ownerSessionId,
+          clientHostPid,
+        },
+        {
+          admissionWaitMs,
+          onSaturated: (err) => backgroundOnTimeout && queueSaturatedAsTask(run, err, options),
+        }
+      );
       if (!spawned) return;
 
       // Pre-aborted signal: kill immediately if the abort already fired

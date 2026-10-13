@@ -60,6 +60,45 @@ test('exhausted weekly usage is pinned; missing weekly data is never invented; k
   );
 });
 
+test('Grok usage is not borrowed by Muse Code or MiMo', () => {
+  const grokOnly = usagePinEntries({
+    rows: [
+      { id: 'grok-oauth', group: 'oauth', authenticated: true, windows: [{ label: 'W', usedPct: 1 }] },
+      { id: 'muse-code-oauth', group: 'oauth', authenticated: false, windows: [] },
+      { id: 'mimo-oauth', group: 'oauth', authenticated: false, windows: [] },
+    ],
+  });
+  assert.deepEqual(
+    grokOnly.map((entry) => entry.provider),
+    ['grok-oauth']
+  );
+  const muse = usagePinEntries({
+    rows: [{ id: 'muse-code-oauth', group: 'oauth', authenticated: true, windows: [{ label: 'W', usedPct: 7 }] }],
+  });
+  assert.deepEqual(
+    muse.map((entry) => [entry.provider, entry.percent]),
+    [['muse-code-oauth', 7]]
+  );
+});
+
+test('Grok, Muse Code and MiMo together each show their own quota', () => {
+  const entries = usagePinEntries({
+    rows: [
+      { id: 'mimo-oauth', group: 'oauth', authenticated: true, windows: [{ label: 'W', usedPct: 30 }] },
+      { id: 'muse-code-oauth', group: 'oauth', authenticated: true, windows: [{ label: 'W', usedPct: 20 }] },
+      { id: 'grok-oauth', group: 'oauth', authenticated: true, windows: [{ label: 'W', usedPct: 10 }] },
+    ],
+  });
+  assert.deepEqual(
+    entries.map((entry) => [entry.key, entry.provider, entry.percent]),
+    [
+      ['grok', 'grok-oauth', 10],
+      ['muse-code', 'muse-code-oauth', 20],
+      ['mimo', 'mimo-oauth', 30],
+    ]
+  );
+});
+
 test('other providers retain their existing quota-window selection', () => {
   const entries = usagePinEntries({
     rows: [
@@ -129,7 +168,12 @@ function meterRows() {
 
 test('Usage uses the same diagonal outline-to-filled pin without changing its toggle action', async (t) => {
   let toggles = 0;
-  const props = { pinned: false, onTogglePin: () => { toggles++; } };
+  const props = {
+    pinned: false,
+    onTogglePin: () => {
+      toggles++;
+    },
+  };
   const { root, api } = await renderUsage(t, [], props);
   const button = document.querySelector('.sidebar-usage-pin');
   assert.equal(button.getAttribute('aria-pressed'), 'false');

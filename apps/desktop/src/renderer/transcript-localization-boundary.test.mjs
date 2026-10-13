@@ -36,6 +36,12 @@ test('runtime details and errors keep custom words while app-authored status cop
         assert.equal(document.querySelector('span').textContent, text, language);
       }
       assert.equal(localizeErrorCopy('Something went wrong.'), catalog['Something went wrong.'], language);
+      assert.equal(localizeErrorCopy('Sign-in expired.'), catalog['Sign-in expired.'], language);
+      assert.equal(
+        localizeErrorCopy('Sign in again from Providers.'),
+        catalog['Sign in again from Providers.'],
+        language
+      );
       document.body.innerHTML = renderToStaticMarkup(
         React.createElement(CompletionStatus, {
           item: { kind: 'statusdone', label: 'Compact skipped', detail: 'conversation kept · Agent' },
@@ -87,7 +93,8 @@ test('tool output and agent answers cannot be mistaken for UI summaries', async 
       isError: true,
       completedAt: 1,
     });
-    assert.equal(failed.resultLabel, 'Image');
+    // A failed command reads "실패 · <why>"; the tool's own text stays untranslated.
+    assert.equal(failed.resultLabel, `${catalog.Failed} · Image`);
     for (const language of ['en', 'ko']) {
       await i18n.changeLanguage(language);
       for (const result of ['[exit code: 0]', '[status: completed]']) {

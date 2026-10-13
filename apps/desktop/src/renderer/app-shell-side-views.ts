@@ -4,6 +4,7 @@ import { loadSidebarPanelModule, type SidebarPanelKey } from './app-shell-compon
 import { prefetchBrowserPane, prefetchDiffView, prefetchTerminalPane } from './lazy-widgets';
 import { preloadUtilityDock } from './app-snapshot-views';
 import { paneActiveSelection, type PaneLeaf } from './pane-layout';
+import { isSessionSidePanelView } from './session-side-surface-policy';
 import type { useAppSideDocks } from './use-app-side-docks';
 import type { useSessionPaneSurfaces } from './use-session-pane-surfaces';
 import type { WorkbenchSideViewId, WorkbenchSide, WorkbenchSideViewPlacement } from './workbench-side-view-layout';
@@ -45,6 +46,7 @@ export function useSideViewPrefetch(
         void prefetchTerminalPane().catch(() => {});
         return;
       }
+      if (id === 'background-jobs') return;
       if (id === 'session-diff') {
         void prefetchDiffView().catch(() => {});
         return;
@@ -104,7 +106,7 @@ export function useSideViewSelection({
           setSessionSideSurface(selection.id, null);
           // Session Diff selection belongs to this session, just like its browser
           // and terminal; another destination clears that session's selection.
-          setSessionPanelView(selection.id, id === 'session-diff' ? 'session-diff' : null);
+          setSessionPanelView(selection.id, isSessionSidePanelView(id) ? id : null);
         }
         selectDock(leafId, id);
         return;

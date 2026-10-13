@@ -3,6 +3,7 @@ import { existsSync, statSync } from 'node:fs';
 import * as nodeModule from 'node:module';
 import { constants as osConstants, freemem, homedir, setPriority, totalmem } from 'node:os';
 import { join, resolve } from 'node:path';
+import { createNetworkWatcher, networkSignature } from './network-watch';
 import { inlineBootScriptHash, withInlineBootScript } from './renderer-csp';
 import { pathToFileURL } from 'node:url';
 
@@ -12,6 +13,7 @@ import {
   crashReporter,
   dialog,
   ipcMain,
+  net,
   Notification,
   powerMonitor,
   powerSaveBlocker,
@@ -28,13 +30,14 @@ import { readDesktopModelBootstrapSnapshot } from './model-bootstrap';
 import { AgentAwakeService } from './agent-awake';
 import { createBackgroundWindow } from './background-window';
 import { createDesktopTray, type DesktopTray } from './desktop-tray';
-import { loginShellOverrides, readLoginShellEnvironment } from './login-shell-environment';
+import { loginShellOverrides, readLoginShellEnvironment, withHomebrewPath } from './login-shell-environment';
 import { createTurnAttention, type TurnAttention } from './turn-attention';
 import { createDesktopTurnNotifier } from './desktop-turn-notifier';
 import { desktopIdentity } from './desktop-identity';
-import { notificationSoundPath, playWindowsNotificationSound } from './notification-sound';
+import { notificationSoundPath, playWindowsNotificationSound, scaledNotificationSound } from './notification-sound';
 import { activateDesktopWindow, openDesktopNotificationSession } from './notification-window';
 import { SessionOpenRequests } from './session-open-requests';
+import type { RemoteHostWindows } from './remote-host-windows';
 import { createIdleReclaim, purgeRendererMemory, type IdleReclaim } from './idle-reclaim';
 import { watchCrashHandler } from './crash-handler-watch';
 import { createDesktopDiagnostics, type DesktopDiagnostics } from './desktop-diagnostics';
@@ -49,14 +52,21 @@ import {
 import { registerDesktopIpc } from './ipc';
 import { createBrowserHost, type BrowserHost } from './browser/host';
 import { createComputerHost, type ComputerHost } from './computer';
-import { requestComputerPermissions } from './computer/host/permission-reads';
+import { bridgeDiscoveryDirectory } from './bridge/discovery-file';
+import { TerminalBridgeServer } from './terminal/bridge-server';
+import { createTerminalCommandExecutor, type TerminalBridgeCommand } from './terminal/commands';
+import type { SessionTerminalTab } from './terminal-manager';
+import { readComputerPermissions, requestComputerPermissions } from './computer/host/permission-reads';
+import { applyGnomeExtensionSetting } from './computer/host/gnome-extension';
 import { createComputerUseOverlay, type ComputerUseOverlay } from './computer/overlay';
 import { confirmComputerTurnsStopped } from './computer/overlay/stop-turns';
 import { MEDIA_SCHEME, registerMediaProtocol, registerMediaScheme } from './media-protocol';
 import { desktopPermissionAllowed } from './permission-policy';
 import { installNativeMenu } from './menu';
+import { installDefaultContextMenu } from './context-menu';
 import { nativeT, refreshNativeUiLanguage } from './native-i18n';
 import { DesktopSettingsStore } from './settings-store';
+import { mixdogDataDirectory } from './computer/shared/common';
 import { desktopUpdater, startAutoUpdater } from './updater';
 import { gcSupersededNativeToolCaches } from './native-runtime-cache-gc.mjs';
 import {
@@ -67,12 +77,12 @@ import {
 } from './window-options';
 import {
   DESKTOP_IPC,
+  NOTIFICATION_VOLUME_DEFAULT,
   type DesktopRemoteAccessInfo,
-  type DesktopRemoteBrowserControl,
-  type DesktopRemoteBrowserStreamOptions,
   type DesktopSettings,
 } from '../shared/contract';
-import { persistWindowState, readWindowState } from './window-state';
+import { BROWSER_REMOTE_METHODS, runBrowserRemoteRequest, type BrowserRemoteMethod } from './remote-browser-methods';
+import { clampBoundsToWorkArea, persistWindowState, readWindowState } from './window-state';
 import {
   normalizeTranscriptReadDiagnostic,
   setTranscriptReadDiagnosticSink,
@@ -81,8 +91,11 @@ import {
   normalizeRendererComposerActionDiagnostic,
   normalizeRendererDiagnostic,
   normalizeRendererLongTaskDiagnostic,
+  normalizeRendererWhatsNewDiagnostic,
   rendererRecoveryDecision,
 } from './renderer-recovery';
+import { acknowledgeAnnouncement, LAUNCH_VERSION_FILE, recordLaunchVersion } from './launch-version';
+import { installWhatsNewAcknowledge } from './whats-new-acknowledge';
 
 const desktopProcessStartedAt = Date.now();
 // The launcher's stdio pipe can close while the app keeps running (started
@@ -108,6 +121,13 @@ const desktopBootScenario = String(process.env.MIXDOG_BOOT_SCENARIO || '')
   .replace(/[^A-Za-z0-9_.:-]/g, '')
   .slice(0, 80);
 const DESKTOP_WINDOW_SHOW_DEADLINE_MS = 3_000;
+let launchFollowsUpdate: Promise<boolean> | null = null;
+const launchVersionPath = () => join(app.getPath('userData'), LAUNCH_VERSION_FILE);
+const launchRecordWriteFailure = (error: unknown) =>
+  diagnostics?.write('launch-version-write-failed', {
+    errorName: error instanceof Error ? error.name : 'Error',
+    message: String((error as Error)?.message ?? error).slice(0, 300),
+  });
 
 // Profile identity. Unpackaged shells (electron-vite dev/preview, source-mode
 // E2E) derive userData from this package's name (@mixdog/desktop), so every
@@ -370,10 +390,17 @@ function adoptLoginShellEnvironment(): Promise<void> {
     const overrides = environment ? loginShellOverrides(process.env, environment) : {};
     Object.assign(process.env, overrides);
     if (process.platform === 'win32') return;
+    let homebrewPathAdded: string[] = [];
+    if (process.platform === 'darwin') {
+      const homebrew = withHomebrewPath(process.env.PATH);
+      if (homebrew.added.length) process.env.PATH = homebrew.path;
+      homebrewPathAdded = homebrew.added;
+    }
     writeBootDiagnostic('login-shell-environment', {
       durationMs: Date.now() - startedAt,
       adopted: Boolean(environment),
       changedCount: Object.keys(overrides).length,
+      homebrewPathAdded,
       failures,
     });
   });
@@ -386,6 +413,7 @@ const serviceClient = new DesktopServiceClient({
     packaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
     appPath: app.getAppPath(),
+    appVersion: app.getVersion(),
     rendererDir: app.isPackaged
       ? join(process.resourcesPath, 'app.asar.unpacked', 'out', 'renderer')
       : join(import.meta.dirname, '../renderer'),
@@ -441,6 +469,7 @@ function startDaemonService(): void {
   void serviceClient
     .start()
     .then(() => {
+      terminalBridge.start();
       diagnostics?.write('daemon-service-ready', {
         totalMs: Date.now() - desktopProcessStartedAt,
       });
@@ -519,6 +548,22 @@ const serviceTerminalManager = {
     });
   },
 };
+// Agent `terminal` tool: a read-only loopback bridge over the daemon-owned
+// PTYs. A hidden always-on built-in (like Media Studio): it runs for the app's
+// lifetime, so headless runs without the desktop app never see the tool.
+const terminalBridge = new TerminalBridgeServer<TerminalBridgeCommand>({
+  dataDirectory: bridgeDiscoveryDirectory,
+  execute: createTerminalCommandExecutor({
+    sessionTabs: async (sessionId) =>
+      (await serviceClient.invokeDesktopOperation('termSessionTabs', [sessionId])) as SessionTerminalTab[],
+    snapshot: async (id, since) =>
+      (await serviceClient.invokeDesktopOperation('termSnapshot', since === undefined ? [id] : [id, since])) as {
+        text: string;
+        cursor: number;
+        reset: boolean;
+      } | null,
+  }),
+});
 // Keep-awake spans the app lifetime, not one window: agents keep working
 // while the window is closed on macOS and through renderer reloads.
 const awakeService = new AgentAwakeService(powerSaveBlocker);
@@ -548,10 +593,28 @@ function ensureSessionOpenWindow(): Promise<void> {
   }
   return sessionOpenWindowCreation;
 }
+let unsubscribeUpdaterRelay: (() => void) | null = null;
 // OS notification on final answers: schedules notify even in the foreground,
 // ordinary conversations only while unfocused. Both respect the setting.
 // App-lifetime like keep-awake: a window hidden to the tray still wants it.
 let turnNotificationsEnabled = true;
+let notificationVolume = NOTIFICATION_VOLUME_DEFAULT;
+const playNotificationSound = async (): Promise<string> => {
+  if (notificationVolume === 0) return 'suppressed:volume-muted';
+  return playWindowsNotificationSound(
+    scaledNotificationSound(
+      notificationSoundPath({
+        packaged: app.isPackaged,
+        resourcesPath: process.resourcesPath,
+        appPath: app.getAppPath(),
+      }),
+      notificationVolume,
+      join(app.getPath('userData'), 'notification-sounds')
+    ),
+    false,
+    desktopBrand.appId
+  );
+};
 const turnNotifier = createDesktopTurnNotifier({
   isEnabled: () => turnNotificationsEnabled,
   isSupported: () => Notification.isSupported(),
@@ -565,20 +628,7 @@ const turnNotifier = createDesktopTurnNotifier({
       ...(process.platform === 'win32' ? {} : { icon: trayIconPath() ?? undefined }),
       silent: process.platform === 'win32',
     }),
-  ...(process.platform === 'win32'
-    ? {
-        playSound: () =>
-          playWindowsNotificationSound(
-            notificationSoundPath({
-              packaged: app.isPackaged,
-              resourcesPath: process.resourcesPath,
-              appPath: app.getAppPath(),
-            }),
-            false,
-            desktopBrand.appId
-          ),
-      }
-    : {}),
+  ...(process.platform === 'win32' ? { playSound: playNotificationSound } : {}),
   readFinalAnswer: (sessionId, startedAt) => serviceClient.readSessionFinalAnswer(sessionId, startedAt),
   diagnostic: (event, details) => {
     diagnostics?.write(`turn-notification-${event}`, details);
@@ -592,6 +642,7 @@ let unsubscribeTurnNotifier: (() => void) | null = null;
 const applyDesktopSettings = (settings: DesktopSettings): void => {
   awakeService.setEnabled(settings.keepAwake !== false);
   turnNotificationsEnabled = settings.turnNotifications !== false;
+  notificationVolume = settings.notificationVolume;
   runInBackground = settings.runInBackground !== false;
   syncDesktopTray();
   applyComputerControlSetting(settings.computerControl === true);
@@ -611,6 +662,14 @@ function applyComputerControlSetting(enabled: boolean): void {
   if (enabled && !computerControlEnabled && computerControlApplied) requestComputerPermissions();
   computerControlApplied = true;
   computerControlEnabled = enabled;
+  // GNOME window control comes from Mixdog's own shell extension: keep it in
+  // place and enabled exactly while Computer Use is on (a no-op elsewhere).
+  void applyGnomeExtensionSetting(
+    enabled,
+    app.isPackaged
+      ? join(process.resourcesPath, 'gnome-extension', 'mixdog-windows@mixdog.io')
+      : join(app.getAppPath(), '..', '..', 'native', 'gnome-extension', 'mixdog-windows@mixdog.io'),
+  );
   computerHost?.setBridgeEnabled(computerControlEnabled);
 }
 // Observation only: the bridge keeps serving reads while every input action is
@@ -640,27 +699,55 @@ unsubscribeServiceSettings = serviceClient.subscribeDesktopEvents(({ name, value
     const request =
       value && typeof value === 'object' ? (value as { id?: unknown; method?: unknown; args?: unknown }) : {};
     const id = typeof request.id === 'string' ? request.id : '';
-    const method =
-      request.method === 'stream' || request.method === 'control' || request.method === 'release'
-        ? request.method
-        : '';
     const args = Array.isArray(request.args) ? request.args : [];
+    if (
+      id &&
+      (request.method === 'trashItem' ||
+        request.method === 'updaterState' ||
+        request.method === 'updaterCheck' ||
+        request.method === 'updaterInstall')
+    ) {
+      const hostMethod = request.method;
+      void (async () => {
+        let installAfterAnswer = false;
+        try {
+          let result: unknown = null;
+          if (hostMethod === 'trashItem') {
+            await shell.trashItem(String(args[0] || ''));
+          } else if (hostMethod === 'updaterState') {
+            result = desktopUpdater.getState();
+          } else if (hostMethod === 'updaterCheck') {
+            result = await desktopUpdater.check();
+          } else {
+            result = desktopUpdater.getState();
+            installAfterAnswer = desktopUpdater.getState().status === 'ready';
+          }
+          await serviceClient.invokeDesktopOperation('browserRemoteResolve', [id, true, result, null]);
+        } catch (error) {
+          installAfterAnswer = false;
+          await serviceClient
+            .invokeDesktopOperation('browserRemoteResolve', [
+              id,
+              false,
+              null,
+              error instanceof Error ? error.message : String(error),
+            ])
+            .catch(() => {});
+        }
+        // Installing restarts this app, so the caller is answered first.
+        if (installAfterAnswer) await desktopUpdater.install();
+      })();
+      return;
+    }
+    const method =
+      typeof request.method === 'string' && BROWSER_REMOTE_METHODS.has(request.method)
+        ? (request.method as BrowserRemoteMethod)
+        : null;
     if (!id || !method) return;
     void (async () => {
       try {
         if (!browserHost) throw new Error('Desktop Browser Use is unavailable.');
-        const sessionId = typeof args[0] === 'string' ? args[0] : '';
-        let result: unknown;
-        if (method === 'stream') {
-          result = await browserHost.remoteBrowserStream(
-            sessionId,
-            args[1] as DesktopRemoteBrowserStreamOptions | null
-          );
-        } else if (method === 'control') {
-          result = await browserHost.remoteBrowserControl(sessionId, args[1] as DesktopRemoteBrowserControl);
-        } else {
-          result = browserHost.releaseSession(sessionId);
-        }
+        const result = await runBrowserRemoteRequest(browserHost, method, args);
         await serviceClient.invokeDesktopOperation('browserRemoteResolve', [id, true, result ?? null, null]);
       } catch (error) {
         await serviceClient
@@ -678,6 +765,10 @@ unsubscribeServiceSettings = serviceClient.subscribeDesktopEvents(({ name, value
   if (name === 'desktop-settings-changed' && value && typeof value === 'object') {
     applyDesktopSettings(value as DesktopSettings);
   }
+});
+// Paired browsers show this machine's updater, so its state travels to the daemon.
+unsubscribeUpdaterRelay = desktopUpdater.subscribe((state) => {
+  void serviceClient.invokeDesktopOperation('publishUpdaterState', [state]).catch(() => {});
 });
 let quitAfterDispose = false;
 // Last-known runInBackground setting; the window's close listener reads it live.
@@ -791,22 +882,19 @@ function startDiagnosticsEventLoopMonitor(): void {
 }
 
 function installDesktopMenu(): void {
-  installNativeMenu(
-    Boolean(process.env.ELECTRON_RENDERER_URL),
-    {
-      // The OS window stays in Electron; the daemon owns both remote transports.
-      showRemoteAccess: () => {
-        void (async () => {
-          const info = await remoteAccessInfo();
-          if (!info) return;
-          const { showRemoteAccessWindow } = await import('./remote-access-window');
-          await showRemoteAccessWindow(info, mainWindow);
-        })().catch((error: unknown) => {
-          console.error('Failed to open the remote access window:', error);
-        });
-      },
-    }
-  );
+  installNativeMenu(Boolean(process.env.ELECTRON_RENDERER_URL), {
+    // The OS window stays in Electron; the daemon owns both remote transports.
+    showRemoteAccess: () => {
+      void (async () => {
+        const info = await remoteAccessInfo();
+        if (!info) return;
+        const { showRemoteAccessWindow } = await import('./remote-access-window');
+        await showRemoteAccessWindow(info, mainWindow);
+      })().catch((error: unknown) => {
+        console.error('Failed to open the remote access window:', error);
+      });
+    },
+  });
 }
 
 function startDeferredDesktopServices(): Promise<void> {
@@ -831,8 +919,8 @@ function startDeferredDesktopServices(): Promise<void> {
   return deferredServicesPromise;
 }
 
-async function remoteAccessInfo(): Promise<DesktopRemoteAccessInfo | null> {
-  const descriptor = await host.invokeDesktopOperation('remoteAccessInfo', []);
+async function remoteAccessInfo(options?: { activate?: boolean }): Promise<DesktopRemoteAccessInfo | null> {
+  const descriptor = await host.invokeDesktopOperation('remoteAccessInfo', [options?.activate !== false]);
   const { remoteAccessInfoFromDescriptor } = await import('./remote-access-window');
   return remoteAccessInfoFromDescriptor(descriptor);
 }
@@ -847,6 +935,43 @@ async function revokeRemoteAccessClient(clientId: string): Promise<DesktopRemote
   const descriptor = await host.invokeDesktopOperation('remoteAccessRevokeClient', [clientId]);
   const { remoteAccessInfoFromDescriptor } = await import('./remote-access-window');
   return remoteAccessInfoFromDescriptor(descriptor);
+}
+
+// Hosts saved for "Connect to another PC" live for the whole app, not one
+// window: closing and reopening the main window keeps their windows.
+let remoteHostWindows: Promise<RemoteHostWindows> | null = null;
+function remoteHostsHandle(): RemoteHostWindows {
+  const ready = (remoteHostWindows ??= (async () => {
+    const [{ loadRemoteHostStore, relayHttpOrigin }, { createRemoteHostWindows }] = await Promise.all([
+      import('./remote-hosts'),
+      import('./remote-host-windows'),
+    ]);
+    const { resolveRelayUrl } = await import('./remote-relay-device');
+    return createRemoteHostWindows(
+      await loadRemoteHostStore(desktopUserData),
+      join(import.meta.dirname, '../preload/remote-window.js'),
+      {
+        relayOrigin: () => {
+          const relayUrl = resolveRelayUrl(process.env);
+          return relayUrl ? relayHttpOrigin(relayUrl) : null;
+        },
+        showConnectionSettings: () => {
+          if (!mainWindow || mainWindow.isDestroyed()) return;
+          if (mainWindow.isMinimized()) mainWindow.restore();
+          mainWindow.show();
+          mainWindow.focus();
+          mainWindow.webContents.send(DESKTOP_IPC.showConnectionSettings);
+        },
+      }
+    );
+  })());
+  return {
+    list: async () => (await ready).list(),
+    connectByCode: async (code) => (await ready).connectByCode(code),
+    open: async (id) => (await ready).open(id),
+    forget: async (id) => (await ready).forget(id),
+    rename: async (id, name) => (await ready).rename(id, name),
+  };
 }
 
 function scheduleDeferredDesktopServices(window: BrowserWindow): void {
@@ -900,6 +1025,8 @@ function disposeDesktopResources(): Promise<void> {
   unsubscribeServiceSettings?.();
   unsubscribeServiceSettings = null;
   sessionOpenRequests.failAll('Desktop is stopping.');
+  unsubscribeUpdaterRelay?.();
+  unsubscribeUpdaterRelay = null;
   awakeService.dispose();
   computerUseOverlay?.dispose();
   computerUseOverlay = null;
@@ -909,6 +1036,7 @@ function disposeDesktopResources(): Promise<void> {
       await browserHost?.dispose();
       await browserHostDisposal;
       await computerHost?.dispose();
+      await terminalBridge.stop();
     })();
     const cleanup = Promise.all([
       browserAndComputerCleanup,
@@ -1059,12 +1187,16 @@ function resolveRendererTarget(): {
  *  measures its startup against. */
 function createMainBrowserWindow(
   savedState: Awaited<ReturnType<typeof readWindowState>>,
-  brandIconPath: string | null
+  brandIconPath: string | null,
+  afterUpdate: boolean
 ): BrowserWindow {
   return new BrowserWindow({
     ...DESKTOP_WINDOW_OPTIONS,
     ...initialTitleBarWindowOverrides(),
-    ...(savedState?.bounds ?? {}),
+    ...clampBoundsToWorkArea(
+      savedState?.bounds ?? { width: DESKTOP_WINDOW_OPTIONS.width, height: DESKTOP_WINDOW_OPTIONS.height },
+      (savedState ? screen.getDisplayMatching(savedState.bounds) : screen.getPrimaryDisplay()).workArea
+    ),
     ...(brandIconPath ? { icon: brandIconPath } : {}),
     webPreferences: {
       ...DESKTOP_WINDOW_OPTIONS.webPreferences,
@@ -1073,6 +1205,7 @@ function createMainBrowserWindow(
         `--mixdog-boot-id=${desktopBootId}`,
         `--mixdog-process-started-at=${desktopProcessStartedAt}`,
         ...(desktopBootScenario ? [`--mixdog-boot-scenario=${desktopBootScenario}`] : []),
+        ...(afterUpdate ? ['--mixdog-after-update=1'] : []),
       ],
     },
   });
@@ -1092,6 +1225,11 @@ function rendererDiagnosticListener(window: BrowserWindow): (event: Electron.Ipc
     const transcriptRead = normalizeTranscriptReadDiagnostic(payload);
     if (transcriptRead) {
       diagnostics?.write('renderer-transcript-read', { ...transcriptRead });
+      return;
+    }
+    const whatsNew = normalizeRendererWhatsNewDiagnostic(payload);
+    if (whatsNew) {
+      diagnostics?.write('renderer-whats-new', whatsNew);
       return;
     }
     const composerAction = normalizeRendererComposerActionDiagnostic(payload);
@@ -1318,7 +1456,14 @@ async function createWindow(): Promise<void> {
     totalMs: Date.now() - startupStartedAt,
   });
   configureTitleBarThemePersistence(join(app.getPath('userData'), 'desktop-titlebar-theme'));
-  const window = createMainBrowserWindow(savedState, brandIconPath);
+  // Once per process: a later window must still know this launch was an update.
+  launchFollowsUpdate ??= recordLaunchVersion(
+    launchVersionPath(),
+    app.getVersion(),
+    process.argv,
+    launchRecordWriteFailure
+  );
+  const window = createMainBrowserWindow(savedState, brandIconPath, await launchFollowsUpdate);
   installDesktopWindowMaterial(window);
   if (savedState?.maximized) window.maximize();
   windowState = persistWindowState(window, statePath);
@@ -1389,6 +1534,12 @@ async function createWindow(): Promise<void> {
     publishRemoteFrame: async (frame) => {
       await serviceClient.invokeDesktopOperation('browserRemoteFrame', [frame]);
     },
+    publishRemoteTabs: async (tabs) => {
+      await serviceClient.invokeDesktopOperation('browserRemoteTabs', [tabs]);
+    },
+    publishRemoteImportProgress: async (progress) => {
+      await serviceClient.invokeDesktopOperation('browserRemoteImportProgress', [progress]);
+    },
     onSurfaceRequest: (request) => {
       void serviceClient.invokeDesktopOperation('browserRemoteOpen', [request]).catch(() => {});
     },
@@ -1457,12 +1608,15 @@ async function createWindow(): Promise<void> {
     shell,
     powerMonitor,
     onDesktopSettingsChanged: applyDesktopSettings,
+    ...(process.platform === 'win32' ? { previewNotificationSound: playNotificationSound } : {}),
     browserHost,
+    computer: { readPermissions: readComputerPermissions, requestPermissions: requestComputerPermissions },
     updater: desktopUpdater,
     terminals: serviceTerminalManager,
     remoteAccessInfo,
     rotateRemoteAccess,
     revokeRemoteAccessClient,
+    remoteHosts: remoteHostsHandle(),
   });
   diagnostics?.write('window-created', {
     totalMs: Date.now() - startupStartedAt,
@@ -1474,11 +1628,18 @@ async function createWindow(): Promise<void> {
   };
   const onRendererDiagnostic = rendererDiagnosticListener(window);
   ipcMain.on(DESKTOP_IPC.rendererDiagnostic, onRendererDiagnostic);
+  // The renderer's notice was on screen: retire the pending update announcement.
+  installWhatsNewAcknowledge(ipcMain, window, {
+    version: app.getVersion(),
+    launchRecorded: () => Promise.resolve(launchFollowsUpdate),
+    acknowledge: (version) => acknowledgeAnnouncement(launchVersionPath(), version, launchRecordWriteFailure),
+  });
   diagnostics?.write('ipc-ready', {
     totalMs: Date.now() - startupStartedAt,
   });
 
   installRendererConsoleErrorTail(window, startupStartedAt);
+  installDefaultContextMenu(window.webContents);
 
   window.webContents.on('did-start-loading', () => {
     diagnostics?.write('renderer-load-start', {
@@ -1519,8 +1680,7 @@ async function createWindow(): Promise<void> {
     presentation.cancelShowDeadline();
     diagnostics?.write('window-closed');
     presentation.detach();
-    ipcMain.removeListener(DESKTOP_IPC.rendererDiagnostic, onRendererDiagnostic);
-    const state = windowState;
+    ipcMain.removeListener(DESKTOP_IPC.rendererDiagnostic, onRendererDiagnostic);    const state = windowState;
     windowState = null;
     windowStateFlush = state?.flush().finally(() => state.dispose()) ?? Promise.resolve();
     removeIpc?.();
@@ -1605,6 +1765,11 @@ if (!app.requestSingleInstanceLock()) {
       // The daemon handshake is already running (started before whenReady);
       // stamp its start into the timeline now that the sink exists.
       reportDaemonServiceStart();
+      void settingsStore.separateDefaults(mixdogDataDirectory()).catch((error: unknown) => {
+        diagnostics?.write('defaults-separation-failed', {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
       for (const { event, entry, at } of earlyDiagnostics.splice(0)) {
         diagnostics.write(event, { ...entry, occurredAt: at });
       }
@@ -1650,6 +1815,15 @@ if (!app.requestSingleInstanceLock()) {
         // redial the relay leg instead of waiting for the ping cycle.
         awakeService.reevaluate();
         void host.invokeDesktopOperation('remoteAccessResume', []).catch(() => {});
+      });
+      // A dead network is otherwise noticed only by the ping cycle: redial the
+      // relay leg the moment the machine is back online or its network changes.
+      createNetworkWatcher({
+        isOnline: () => net.isOnline(),
+        signature: () => networkSignature(),
+        onChange: () => {
+          void host.invokeDesktopOperation('remoteAccessResume', []).catch(() => {});
+        },
       });
       diagnosticsMemoryTimer = setInterval(
         () => {

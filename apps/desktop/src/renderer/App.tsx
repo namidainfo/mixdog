@@ -1,8 +1,10 @@
 import type React from 'react';
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { OPEN_CONNECTION_SETTINGS_EVENT } from './remote-claim-events';
 import { DESKTOP_WORKSPACE_MIN_WIDTH } from '../shared/window-layout';
 import { DesktopTitlebar, type NavigationSelection } from './navigation';
 import { usePaneWorkspace } from './pane-workspace-state';
+import { requestBackgroundJobsTab } from './background-jobs-tab-store';
 import { defaultSessionLaneStore, useSessionLane } from './session-lane-store';
 import type { ExtensionsSection } from './extension-sections';
 import type { WorkbenchQuickAccessMode } from './workbench-overlays-loader';
@@ -11,12 +13,15 @@ import { desktopBootPrerequisitesReady, markBootStage } from './boot-metrics';
 import { DesktopBootGate } from './PaneSurfaceGate';
 import { usePaneTypingFocus } from './use-composer-focus';
 import { navigationKey } from './text-format';
+import { isRemoteHostRenderer } from './remote-ui-projection';
+import { useSideFileGuardOpeners } from './app-root/use-side-file-guard';
+import { bindAppFrameSideFileGuard } from './app-root/app-frame-side-file-guard';
+import { useAppFrameEntryIntake } from './app-root/app-frame-entry-intake';
+import { useAppFrameNavigationState } from './app-root/app-frame-navigation-state';
+import { useAppFrameBootEffects } from './app-root/app-frame-boot-effects';
 import { useEditorNavigation } from './use-editor-navigation';
-import { usePaneTabClose, type ConversationHandoff } from './use-pane-tab-close';
+import { usePaneTabClose } from './use-pane-tab-close';
 import { usePaneTabNavigation } from './use-pane-tab-navigation';
-import { usePushNotificationNavigation } from './use-push-notification-navigation';
-import { focusOpenNotificationSession } from './desktop-notification-navigation';
-import { useSharedIntakeBoot } from './share-target-intake';
 import { useAppPaneChrome } from './use-app-pane-chrome';
 import { useAppStartupRestore } from './use-app-startup-restore';
 import { useAppSessionActions } from './use-app-session-actions';
@@ -35,7 +40,7 @@ import { useUnreadSessions } from './app-unread-sessions';
 import { useWorkbenchWorkspace } from './workbench-workspace';
 import { SessionBrowserParkingHost } from './session-browser-surfaces';
 import { useAppSessionOpen } from './app-shell-session-open';
-import { t } from './i18n';
+import { PanelBackdrop, SidebarBackdrop } from './app-root/app-backdrops';
 import { useAppSessionTitle } from './app-shell-session-title';
 import { useAppToolProject, LAST_PROJECT_KEY } from './app-shell-tool-project';
 import { renderPaneDockStripTrailing } from './app-shell-side-dock';
@@ -44,16 +49,7 @@ import { useSessionPaneSurfaces } from './use-session-pane-surfaces';
 import { useAppProjectCatalog } from './use-app-project-catalog';
 import { useDesktopUpdater } from './use-desktop-updater';
 import { useAppSideDocks } from './use-app-side-docks';
-import {
-  useAppModuleWarmup,
-  useAppOnboarding,
-  useAppSettingsMount,
-  useAppSettingsPreload,
-  useAppThemePreference,
-  useAppWorkspaceWarmup,
-  useLaunchTabMeasurements,
-  useStartupCommitMeasurement,
-} from './use-app-boot';
+import { useAppOnboarding, useAppSettingsMount, useAppWorkspaceWarmup, useLaunchTabMeasurements } from './use-app-boot';
 import { AppShellOverlays } from './app-root/AppShellOverlays';
 import { useAppWorkbenchViews } from './app-root/use-app-workbench-views';
 import { useAppTabActions } from './app-root/use-app-tab-actions';
@@ -72,6 +68,7 @@ import { useSidebarFocusRestore } from './app-root/use-sidebar-focus-restore';
 import { useStartupPaneSelection } from './app-root/use-startup-pane-selection';
 import { useTranscriptRendererReadiness } from './app-root/use-transcript-renderer-readiness';
 import { useUnreadViewedSession } from './app-root/use-unread-viewed-session';
+import { useStableEvent } from './use-stable-event';
 
 export function App() {
   markBootStage('app-render');
@@ -83,14 +80,8 @@ export function App() {
   const snapshot = useDesktopSnapshotSelector(snapshotStore, selectDesktopSnapshot, desktopChromeSnapshotsEqual);
   const paneWorkspace = usePaneWorkspace();
   const sessionPaneSurfaces = useSessionPaneSurfaces();
-  const {
-    browserSurfaces,
-    releaseDeletedSessionSurfaces,
-    sessionDiffs,
-    setSessionDiff,
-    setSessionSideSurface,
-    terminalSurfaces,
-  } = sessionPaneSurfaces;
+  const { browserSurfaces, releaseDeletedSessionSurfaces, setSessionSideSurface, terminalSurfaces } =
+    sessionPaneSurfaces;
   const shellPanels = useAppShellPanels(paneWorkspace.focusedLeafId);
   const {
     applySidebarOpen,
@@ -159,9 +150,21 @@ export function App() {
   const activeFileKey = focusedPaneSelection?.kind === 'file' ? navigationKey(focusedPaneSelection) : '';
   const [quickAccessMode, setQuickAccessMode] = useState<WorkbenchQuickAccessMode | null>(null);
 
-  const [selection, setSelection] = useState<NavigationSelection>(() => startupNavigationSelection ?? { kind: 'new' });
-  const selectionRef = useRef<NavigationSelection>(selection);
-  selectionRef.current = selection;
+  const {
+    selection,
+    setSelection,
+    selectionRef,
+    requestedSessionId,
+    setRequestedSessionId,
+    pendingConversationHandoff,
+    conversationHandoff,
+    setConversationHandoff,
+    openSessionRef,
+    navigationEpoch,
+    viewedSessionRef,
+    unreadViewedSessionRef,
+    sidebarSelection,
+  } = useAppFrameNavigationState(startupNavigationSelection);
 
   const {
     clearNewTaskPreferences,
@@ -191,42 +194,14 @@ export function App() {
     preferredDraftProjectPath,
     effectiveDraftProjectPath,
   });
-  const [requestedSessionId, setRequestedSessionId] = useState('');
-  // Closing a conversation removes its tab model immediately. The existing
-  // Conversation owner remains visible but inert until the fallback session
-  // is ready, so slow/failed host resumes never make Ctrl+Q feel ignored.
-  const pendingConversationHandoff = useRef<ConversationHandoff | null>(null);
-  const [conversationHandoff, setConversationHandoff] = useState<ConversationHandoff | null>(null);
-  const openSessionRef = useRef<(sessionId: string, force?: boolean) => Promise<void>>(async () => {});
-  // Monotonic navigation stamp: an async switch completion may only activate
-  // its target while no NEWER navigation happened in flight (user: + during a
-  // settling session switch resurrected the old transcript in the new draft).
-  const navigationEpoch = useRef(0);
   const [sessionCatalogReady, setSessionCatalogReady] = useState(false);
   const [startupSettled, setStartupSettled] = useState(() =>
     Boolean((window as typeof window & { __mixdogStartupSettled?: boolean }).__mixdogStartupSettled)
   );
-  // A push notification tapped on the phone opens the session it came from —
-  // the app may not even have been running when it arrived.
-  usePushNotificationNavigation({
-    ready: sessionCatalogReady,
-    openSession: (sessionId) => {
-      void openSessionRef.current(sessionId);
-    },
-    desktopReady: !paneWorkspace.restorePending,
-    focusDesktopSession: (sessionId) => {
-      focusOpenNotificationSession(paneWorkspace, sessionId);
-    },
-  });
-  // A screenshot shared into the app from the phone's share sheet: the service
-  // worker parked it during the launch this claims it from.
-  useSharedIntakeBoot();
+  useAppFrameEntryIntake({ sessionCatalogReady, openSessionRef, paneWorkspace });
   const [composerFocusRequest, setComposerFocusRequest] = useState(0);
   usePaneTypingFocus(paneWorkspace.focusedLeafId, focusedPaneSelection?.kind);
-  useAppModuleWarmup(startupSettled, trackSidebarPanelModule);
-  useStartupCommitMeasurement();
-  useAppSettingsPreload();
-  useAppThemePreference();
+  useAppFrameBootEffects(startupSettled, trackSidebarPanelModule);
   const { onboardingOpen, setOnboardingOpen, onboardingReady } = useAppOnboarding(setSettingsOpen);
   useSidebarFocusRestore(sidebarOpen);
 
@@ -241,14 +216,6 @@ export function App() {
     },
     [applySidebarOpen, paneSideDocks]
   );
-
-  // The session currently on screen (selection or in-flight switch target):
-  // reconcile must never dot it, and selectionRef lags behind a switch.
-  const viewedSessionRef = useRef('');
-  // Unread consumption additionally treats an IN-FLIGHT switch target
-  // (requestedSessionId) as viewed: a slow resume or a fork-on-resume commits
-  // a different id, which left the clicked row's dot unconsumed (user report).
-  const unreadViewedSessionRef = useRef('');
 
   const { unreadSessionIds, reconcileUnreadSessions, consumeUnread } = useUnreadSessions({
     viewedSessionRef: unreadViewedSessionRef,
@@ -361,7 +328,7 @@ export function App() {
   }, [refreshSessions]);
 
   // Project navigation and registry edits: app-project-actions.ts.
-  const { startProject, renameProject, removeProject } = createProjectActions({
+  const { startProject, renameProject, removeProject, openProjectInExplorer } = createProjectActions({
     projects,
     invoke,
     applySnapshot,
@@ -374,7 +341,7 @@ export function App() {
       navigationEpoch.current += 1;
     },
   });
-  const { renameSession, archiveSession, deleteSession } = useAppSessionActions({
+  const { renameSession, archiveSession, favoriteSession, deleteSession } = useAppSessionActions({
     sessions,
     setSessions,
     tabs,
@@ -416,6 +383,19 @@ export function App() {
     setupUiRequest: snapshot.setupUiRequest,
     setupChanged: snapshot.setupChanged,
   });
+  // A remote window's PC menu asks this window for Settings → Connection.
+  useEffect(
+    () => window.mixdogDesktop?.subscribeShowConnectionSettings?.(() => openSettings('connection')),
+    [openSettings]
+  );
+
+  // The title-bar PC menu and the "a device is asking to connect" notice open
+  // the page (with the dialog they asked for).
+  useEffect(() => {
+    const open = () => openSettings('connection');
+    window.addEventListener(OPEN_CONNECTION_SETTINGS_EVENT, open);
+    return () => window.removeEventListener(OPEN_CONNECTION_SETTINGS_EVENT, open);
+  }, [openSettings]);
 
   useLaunchTabMeasurements();
   const { paneDraftSubmitFor, paneSubmitFor, submit } = useAppSubmitRouting({
@@ -434,12 +414,6 @@ export function App() {
     applySessionLaneResult,
   });
   const navigationSelection: NavigationSelection = selection;
-  // Stable identity: SessionSidebar is memoised and must not re-render from a
-  // fresh selection object literal on every App commit.
-  const sidebarSelection: NavigationSelection = useMemo(
-    () => (requestedSessionId ? { kind: 'session', id: requestedSessionId } : navigationSelection),
-    [requestedSessionId, navigationSelection]
-  );
   // Viewing a session consumes its unread dot.
   useUnreadViewedSession({
     navigationSelection,
@@ -490,13 +464,16 @@ export function App() {
     fileReveal,
     latestEditorLocation,
     editorNavigationHistory,
-    openFileTab,
+    openFileTab: openFileTabRaw,
     openProblemQuickFix,
     navigateEditorHistory,
   } = useEditorNavigation({
     setTabs,
     openSelectionInFocusedPane: paneWorkspace.openInFocused,
   });
+  // Every main-tab open passes the side-file guard (bound below).
+  const { sideFileGuardRef, openFileTab, openFileInSideDock, openPreviewToSide } =
+    useSideFileGuardOpeners(openFileTabRaw);
 
   const {
     openStudioTab,
@@ -515,10 +492,12 @@ export function App() {
     closeSidebarPanels,
     setSessionSideSurface,
     paneSideDocks,
+    closePaneRightRegion,
     sessionPaneSurfaces,
     openFileTab,
     openSession,
     activeProjectPath,
+    openQuickOpen: () => setQuickAccessMode('files'),
   });
 
   const { focusPaneTypingSurface, navigateTab } = usePaneTabNavigation({
@@ -533,6 +512,7 @@ export function App() {
   const {
     cancelPendingTabClose,
     closeTab,
+    confirmSideFileExit,
     discardAndClosePendingTab,
     pendingUnsavedClose,
     saveAndClosePendingTab,
@@ -555,6 +535,15 @@ export function App() {
     setRequestedSessionId,
     setComposerFocusRequest,
     lastSessionStorageKey: LAST_SESSION_KEY,
+  });
+  const sideFileGuard = bindAppFrameSideFileGuard({
+    sideFileGuardRef,
+    paneSideDocks,
+    paneWorkspace,
+    dirtyFileKeys,
+    handleFileDirty,
+    confirmSideFileExit,
+    openFileTabRaw,
   });
   const { activatePaneSurface, paneStripFor, stripTitleFor } = useAppPaneChrome({
     tabs,
@@ -618,6 +607,8 @@ export function App() {
     sidebarNewStudio,
     sidebarResumeSession,
     renderSidebarPanel,
+    openProjectSettings,
+    projectEditorHost,
     sideViewDescriptors,
     selectWorkbenchSideView,
     moveWorkbenchSideGroup,
@@ -651,6 +642,19 @@ export function App() {
     sessionPaneSurfaces,
   });
 
+  // A phone/web renderer has no side dock to host the editor: it keeps main tabs.
+  const sideDockHostsFiles = !isRemoteHostRenderer() && workbenchSideLayout.layout.right.length > 0;
+  const openSessionDiffInSideDock = useCallback(
+    (leafId: string) => selectWorkbenchSideView('session-diff', leafId),
+    [selectWorkbenchSideView]
+  );
+  const openBackgroundJobsInSideDock = useCallback(
+    (leafId: string, sessionId: string, kind: 'agent' | 'shell') => {
+      requestBackgroundJobsTab(sessionId, kind);
+      selectWorkbenchSideView('background-jobs', leafId);
+    },
+    [selectWorkbenchSideView]
+  );
   const paneConversationSurface = usePaneConversationRenderer({
     ...taskLifecycle,
     ...sessionTitle,
@@ -678,6 +682,11 @@ export function App() {
     stageNewTaskOrchestrationMode,
     openConversationCommandSurface,
     openFileTab,
+    openFileInSideDock: sideDockHostsFiles ? openFileInSideDock : undefined,
+    openFolderInSideDock: sideDockHostsFiles ? paneSideDocks.openFolder : undefined,
+    openSessionDiffInSideDock: sideDockHostsFiles ? openSessionDiffInSideDock : undefined,
+    openBackgroundJobsInSideDock: sideDockHostsFiles ? openBackgroundJobsInSideDock : undefined,
+    openAgentSession: dockOpenAgentSession,
   });
 
   const { paneFileEditors, paneUtilitySurfacePortals, paneUtilityTabs } = useAppPersistentPaneSurfaces({
@@ -687,6 +696,7 @@ export function App() {
     handleFileDirty,
     registerEditorSaveHandle,
     openFileTab,
+    openPreviewToSide: sideDockHostsFiles ? openPreviewToSide : undefined,
     latestEditorLocation,
     sidebarOpen,
     toggleSidebar,
@@ -708,9 +718,45 @@ export function App() {
 
   const renameProjectEntry = useProjectEntryRename({ paneWorkspace, dirtyFileKeys, registerWorkspaceSelection });
 
+  // + on a sidebar project section: a fresh task staged in that project.
+  const sidebarNewProjectTask = useStableEvent((projectPath: string) => {
+    sidebarNewTask();
+    stageNewTaskProject(projectPath);
+  });
+  // Sidebar right-click menus. "Open to the Side" is the drag-to-split result
+  // (a new pane right of the focused one); inheritance needs the session's own
+  // tab, so it opens the session first and then its /inherit surface.
+  const sidebarOpenSessionInSplit = useStableEvent((sessionId: string, title: string) => {
+    closeSidebarForNavigation();
+    paneWorkspace.splitLeafAt(paneWorkspace.focusedLeafId, 'right', { kind: 'session', id: sessionId, title });
+  });
+  const sidebarInheritSession = useStableEvent((sessionId: string) => {
+    closeSidebarForNavigation();
+    void openSession(sessionId).then(() => openConversationCommandSurface('inherit', sessionId));
+  });
+  const sidebarRenameProject = useStableEvent((projectPath: string, alias: string) => {
+    void renameProject(projectPath, alias);
+  });
+  // Host-only: a remote surface has no file manager, so the item is hidden
+  // whenever the project actions omit the reveal.
+  const sidebarRevealProjectEvent = useStableEvent((projectPath: string) => {
+    void openProjectInExplorer?.(projectPath);
+  });
+  const sidebarRevealProject = typeof openProjectInExplorer === 'function' ? sidebarRevealProjectEvent : undefined;
+  const sidebarOpenProjectSettings = useStableEvent((projectPath: string) => {
+    openProjectSettings(projectPath);
+  });
+
   const { renderWorkbenchSideView, renderPaneSideDock, renderPaneProblems } = useAppWorkbenchViews({
     sessions,
     sessionCatalogReady,
+    projects,
+    sidebarNewProjectTask,
+    sidebarOpenSessionInSplit,
+    sidebarInheritSession,
+    sidebarRenameProject,
+    sidebarRevealProject,
+    sidebarOpenProjectSettings,
     workingSessionIds,
     unreadSessionIds,
     sidebarSelection,
@@ -720,11 +766,10 @@ export function App() {
     sidebarResumeSession,
     renameSession,
     archiveSession,
+    favoriteSession,
     deleteSession,
     sideViewDescriptors,
     renderSidebarPanel,
-    sessionDiffs,
-    setSessionDiff,
     snapshotStore,
     observedAgentSessionIds,
     quickAccessProjectPath,
@@ -749,6 +794,9 @@ export function App() {
     moveWorkbenchSideGroup,
     moveWorkbenchSideView,
     openFileTab,
+    sideFileGuard,
+    handleFileDirty,
+    registerEditorSaveHandle,
     desktopBootReady,
     bottomPanel,
     problemsFilter,
@@ -787,15 +835,7 @@ export function App() {
             closeSidebarDiff={closeSidebarDiff}
             openFileTab={openFileTab}
           />
-          <button
-            type="button"
-            className="sidebar-backdrop"
-            data-state={sidebarOpen ? 'open' : 'closed'}
-            aria-hidden={!sidebarOpen}
-            tabIndex={sidebarOpen ? 0 : -1}
-            onClick={() => applySidebarOpen(false)}
-            aria-label={t('Close session sidebar')}
-          />
+          <SidebarBackdrop open={sidebarOpen} onClose={() => applySidebarOpen(false)} />
           <main className="main-panel" ref={mainPanelRef}>
             <AppWorkspaceMain
               {...taskLifecycle}
@@ -835,15 +875,7 @@ export function App() {
           </main>
           <SessionBrowserParkingHost controller={browserSurfaces} />
           <SessionTerminalParkingHost controller={terminalSurfaces} />
-          <button
-            type="button"
-            className="panel-backdrop"
-            data-state={bottomPanel.open ? 'open' : 'closed'}
-            aria-hidden={!bottomPanel.open}
-            tabIndex={bottomPanel.open ? 0 : -1}
-            onClick={() => bottomPanel.setOpen(false)}
-            aria-label={t('Close panel')}
-          />
+          <PanelBackdrop open={bottomPanel.open} onClose={() => bottomPanel.setOpen(false)} />
         </div>
         {paneUtilitySurfacePortals}
         <AppShellOverlays
@@ -854,6 +886,8 @@ export function App() {
           workbenchCommands={workbenchCommands}
           openFileTab={openFileTab}
           setQuickAccessMode={setQuickAccessMode}
+          sessions={sessions}
+          openSearchSession={sidebarResumeSession}
           tabSwitcher={tabSwitcher}
           focusedLeafForShortcuts={focusedLeafForShortcuts}
           stripTitleFor={stripTitleFor}
@@ -878,6 +912,7 @@ export function App() {
           setError={setError}
           snapshot={snapshot}
         />
+        {projectEditorHost}
       </div>
     </DesktopBootGate>
   );

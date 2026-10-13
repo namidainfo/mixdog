@@ -16,6 +16,7 @@ import { ACCOUNT_PROVIDERS } from '../../runtime/shared/provider-accounts.mjs';
 import { listProviderAccounts } from './provider-admin.mjs';
 import { usageErrorDetails } from './usage-error.mjs';
 import {
+  creditsFromSnapshot,
   applyApiUnavailable,
   applyKnownRemaining,
   applyKnownUsage,
@@ -33,6 +34,8 @@ import {
   snapshotUsage,
   usageDashboardSnapshot,
 } from './usage-dashboard-model.mjs';
+
+const CREDIT_PROVIDERS = new Set(['openai-oauth', 'anthropic-oauth']);
 
 async function oauthSnapshot(providerId, { refresh, getProvider, log }, accountId) {
   const route = { provider: providerId, model: '', ...(accountId ? { accountId } : {}) };
@@ -231,6 +234,9 @@ async function readOAuthRow(row, providerId, options, accountId) {
     const resetCredits = normaliseResetCredits(snapshot?.resetCredits);
     row.windows = windows;
     if (resetCredits) row.resetCredits = resetCredits;
+    const credits = creditsFromSnapshot(providerId, snapshot);
+    if (credits) row.credits = credits;
+    else if (snapshot) delete row.credits;
     row.updatedAt = snapshot ? num(snapshot.cachedAt, null) : row.updatedAt;
     row.stale = snapshot?.stale === true || (!snapshot && windows.length > 0);
     if (known) {
@@ -272,6 +278,7 @@ async function oauthProviderRow(item, { providers, preview, snapshotOptions, row
   row.detail = row.authenticated ? 'Checking provider usage' : item.detail || 'OAuth credentials missing';
   row.tone = rowTone(row);
   const options = snapshotOptions(item.id);
+  if (CREDIT_PROVIDERS.has(item.id)) row.useCredits = options.accountPool?.useCredits === true;
   if (ACCOUNT_PROVIDERS.includes(item.id)) {
     const pool = options.accountPool;
     const provider = options.getProvider?.(item.id);
@@ -283,6 +290,7 @@ async function oauthProviderRow(item, { providers, preview, snapshotOptions, row
         alias: account.label,
         identity: account.identity || '',
         selected: pool.selectedId === account.id,
+        ...(CREDIT_PROVIDERS.has(item.id) ? { useCredits: row.useCredits } : {}),
         minimalRequestSupported: typeof provider?.forAccount === 'function',
         status: 'checking',
         windows: normaliseWindows(account.usage?.windows, 'account-cache'),

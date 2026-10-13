@@ -71,6 +71,7 @@ export function useDraftPanePreferences({
   // still its authoritative default. Preserve that route in the same prefs
   // chain so unfocused panes (whose lane snapshot is intentionally empty)
   // render exactly what the focused pane renders.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: lists the snapshot fields the seed reads instead of the snapshot object, whose identity changes on every publication
   const snapshotDraftModelSelection = useMemo(
     // ONLY while the engine snapshot actually owns the draft: a blank engine
     // (no session id) is the new task's own route. A draft focused while the
@@ -83,6 +84,7 @@ export function useDraftPanePreferences({
       snapshot.sessionId,
       snapshot.effort,
       snapshot.fast,
+      snapshot.autoEffort,
       snapshot.modelParameters,
       snapshot.model,
       snapshot.provider,
@@ -190,7 +192,16 @@ export function useDraftPanePreferences({
     [rememberDraftPanePrefs, setNewTaskModelSelection]
   );
   const rememberSessionRouteForNextTask = useCallback(
-    (selection: DesktopModelSelection) => {
+    (selection: DesktopModelSelection, options?: { modelChoice?: boolean }) => {
+      const cachedModel = lastNewTaskPrefs.current?.modelSelection;
+      if (
+        options?.modelChoice !== true &&
+        (!cachedModel || cachedModel.provider !== selection.provider || cachedModel.model !== selection.model)
+      ) {
+        // Tuning inside an existing conversation never replaces the next-task model.
+        routePreferenceStore.remember(selection);
+        return;
+      }
       // Same rule as staging: a route change may not materialize an inferred
       // project into the cache (on a phone that value is often not loaded yet).
       const cached = lastNewTaskPrefs.current ?? emptyDraftPanePrefs();

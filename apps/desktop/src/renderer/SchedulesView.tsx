@@ -21,6 +21,7 @@ import {
 } from './automation-attachments';
 import { ModelRouteLabel, normalizeModelOptions } from './provider-display';
 import {
+  automationAutoEffortSuffix,
   automationFastSuffix,
   automationProjectOptions,
   automationRouteSummary,
@@ -170,7 +171,15 @@ function scheduleMeta(schedule: RecordValue) {
       {route && (
         <>
           {' '}
-          · <ModelRouteLabel model={route.model} effort={route.effort} fast={route.fast} />
+          · <ModelRouteLabel
+            model={route.model}
+            effort={route.effort}
+            fast={route.fast}
+            ultra={route.ultra}
+            blue={route.blue}
+            autoEffortCapable={route.autoEffortCapable}
+            autoEffort={route.autoEffort}
+          />
         </>
       )}
       {cwdLabel && <> · {cwdLabel}</>}
@@ -242,6 +251,7 @@ function ScheduleEditor({
   const [model, setModel] = useState(initialModel.route);
   const [effort, setEffort] = useState(initialModel.effort);
   const [fast, setFast] = useState(initialModel.fast);
+  const [autoEffort, setAutoEffort] = useState(initialModel.autoEffort);
   const [modelParameters, setModelParameters] = useState(initialModel.modelParameters);
   const [cwd, setCwd] = useState(draft.cwd);
   const [workflow, setWorkflow] = useState(draft.workflow);
@@ -301,7 +311,7 @@ function ScheduleEditor({
               ...(frequency === 'once'
                 ? { at: text('schedule-at') }
                 : { time: scheduleCron(frequency, text, weekday) }),
-              model: `${model}${effortSuffix}${fastSuffix}${parameterSuffix}`,
+              model: `${model}${effortSuffix}${fastSuffix}${automationAutoEffortSuffix(autoEffort)}${parameterSuffix}`,
               ...(cwd ? { cwd } : {}),
               ...(workflow ? { workflow } : {}),
               ...(attachments.length ? { attachments } : {}),
@@ -319,6 +329,7 @@ function ScheduleEditor({
               defaultValue={draft.name}
               placeholder="daily-briefing"
               required
+              // biome-ignore lint/a11y/noAutofocus: the schedule name field is the first input of a freshly opened editor form
               autoFocus
               disabled={busy || editing}
               maxLength={64}
@@ -348,17 +359,20 @@ function ScheduleEditor({
                 models={models}
                 disabled={busy}
                 ariaLabel={t('Schedule model')}
+                autoEffortSwitch
                 value={{
                   provider: modelProvider,
                   model: modelId,
                   ...(effortValue ? { effort: effortValue } : {}),
                   fast,
+                  autoEffort,
                   modelParameters: selectedModelParameters,
                 }}
                 onChange={(selection) => {
                   setModel(`${selection.provider}/${selection.model}`);
                   setEffort(String(selection.effort || ''));
                   setFast(selection.fast === true);
+                  setAutoEffort(selection.autoEffort !== false);
                   setModelParameters(selection.modelParameters || {});
                   setFormError('');
                 }}
@@ -527,7 +541,7 @@ export function SchedulesPane({
   const [runningName, setRunningName] = useState('');
   // The editor portals to document.body, so the sidebar's inert/aria-hidden
   // does not reach it: a collapsed sidebar — or another destination taking the
-  // panel area — must close it explicitly. Search/filter state is untouched.
+  // panel area — must close it explicitly. Search state is untouched.
   useSidebarPanelDismiss(active, () => {
     setEditor(null);
   });
@@ -674,7 +688,7 @@ export function SchedulesPane({
         {!loading && visible.length === 0 && (
           <div className="schedules-empty">
             <AlarmClock size={40} aria-hidden="true" />
-            <p>{schedules.length ? t('No schedules match the current filter.') : t('No scheduled tasks yet.')}</p>
+            <p>{schedules.length ? t('No schedules match your search.') : t('No scheduled tasks yet.')}</p>
           </div>
         )}
       </div>

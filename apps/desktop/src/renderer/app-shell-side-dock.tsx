@@ -1,10 +1,20 @@
 import type React from 'react';
+import { Suspense } from 'react';
+import { SideMarkdownPreview } from './lazy-widgets';
 import type { PaneLeaf } from './pane-layout';
 import { paneActiveSelection } from './pane-layout';
 import { navigationKey } from './text-format';
-import { paneDockActiveRoot, PaneSideDock } from './pane-side-dock';
+import { paneDockActiveRoot, PaneSideDock, type PaneSideDockFile } from './pane-side-dock';
 import { PaneDockToggles } from './pane-dock-toggles';
-import { sessionSideDockEntryForSession } from './session-side-surface-policy';
+import { PaneDockFilesSurface } from './pane-dock-files';
+import { DeferredPersistentSurface } from './PaneSurfaceGate';
+import { EDITOR_STARTUP_DELAY_MS, ReadyEditorPane } from './app-shell-components';
+import { DesktopLoadingSurface } from './RendererRecovery';
+import { t } from './i18n';
+import { sideFileDirtyKey, type createSideFileGuard } from './side-file-guard';
+import { sideFileKey } from './side-file-tabs';
+import type { EditorSaveHandle } from './use-pane-tab-close';
+import { isSessionSidePanelView, sessionSideDockEntryForSession } from './session-side-surface-policy';
 import { SessionBrowserSlot } from './session-browser-surfaces';
 import { SessionTerminalSlot } from './session-terminal-surfaces';
 import type { useSessionPaneSurfaces } from './use-session-pane-surfaces';
@@ -28,6 +38,11 @@ interface PaneDockContext {
   moveWorkbenchSideGroup: ReturnType<typeof useAppSideDocks>['workbenchSideLayout']['moveGroup'];
   moveWorkbenchSideView: ReturnType<typeof useAppSideDocks>['workbenchSideLayout']['moveView'];
   openFileTab: (project: string, rel: string, line?: number, accessToken?: string) => void;
+  sideFileGuard: ReturnType<typeof createSideFileGuard>;
+  renameProjectEntry?: (projectPath: string, relPath: string, newName: string) => Promise<void>;
+  renderFileProblems: (file: PaneSideDockFile) => React.ReactNode;
+  handleFileDirty: (key: string, dirty: boolean) => void;
+  registerEditorSaveHandle: (key: string, save: EditorSaveHandle | null, released?: EditorSaveHandle) => void;
   paneProjectPathFor: (leaf: PaneLeaf) => string;
   renderRightView: (
     id: WorkbenchSideViewId,
@@ -78,7 +93,93 @@ export function renderPaneSideDockView(leaf: PaneLeaf, focused: boolean, context
         }
         context.paneSideDocks.closeDiff(leaf.id);
       }}
+      onCloseFile={() => context.sideFileGuard.closeSideFile(leaf.id, () => context.closePaneRightRegion(leaf.id))}
+      onCloseFileTab={(fileKey) => context.sideFileGuard.closeSideFileTab(leaf.id, fileKey)}
+      onActivateFile={(fileKey) => context.paneSideDocks.activateFile(leaf.id, fileKey)}
+      onKeepFile={(fileKey) => context.paneSideDocks.keepFile(leaf.id, fileKey)}
+      onCloseFolder={() => {
+        context.paneSideDocks.closeFolder(leaf.id);
+        context.closePaneRightRegion(leaf.id);
+      }}
       openFileTab={context.openFileTab}
+      renderFilesSurface={(folder, surfaceActive, side) => (
+        <PaneDockFilesSurface
+          folder={folder}
+          active={surfaceActive}
+          // The side-dock rules: a tree file opens in this pane's side editor
+          // behind the unsaved-edit guard.
+          onOpenFile={(project, rel) => context.sideFileGuard.openFileInSideDock(leaf.id, project, rel)}
+          onRenameEntry={context.renameProjectEntry}
+          onClose={side.onClose}
+        />
+      )}
+      renderFileProblems={context.renderFileProblems}
+      renderFileSurface={(file, surfaceActive, side) => (
+        <DeferredPersistentSurface
+          // A replacement file remounts, so its model, dirty state and save
+          // handle never carry over from the previous one.
+          key={sideFileKey(file)}
+          active
+          startupDelayMs={EDITOR_STARTUP_DELAY_MS}
+          fallback={<DesktopLoadingSurface label={t('Loading editor…')} />}
+        >
+          {file.sidePreview ? (
+            <Suspense fallback={<DesktopLoadingSurface label={t('Loading editor…')} />}>
+              <SideMarkdownPreview
+                projectPath={file.project}
+                relPath={file.rel}
+                accessToken={file.accessToken}
+                onSideChrome={side.onChrome}
+                onOpenFile={(project, rel, line) =>
+                  context.sideFileGuard.openFileInSideDock(
+                    leaf.id,
+                    project,
+                    rel,
+                    line,
+                    undefined,
+                    undefined,
+                    sideFileKey(file)
+                  )
+                }
+              />
+            </Suspense>
+          ) : (
+            <ReadyEditorPane
+              surfaceKey={`${leaf.id}:side-file:${sideFileKey(file)}`}
+              projectPath={file.project}
+              relPath={file.rel}
+              accessToken={file.accessToken}
+              active={surfaceActive}
+              focused={surfaceActive && focused}
+              onSideChrome={side.onChrome}
+              onShowProblems={side.onShowProblems}
+              onDirty={(dirty) => {
+                context.handleFileDirty(sideFileDirtyKey(leaf.id, file), dirty);
+                // An edit makes a preview tab a normal one.
+                if (dirty) context.paneSideDocks.keepFile(leaf.id, sideFileKey(file));
+              }}
+              onSaveHandle={(save, released) =>
+                context.registerEditorSaveHandle(sideFileDirtyKey(leaf.id, file), save, released)
+              }
+              reveal={file.line ? { line: file.line, column: file.column, nonce: file.nonce } : null}
+              onOpenAt={file.accessToken ? undefined : (rel, line) => context.openFileTab(file.project, rel, line)}
+              // A link followed inside this tab opens in the dock, remembering
+              // its origin tab (a fresh preview tab is kept, not replaced).
+              onOpenFile={(project, rel, line, accessToken) =>
+                context.sideFileGuard.openFileInSideDock(
+                  leaf.id,
+                  project,
+                  rel,
+                  line,
+                  accessToken,
+                  undefined,
+                  sideFileKey(file)
+                )
+              }
+            />
+          )}
+        </DeferredPersistentSurface>
+      )}
       renderBrowserSurface={(surfaceActive) => {
         if (!sessionId) return null;
         return (
@@ -107,7 +208,7 @@ export function renderPaneSideDockView(leaf: PaneLeaf, focused: boolean, context
       renderView={(id, viewActive, titleDragProps) =>
         context.renderRightView(
           id,
-          id === 'session-diff' ? viewActive && entry.surface === '' : viewActive,
+          isSessionSidePanelView(id) ? viewActive && entry.surface === '' : viewActive,
           titleDragProps,
           {
             leafId: leaf.id,

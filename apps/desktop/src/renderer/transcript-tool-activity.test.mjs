@@ -4,6 +4,7 @@ import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { JSDOM } from 'jsdom';
 
+import { CompletionStatus, completionActivityKey, hadLiveActivity } from './transcript-status.tsx';
 import { appendLiveTranscriptRows, projectSettledTranscriptRows } from './transcript-rows.ts';
 import {
   desktopToolActivityCategory,
@@ -68,10 +69,43 @@ function project(items, turnKeys = items.map(() => 'turn')) {
   });
 }
 
+test('the running logo animates its star on its own <svg>, never an SVG-internal transform', async () => {
+  // A CSS transform animation on an element INSIDE an <svg> forced a layout
+  // every animation frame for as long as a turn ran (measured: LayoutCount
+  // equal to the frame count). On its own <svg> box it is a plain CSS transform.
+  const { readFile } = await import('node:fs/promises');
+  const css = await readFile(new URL('./desktop/14-live-activity.css', import.meta.url), 'utf8');
+  const tsx = await readFile(new URL('./transcript-status.tsx', import.meta.url), 'utf8');
+  assert.match(css, /\.live-activity-star\s*\{[^}]*animation:\s*live-activity-logo-star/);
+  assert.doesNotMatch(css, /\.live-activity-logo \.star\s*\{[^}]*animation:/);
+  assert.match(tsx, /className="live-activity-logo live-activity-star"/);
+});
+
 test('transcript row memoization retains no value-copy signature', () => {
   const item = { kind: 'assistant', text: 'large tool output' };
   assert.equal(transcriptItemsEqual(item, item), true);
   assert.equal(transcriptItemsEqual(item, { ...item }), false);
+});
+
+test('a running tool shows its elapsed time from the transcript `at` start', async () => {
+  const dom = installToolActivityDom('Mozilla/5.0 Electron/41.0.0');
+  try {
+    await act(async () => {
+      dom.root.render(
+        React.createElement(ToolActivityGroup, {
+          disclosureScope: 'elapsed',
+          // Transcript items carry their start as `at` (no `startedAt`).
+          items: [{ kind: 'tool', id: 'sh', name: 'shell', args: { command: 'npm test' }, at: Date.now() - 12_000 }],
+        })
+      );
+    });
+    const elapsed = document.querySelector('.tool-activity-header .tool-working-elapsed');
+    assert.ok(elapsed, 'elapsed time is shown once a call runs past 5s');
+    assert.match(elapsed.textContent, /1[12]/);
+  } finally {
+    await act(async () => dom.root.unmount());
+    dom.close();
+  }
 });
 
 test('desktop and mobile tool groups share details and a static task icon', async () => {
@@ -100,8 +134,12 @@ test('desktop and mobile tool groups share details and a static task icon', asyn
       });
       const group = document.querySelector('.tool-activity');
       assert.equal(group?.dataset.surface, 'desktop');
-      assert.ok(group?.querySelector('.tool-activity-header .lucide-list-tree'));
-      assert.equal(group?.querySelector('.live-activity-glyph'), null);
+      assert.ok(group?.querySelector('.tool-activity-header .tool-icon svg.tool-group-icon'));
+      // No leading-icon animation and no trailing dots: the title carries the state.
+      assert.equal(group?.querySelector('.tool-activity-header .tool-icon')?.hasAttribute('data-running'), false);
+      assert.equal(group?.querySelector('.tool-working-dots'), null);
+      assert.equal(group?.querySelector('.tool-activity-item-spinner'), null);
+      assert.equal(group?.querySelector('.live-activity-logo'), null);
 
       await act(async () => {
         group
@@ -284,6 +322,61 @@ test('the thinking clock keeps the submit time when the spinner arrives', async 
   }
 });
 
+test('only the completion of a live activity turn in this view animates', async () => {
+  const dom = installToolActivityDom('Mozilla/5.0 Electron/41.0.0');
+  const item = { kind: 'turndone', status: 'complete', elapsedMs: 20_000 };
+  const animated = () => document.querySelector('.turn-status')?.getAttribute('data-animate') === 'true';
+  try {
+    await act(async () => {
+      dom.root.render(
+        React.createElement(LiveActivity, {
+          snapshot: { sessionId: 'live-s', spinner: { active: true, startedAt: Date.now(), mode: 'requesting' } },
+          turnKey: 'live-t',
+        })
+      );
+    });
+    assert.equal(hadLiveActivity('live-s', 'live-t'), true);
+    assert.equal(hadLiveActivity('live-s', 'old-t'), false);
+    assert.equal(hadLiveActivity('other-s', 'live-t'), false);
+    // The completion replaces the live band at once, with no unmount grace.
+    await act(async () => {
+      dom.root.render(
+        React.createElement(CompletionStatus, {
+          item,
+          animateComplete: hadLiveActivity('live-s', 'live-t'),
+          completionActivityKey: completionActivityKey('live-s', 'live-t'),
+        })
+      );
+    });
+    assert.equal(animated(), true);
+    assert.equal(hadLiveActivity('live-s', 'live-t'), false, 'completion consumes the live turn');
+    await act(async () => {
+      dom.root.render(
+        React.createElement(CompletionStatus, {
+          key: 'reentered',
+          item,
+          animateComplete: true,
+          completionActivityKey: completionActivityKey('live-s', 'live-t'),
+        })
+      );
+    });
+    assert.equal(animated(), false, 'even a stale animation prop cannot replay a completed turn');
+    await act(async () => {
+      dom.root.render(
+        React.createElement(CompletionStatus, {
+          key: 'history',
+          item,
+          animateComplete: hadLiveActivity('live-s', 'old-t'),
+        })
+      );
+    });
+    assert.equal(animated(), false);
+  } finally {
+    await act(async () => dom.root.unmount());
+    dom.close();
+  }
+});
+
 test('thinking remains a separate row after grouped tool activity', () => {
   const settled = project([{ kind: 'tool', id: 'tool', name: 'shell', result: 'ok' }]);
   const rows = appendLiveTranscriptRows({
@@ -392,10 +485,12 @@ test('desktop activity uses concrete control, MCP server, and skill names', () =
     [
       { unitKey: 'Browser', category: 'Browser', label: 'Browser Use', count: 1 },
       { unitKey: 'Computer', category: 'Computer', label: 'Computer Use', count: 1 },
-      { unitKey: 'Office', category: 'Office', label: 'Document work', count: 1 },
+      { unitKey: 'Office|Edited|document action', category: 'Office', label: 'Document work', count: 1 },
       { unitKey: 'MCP|UnityMCP', category: 'MCP', label: 'MCP UnityMCP', count: 1 },
       { unitKey: 'Skill|gamerscroll-article', category: 'Skill', label: 'Skill gamerscroll-article', count: 1 },
-      { unitKey: 'Media', category: 'Media', label: 'Media generation', count: 3 },
+      { unitKey: 'Media|Generated|image', category: 'Media', label: 'Image generation', count: 1 },
+      { unitKey: 'Media|Generated|video', category: 'Media', label: 'Video generation', count: 1 },
+      { unitKey: 'Media|Listed|media catalog', category: 'Media', label: 'Media catalog', count: 1 },
     ]
   );
 
@@ -444,10 +539,7 @@ test('desktop activity lists every call as one row under the summary, without ca
       );
     });
     const group = document.querySelector('.tool-activity');
-    assert.equal(
-      group?.querySelector('.tool-activity-title')?.textContent?.trim(),
-      'Search 2 patterns · Run command'
-    );
+    assert.equal(group?.querySelector('.tool-activity-title')?.textContent?.trim(), 'Search 2 patterns · Run command');
     assert.equal(group?.querySelector('.tool-activity-failed'), null);
 
     await act(async () => {
@@ -728,11 +820,28 @@ test('desktop activity keeps agent action and response subjects specific', () =>
     kind: 'tool',
     id: 'agent-response',
     name: 'agent',
-    args: { agent: 'worker' },
+    args: { type: 'result', agent: 'worker' },
     result: 'Reviewed the change.',
     completedAt: 1,
   });
   assert.equal(response.subject, 'Response Worker');
+
+  // A status/read check is never a response, whatever its result carries.
+  const envelope = 'agent task: t\nstatus: completed\nagent: reviewer\n\n### finding';
+  for (const [type, verb] of [
+    ['status', 'Status'],
+    ['read', 'Read'],
+  ]) {
+    const check = desktopToolActivityItemPresentation({
+      kind: 'tool',
+      id: `agent-${type}`,
+      name: 'agent',
+      args: { type, tag: 'review-x' },
+      result: envelope,
+      completedAt: 1,
+    });
+    assert.equal(check.subject, `${verb} Reviewer (review-x)`);
+  }
 });
 
 test('expanded tool detail stays in the runtime English while chips localize', () => {
@@ -966,3 +1075,303 @@ test('desktop activity treats only parseable output as JSON and surfaces the age
   assert.deepEqual(write.sections, []);
   assert.equal(write.diffPatch.includes('src/a.ts'), true);
 });
+
+test('desktop labels name the operation actually called and its real outcome', async () => {
+  const { desktopToolActivitySummary, desktopToolActivityRowVerb } = await import('./transcript-tool-core.ts');
+  const item = (name, args, result = 'ok', extra = {}) => ({
+    kind: 'tool',
+    id: name,
+    name,
+    args,
+    result,
+    completedAt: 1,
+    ...extra,
+  });
+
+  // Media: a failed job read shows the job error, and actions have their own unit.
+  const failedJob = desktopToolActivityItemPresentation(
+    item('media', { action: 'status', job: 'j' }, '{"ok":false,"job":"j","status":"failed","error":"quota"}')
+  );
+  assert.equal(failedJob.tone, 'error');
+  assert.equal(failedJob.resultLabel, 'quota');
+  assert.equal(failedJob.title, 'Media status');
+  assert.equal(
+    desktopToolActivityItemPresentation(item('media', { action: 'cancel', job: 'j' })).title,
+    'Media cancellation'
+  );
+
+  // Batch read entries keep their own window and do not gain the call's.
+  const batch = desktopToolActivityItemPresentation(
+    item('read', { file_path: [{ file_path: 'a.ts', offset: 10, limit: 2 }], limit: 5 }, 'x')
+  );
+  assert.equal(batch.subject, 'a.ts:10-11');
+
+  // code_graph keeps the callers/callees direction and the file in an overview.
+  const callers = desktopToolActivityItemPresentation(item('code_graph', { mode: 'callers', symbols: ['run'] }));
+  assert.equal(callers.subject, 'callers · run');
+  const overview = desktopToolActivityItemPresentation(item('code_graph', { mode: 'overview', files: 'src/a.ts' }));
+  assert.equal(overview.subject, 'src/a.ts');
+  assert.equal(overview.title, 'Code structure');
+  assert.equal(
+    desktopToolActivityItemPresentation(item('code_graph', { mode: 'symbol_search', symbols: 'run' })).category,
+    'Search'
+  );
+
+  // Group summaries use the canonical work-unit counts and categories.
+  assert.equal(desktopToolActivitySummary([item('read', { file_path: ['a.ts', 'b.ts', 'c.ts'] })]), 'Read 3 files');
+  assert.equal(desktopToolActivitySummary([item('task', { action: 'cancel', task_id: 't' })]), 'Cancel task');
+  assert.equal(desktopToolActivitySummary([item('code_graph', { mode: 'overview', files: 'a.ts' })]), 'Code structure');
+  assert.equal(
+    desktopToolActivitySummary([item('agent', { type: 'result', agent: 'worker', status: 'completed' })]),
+    'Agent response'
+  );
+
+  // GitHub calls of any action count as one unit, named apart from local Git.
+  assert.equal(
+    desktopToolActivitySummary([
+      item('github', { action: 'pr.list', state: 'open' }),
+      item('github', { action: 'pr.comments', number: 11 }),
+      item('github', { action: 'pr.comments', number: 9 }),
+      item('github', { action: 'pr.view', number: 7 }),
+    ]),
+    'GitHub 4'
+  );
+
+  // Terminal is its own category with action verbs, never "External tools".
+  const list = item('terminal', { action: 'list' });
+  assert.equal(desktopToolActivityItemPresentation(list).category, 'Terminal');
+  assert.equal(desktopToolActivityItemPresentation(list).title, 'Terminal tabs');
+  assert.equal(desktopToolActivityRowVerb('terminal', { action: 'list' }), 'List tabs');
+  assert.equal(desktopToolActivityRowVerb('terminal', { action: 'read', tab: 1 }), 'Read output');
+
+  // Public-schema subjects instead of first-field fallbacks.
+  assert.equal(
+    desktopToolActivityItemPresentation(item('github', { action: 'issue.create', repo: 'owner/repo', title: 'Bug' }))
+      .subject,
+    'Create issue · owner/repo · Bug'
+  );
+  assert.equal(
+    desktopToolActivityItemPresentation(item('git', { action: 'stage', change_ids: ['a', 'b'] })).subject,
+    '2 changes'
+  );
+});
+
+test('the tool activity expansion setting opens command rows as previews and Ctrl+O opens everything', async () => {
+  const { setToolActivityExpansion, toggleToolActivityExpandAll } = await import('./tool-activity-expansion.ts');
+  const dom = installToolActivityDom('Mozilla/5.0 Electron/41.0.0');
+  const items = [
+    {
+      kind: 'tool',
+      id: 'sh',
+      name: 'shell',
+      args: { command: 'npm test' },
+      result: ['l1', 'l2', 'l3', 'l4', 'l5', 'l6', 'l7', 'l8'].join('\n'),
+      completedAt: 2,
+    },
+    { kind: 'tool', id: 'rd', name: 'read', args: { path: 'a.txt' }, result: 'one\ntwo', completedAt: 2 },
+  ];
+  const rowOpen = () =>
+    [...document.querySelectorAll('.tool-activity-item')].map((row) => row.getAttribute('data-open') === 'true');
+  try {
+    setToolActivityExpansion('commands');
+    await act(async () => {
+      dom.root.render(React.createElement(ToolActivityGroup, { disclosureScope: 'expansion', items }));
+    });
+    assert.equal(document.querySelector('.tool-activity-header').getAttribute('aria-expanded'), 'true');
+    assert.deepEqual(rowOpen(), [true, false], 'only the command run opens');
+    assert.equal(document.querySelector('.tool-activity-preview').getAttribute('data-clamped'), 'lines');
+    assert.equal(document.querySelector('.tool-terminal-output').textContent, 'l1\nl2\nl3\nl4\nl5');
+    const more = document.querySelector('.tool-activity-preview-more');
+    assert.equal(more.textContent, '… +3 lines', 'the preview counts the lines it hides');
+    await act(async () => more.click());
+    assert.equal(document.querySelector('.tool-terminal-output').textContent.split('\n').length, 8);
+    assert.equal(document.querySelector('.tool-activity-preview-more'), null);
+
+    await act(async () => toggleToolActivityExpandAll());
+    assert.deepEqual(rowOpen(), [true, true], 'Ctrl+O opens every call');
+    await act(async () => document.querySelectorAll('.tool-activity-item-toggle')[1].click());
+    assert.deepEqual(rowOpen(), [true, false], 'a call closes by hand');
+    await act(async () => toggleToolActivityExpandAll());
+    assert.deepEqual(rowOpen(), [true, false], 'Ctrl+O again returns to the saved setting');
+    await act(async () => toggleToolActivityExpandAll());
+    assert.deepEqual(rowOpen(), [true, true], 'a new Ctrl+O opens calls closed in an earlier one');
+    await act(async () => toggleToolActivityExpandAll());
+
+    setToolActivityExpansion('collapsed');
+    await act(async () => {});
+    assert.equal(document.querySelector('.tool-activity-header').getAttribute('aria-expanded'), 'false');
+  } finally {
+    setToolActivityExpansion('collapsed');
+    await act(async () => dom.root.unmount());
+    dom.close();
+  }
+});
+
+test('a height-clamped preview builds only a bounded part, still offers show more, and copies the full text', async () => {
+  const { setToolActivityExpansion } = await import('./tool-activity-expansion.ts');
+  const dom = installToolActivityDom('Mozilla/5.0 Electron/41.0.0');
+  const copied = [];
+  Object.defineProperty(dom.window.navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText: async (value) => void copied.push(value) },
+  });
+  const result = Array.from({ length: 40 }, (_, index) => `- item ${index + 1} of the list`).join('\n');
+  try {
+    setToolActivityExpansion('all');
+    await act(async () => {
+      dom.root.render(
+        React.createElement(ToolActivityGroup, {
+          disclosureScope: 'bounded-preview',
+          items: [
+            {
+              kind: 'tool',
+              id: 'rd',
+              name: 'edit',
+              args: { path: 'a.ts', old_string: result, new_string: 'x' },
+              result: 'ok',
+              completedAt: 2,
+            },
+          ],
+        })
+      );
+    });
+    const preview = document.querySelector('.tool-activity-preview');
+    assert.equal(preview.getAttribute('data-clamped'), 'height');
+    assert.ok(preview.textContent.includes('item 1 of'), 'the head of the output renders');
+    assert.ok(!preview.textContent.includes('item 40 of'), 'the tail is not built while collapsed');
+    const more = document.querySelector('.tool-activity-preview-more');
+    assert.ok(more, 'a truncated preview still offers show more without any DOM overflow');
+
+    await act(async () => document.querySelector('.tool-activity-copy').click());
+    assert.ok(copied[0].includes('item 40 of'), 'copy keeps the full text');
+
+    await act(async () => more.click());
+    assert.ok(document.querySelector('.tool-activity-item-body').textContent.includes('item 40 of'));
+    assert.equal(document.querySelector('.tool-activity-preview-more'), null);
+  } finally {
+    setToolActivityExpansion('collapsed');
+    await act(async () => dom.root.unmount());
+    dom.close();
+  }
+});
+
+test('a finished background task with nothing to read cannot open and shows its status and id', async () => {
+  const dom = installToolActivityDom('Mozilla/5.0 Electron/41.0.0');
+  try {
+    const notice = [
+      '<task-notification>',
+      '<task-id>job_1790959235138_971b88</task-id>',
+      '<status>completed</status>',
+      '<exit-code>0</exit-code>',
+      '<summary>Shell task completed (exit 0): sleep 1</summary>',
+      '</task-notification>',
+    ].join('\n');
+    await act(async () => {
+      dom.root.render(
+        React.createElement(ToolActivityGroup, {
+          disclosureScope: 'meta-only',
+          items: [
+            { kind: 'tool', id: 'sh', name: 'shell', args: { command: 'sleep 1' }, result: notice, completedAt: 1 },
+          ],
+        })
+      );
+    });
+    await act(async () => {
+      document
+        .querySelector('.tool-activity-header')
+        ?.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+    });
+    const row = document.querySelector('.tool-activity-item');
+    assert.ok(row, 'the group opened onto its row');
+    assert.equal(row.querySelector('.tool-chevron'), null);
+    assert.equal(row.querySelector('.tool-activity-item-toggle[aria-expanded]'), null);
+    assert.equal(row.querySelector('.tool-activity-item-result')?.textContent, 'Completed · 971b88');
+  } finally {
+    await act(async () => dom.root.unmount());
+    dom.close();
+  }
+});
+
+test('the thinking spinner shows the runtime-resolved turn effort, falling back to the saved level', async () => {
+  const dom = installToolActivityDom('Mozilla/5.0 Electron/41.0.0');
+  const thinkingText = async (snapshot) => {
+    await act(async () => {
+      dom.root.render(
+        React.createElement(LiveActivity, {
+          snapshot: { thinking: true, spinner: { active: true, startedAt: Date.now(), mode: 'thinking' }, ...snapshot },
+        })
+      );
+    });
+    return document.querySelector('.live-activity-meta')?.textContent || '';
+  };
+  try {
+    const { writeCachedModelCatalog } = await import('./model-catalog-cache.ts');
+    const { publishAutoEffort } = await import('./auto-effort-store.ts');
+    const effortOptions = ['low', 'medium', 'high', 'xhigh', 'max'].map((value) => ({ value, label: value }));
+    const option = (model, autoEffortCapable) => ({
+      provider: 'alpha',
+      model,
+      display: model,
+      effortOptions,
+      fastCapable: false,
+      ...(autoEffortCapable ? { autoEffortCapable: true } : {}),
+    });
+    writeCachedModelCatalog([option('capable', true), option('plain', false)]);
+    const setAuto = (enabled) =>
+      act(async () => publishAutoEffort({ autoEffort: { installed: true, enabled, supported: true } }));
+    const capable = { provider: 'alpha', model: 'capable' };
+    const plain = { provider: 'alpha', model: 'plain' };
+
+    // Auto off: the resolved effort, else the saved level — spelled like the model chip.
+    await setAuto(false);
+    assert.match(await thinkingText({ ...capable, effort: 'high', turnEffort: 'medium' }), /Thinking \(Medium\)/);
+    assert.match(await thinkingText({ ...capable, effort: 'high', turnEffort: 'low' }), /Thinking \(Low\)/, 're-judged step');
+    assert.match(await thinkingText({ ...capable, effort: 'high', turnEffort: null }), /Thinking \(High\)/);
+    assert.match(await thinkingText({ effort: 'xhigh' }), /Thinking \(XHigh\)/);
+
+    // Auto on + capable: no saved-level stand-in before the turn effort resolves.
+    await setAuto(true);
+    assert.match(await thinkingText({ ...capable, effort: 'high', turnEffort: 'medium' }), /Thinking \(Medium\)/);
+    assert.match(await thinkingText({ ...capable, effort: 'high', turnEffort: null }), /Thinking$/);
+    assert.match(await thinkingText({ ...capable, effort: 'high' }), /Thinking$/);
+    // A saved max/ultra is respected by the runtime, so it stays shown.
+    assert.match(await thinkingText({ ...capable, effort: 'max' }), /Thinking \(Max\)/);
+    // Auto on but the model is not capable: the saved level stands.
+    assert.match(await thinkingText({ ...plain, effort: 'high' }), /Thinking \(High\)/);
+    await setAuto(false);
+  } finally {
+    await act(async () => dom.root.unmount());
+    dom.close();
+  }
+});
+
+test('the spinner byline is translated on the desktop', async () => {
+  const { initUiLanguage, setUiLanguagePreference } = await import('./i18n.ts');
+  const dom = installToolActivityDom('Mozilla/5.0 Electron/41.0.0');
+  setUiLanguagePreference('ko');
+  await initUiLanguage();
+  const bylineFor = async (snapshot) => {
+    await act(async () => {
+      dom.root.render(
+        React.createElement(LiveActivity, {
+          snapshot: { spinner: { active: true, startedAt: Date.now(), mode: 'thinking', outputTokens: 340 }, ...snapshot },
+        })
+      );
+    });
+    return document.querySelector('.live-activity-meta')?.textContent || '';
+  };
+  try {
+    const live = await bylineFor({ thinking: true, effort: 'high', turnEffort: 'medium' });
+    assert.match(live, /토큰 340개/);
+    assert.match(live, /생각 중 \(Medium\)/);
+    assert.doesNotMatch(live, /tokens|thinking/);
+    assert.match(await bylineFor({ thinking: true }), /생각 중$/);
+    assert.match(await bylineFor({ thinking: false, spinner: { active: true, startedAt: Date.now(), thinkingAccumulatedMs: 5000 } }), /5초 동안 생각함/);
+  } finally {
+    await act(async () => dom.root.unmount());
+    dom.close();
+    setUiLanguagePreference('en');
+    await initUiLanguage();
+  }
+});
+

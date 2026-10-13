@@ -43,8 +43,10 @@ function RouteControls({
   route,
   models,
   disabled,
+  composerParity = false,
   onChange,
 }: {
+  composerParity?: boolean;
   label: string;
   route: RecordValue;
   models: DesktopModelOption[];
@@ -57,6 +59,7 @@ function RouteControls({
         ariaLabel={label}
         models={models}
         disabled={disabled}
+        composerParity={composerParity}
         value={route as unknown as DesktopModelSelection}
         onChange={onChange}
       />
@@ -73,6 +76,7 @@ export function WorkflowEditorDialog({
   onCancel,
   onSave,
   onDelete,
+  armDelete = false,
 }: {
   pack: RecordValue | null;
   deletable: boolean;
@@ -81,6 +85,7 @@ export function WorkflowEditorDialog({
   onCancel(): void;
   onSave(payload: RecordValue): void;
   onDelete(): void;
+  armDelete?: boolean;
 }) {
   const editing = Boolean(pack);
   const [formError, setFormError] = useState('');
@@ -127,6 +132,7 @@ export function WorkflowEditorDialog({
               defaultValue={String(pack?.name || '')}
               placeholder={t('Workflow name')}
               required
+              // biome-ignore lint/a11y/noAutofocus: focuses the first field of the dialog when creating
               autoFocus={!editing}
               disabled={busy}
               maxLength={64}
@@ -160,6 +166,7 @@ export function WorkflowEditorDialog({
             busy={busy}
             onCancel={onCancel}
             onDelete={deletable ? onDelete : undefined}
+            armDelete={armDelete}
           />
         </form>
       </section>
@@ -179,6 +186,7 @@ export function AgentEditorDialog({
   onSave,
   onToggle,
   onDelete,
+  armDelete = false,
 }: {
   agent: RecordValue | null;
   deletable: boolean;
@@ -189,6 +197,7 @@ export function AgentEditorDialog({
   onSave(payload: RecordValue): void;
   onToggle?(enabled: boolean, route: RecordValue): void;
   onDelete(): void;
+  armDelete?: boolean;
 }) {
   const editing = Boolean(agent);
   const [route, setRoute] = useState<RecordValue>(() => record(agent?.route));
@@ -251,6 +260,7 @@ export function AgentEditorDialog({
               defaultValue={String(agent?.name || '')}
               placeholder={t('Agent name')}
               required
+              // biome-ignore lint/a11y/noAutofocus: focuses the first field of the dialog when creating
               autoFocus={!editing}
               disabled={busy}
               maxLength={64}
@@ -276,6 +286,7 @@ export function AgentEditorDialog({
                 route={route}
                 models={models}
                 disabled={busy}
+                composerParity
                 onChange={(selection) => setRoute(selection as unknown as RecordValue)}
               />
             </div>
@@ -301,6 +312,7 @@ export function AgentEditorDialog({
             onCancel={onCancel}
             onDelete={deletable ? onDelete : undefined}
             saveDisabled={needsModel}
+            armDelete={armDelete}
           />
         </form>
       </section>
@@ -383,6 +395,7 @@ export function RouteEditorDialog({
                 route={route}
                 models={models}
                 disabled={busy}
+                composerParity={target.modelKind === 'agent'}
                 onChange={(selection) => setRoute(selection as unknown as RecordValue)}
               />
             </div>

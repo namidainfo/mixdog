@@ -1,6 +1,6 @@
 // Generic OpenAI Responses HTTP/SSE transport for OpenAI-compatible gateway
 // providers. The xAI Responses path in openai-compat.mjs carries xAI-only
-// cache-lane routing, warmup accounting, and trace context; gateway brands
+// cache-lane routing and trace context; gateway brands
 // that merely speak the Responses wire (OpenCode Go: Muse Spark, GPT, Grok)
 // need the plain request shape only. Stateless continuation (store:false +
 // encrypted reasoning replay) mirrors the reference OpenAI client so multi-
@@ -19,31 +19,43 @@ import {
   responseOutputText,
   collectCompatResponseSearchSources,
   toXaiResponsesInput,
+  xaiSystemInstructions,
 } from './openai-compat-wire.mjs';
 import { preparePdfTextForProvider } from './media-normalization.mjs';
 import { normalizeOpencodeGoReasoningEffort } from './openai-compat-xai.mjs';
+import { isCustomProviderName, resolveCustomReasoning } from './custom-reasoning.mjs';
 import { createProviderReplay } from './lib/provider-replay.mjs';
 import {
   applyCompatToolChoice,
   compatResponsesReplayProvider,
   compatStreamRetryReporter,
 } from './compat-request-policy.mjs';
-import { encryptedXaiReasoningItems, traceCompatResponseUsage } from './openai-compat-response-normalization.mjs';
+import {
+  encryptedXaiReasoningItems,
+  responsesUsage,
+  traceCompatResponseUsage,
+} from './openai-compat-response-normalization.mjs';
 
 // providerState slot + providerReplay tag. Distinct from the xAI slot so a
 // provider switch never replays foreign encrypted items into this gateway.
 const COMPAT_RESPONSES_STATE_KEY = 'compatResponses';
 
-function resolveReasoningEffort(provider, useModel, opts) {
-  const modelInfo =
-    (typeof provider.getCachedModelInfo === 'function' && provider.getCachedModelInfo(useModel)) ||
-    getModelMetadataSync(useModel, provider.name);
-  return normalizeOpencodeGoReasoningEffort(opts.effort ?? provider.config?.reasoningEffort, modelInfo);
+// The request's `reasoning` field, or null. Custom providers snap onto their
+// own model row (never promoting); gateway brands keep the catalog promotion.
+function resolveReasoning(provider, useModel, opts) {
+  const effort = opts.effort ?? provider.config?.reasoningEffort;
+  const cached = (typeof provider.getCachedModelInfo === 'function' && provider.getCachedModelInfo(useModel)) || null;
+  if (isCustomProviderName(provider.name)) {
+    return resolveCustomReasoning({ protocol: 'openai-responses', model: cached, effort }).fields.reasoning || null;
+  }
+  const modelInfo = cached || getModelMetadataSync(useModel, provider.name);
+  const reasoningEffort = normalizeOpencodeGoReasoningEffort(effort, modelInfo);
+  return reasoningEffort ? { effort: reasoningEffort } : null;
 }
 
 /** The request body: lowered transcript plus the per-turn knobs (output cap,
  *  tools and tool choice, reasoning effort). */
-function buildCompatResponsesParams({ provider, useModel, input, previousResponseId, tools, opts }) {
+function buildCompatResponsesParams({ provider, useModel, input, previousResponseId, tools, opts, instructions }) {
   const params = {
     model: useModel,
     input,
@@ -59,8 +71,16 @@ function buildCompatResponsesParams({ provider, useModel, input, previousRespons
     params.parallel_tool_calls = true;
   }
   applyCompatToolChoice(params, opts);
-  const reasoningEffort = resolveReasoningEffort(provider, useModel, opts);
-  if (reasoningEffort) params.reasoning = { effort: reasoningEffort };
+  const reasoning = resolveReasoning(provider, useModel, opts);
+  if (reasoning) params.reasoning = reasoning;
+  // Opt-in system-as-instructions: set before the hook so the hook can override it.
+  if (instructions) params.instructions = instructions;
+  // Opt-in per-provider final shaping (a provider passes the hook in its config).
+  const hook = provider.config?.responsesParamsHook;
+  if (typeof hook === 'function') {
+    const modelInfo = (typeof provider.getCachedModelInfo === 'function' && provider.getCachedModelInfo(useModel)) || null;
+    hook(params, { useModel, opts, modelInfo });
+  }
   return params;
 }
 
@@ -142,8 +162,20 @@ export async function sendCompatResponses(provider, messages, useModel, tools, o
     replayProvider,
     providerName: provider.name,
     nativePdf: provider.nativePdf,
+    // Opt-in: system prompts travel as top-level `instructions`, not input items.
+    includeSystem: provider.config?.responsesSystemAsInstructions !== true,
   });
-  const params = buildCompatResponsesParams({ provider, useModel, input, previousResponseId, tools, opts });
+  const instructions =
+    provider.config?.responsesSystemAsInstructions === true ? xaiSystemInstructions(messages) : '';
+  const params = buildCompatResponsesParams({
+    provider,
+    useModel,
+    input,
+    previousResponseId,
+    tools,
+    opts,
+    instructions,
+  });
 
   try {
     opts.onStageChange?.('requesting');
@@ -177,12 +209,7 @@ export async function sendCompatResponses(provider, messages, useModel, tools, o
     ...(reasoningItems.length ? [{ messageIndex, items: reasoningItems }] : []),
   ];
   const searchSources = collectCompatResponseSearchSources(response);
-  // Gateway `cost` is a decimal-string USD figure when present.
-  const gatewayCost = Number(usage?.cost);
-  const usageSummary = usage
-    ? { inputTokens, outputTokens, cachedTokens, promptTokens: inputTokens, raw: { ...usage } }
-    : undefined;
-  if (usageSummary && Number.isFinite(gatewayCost) && gatewayCost >= 0) usageSummary.costUsd = gatewayCost;
+  const usageSummary = usage ? responsesUsage(usage) : undefined;
   return {
     content: streamed.content,
     model: response?.model || useModel,

@@ -41,7 +41,17 @@ export function filterConfiguredModels(
   return models.filter((model) => {
     const provider = entries.find((entry) => String(entry.id || entry.provider || '') === model.provider);
     if (!provider) return false;
-    if (provider.custom === true) return provider.enabled !== false && provider.authenticated !== false;
+    if (provider.custom === true) {
+      // Hidden by the effective row or by the model's own v2 override.
+      const hidden =
+        (Array.isArray(provider.models) &&
+          provider.models.map(record).some((row) => row.id === model.model && row.hidden === true)) ||
+        (Object.hasOwn(record(provider.modelOverrides), model.model) &&
+          record(record(provider.modelOverrides)[model.model]).hidden === true);
+      // An invalid stored config (`usable: false` + configError) cannot run.
+      if (provider.usable === false || provider.configError) return false;
+      return !hidden && provider.enabled !== false && (provider.authenticated !== false || provider.auth === 'none');
+    }
     return provider.group === 'local'
       ? provider.detected === true && provider.enabled === true
       : provider.authenticated === true;
@@ -133,6 +143,7 @@ export function ModelCatalog({
     if (!coarsePointer()) search.current?.focus({ preventScroll: true });
     modelList.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'center' });
   }, [active]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: query is a deliberate trigger; a new filter resets the list scroll.
   useEffect(() => {
     if (active && modelList.current) modelList.current.scrollTop = 0;
   }, [active, query]);
@@ -169,6 +180,7 @@ export function ModelCatalog({
     ...visibleProviderEntries.flatMap(([, options]) => options.map((option) => modelKey(option))),
   ];
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the derived lists are recomputed each render; the primitive inputs (normalizedQuery, models, recentModelKeys) are the intended triggers.
   useEffect(() => {
     if (!active) return;
     const recent = recentModels.find((option) => option.provider === provider && option.model === model);
@@ -193,7 +205,7 @@ export function ModelCatalog({
     target.scrollIntoView({ block: 'nearest' });
   };
   const navigateRows = (event: React.KeyboardEvent, fromSearch = false) => {
-    if (event.key === 'Enter' && fromSearch) {
+    if (event.key === 'Enter' && fromSearch && !event.nativeEvent.isComposing) {
       const target = Array.from(
         dialog.current?.querySelectorAll<HTMLButtonElement>('.model-list [role="option"]') || []
       ).find((option) => option.dataset.rowKey === activeRowKey);

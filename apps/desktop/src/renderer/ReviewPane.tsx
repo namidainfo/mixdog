@@ -7,6 +7,7 @@ import { REVIEW_DIFF_STYLE_KEY } from './desktop-types';
 import { DiffView } from './lazy-widgets';
 import { ProgressSpinner } from './ProgressSpinner';
 import { parseUnifiedDiff } from './renderer-logic.mjs';
+import { isRemoteHostRenderer } from './remote-ui-projection';
 import { copyTextToClipboard } from './text-format';
 import { createGitRefreshScheduler, type GitRefreshReason } from './git-refresh-scheduler';
 import { subscribeProjectFileChanges } from './project-file-changes';
@@ -125,6 +126,7 @@ export function ReviewPane({ cwd }: { cwd: string | null }) {
   const [readError, setReadError] = useState('');
   const [actionError, setActionError] = useState('');
   const [busy, setBusy] = useState(false);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: cwd is the trigger; switching project clears the stale action error.
   useEffect(() => setActionError(''), [cwd]);
   // Single-open accordion (user decision): opening a file closes the rest
   // and snaps the opened card flush under the sticky header.
@@ -411,6 +413,7 @@ export function ReviewPane({ cwd }: { cwd: string | null }) {
             }
             return (
               <section className="review-file" data-open={open || undefined} key={file.path}>
+                {/* biome-ignore lint/a11y/noStaticElementInteractions: context-menu shortcut on the header; the trigger button inside carries the keyboard interaction. */}
                 <div
                   className="review-file-header"
                   onContextMenu={(event) => {
@@ -462,26 +465,30 @@ export function ReviewPane({ cwd }: { cwd: string | null }) {
       </div>
       {menu && (
         <div className="review-context-menu" role="menu" style={{ left: menu.x, top: menu.y }}>
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => {
-              setMenu(null);
-              void window.mixdogDesktop.openFilePath?.(cwd, menu.file.path).catch(() => {});
-            }}
-          >
-            {t('Open file')}
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => {
-              setMenu(null);
-              void window.mixdogDesktop.revealFile?.(cwd, menu.file.path).catch(() => {});
-            }}
-          >
-            {t('Reveal in Explorer')}
-          </button>
+          {!isRemoteHostRenderer() && (
+            <>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setMenu(null);
+                  void window.mixdogDesktop.openFilePath?.(cwd, menu.file.path).catch(() => {});
+                }}
+              >
+                {t('Open file')}
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setMenu(null);
+                  void window.mixdogDesktop.revealFile?.(cwd, menu.file.path).catch(() => {});
+                }}
+              >
+                {t('Reveal in Explorer')}
+              </button>
+            </>
+          )}
           <button
             type="button"
             role="menuitem"

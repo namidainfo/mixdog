@@ -6,12 +6,31 @@ import { t } from '../i18n';
 import { ErrorNotice, verificationUrlOf } from '../ErrorNotice';
 import { registerMobileBack } from '../mobile-back';
 import { record } from '../record-utils';
+import { isRemoteHostRenderer } from '../remote-ui-projection';
 import { invalidateSidebarReferenceForMutation } from '../sidebar-reference-cache';
 import { useOAuthUsageRefresh } from './use-oauth-usage-refresh';
-import { ProviderAccountsList, PROVIDER_ACCOUNTS_CHANGED } from '../ProviderAccountsList';
+import { ProviderAccountsList, PROVIDER_ACCOUNTS_CHANGED, preloadProviderAccounts } from '../ProviderAccountsList';
 import { ActionButton, Group, ListEmpty, ResourceRow, settingsStatus } from './capability-controls';
+import { QuotaAutoResumeToggle } from './quota-auto-resume-toggle';
 import { CustomProvidersSection, isCustomProvider } from './custom-provider-section';
-import { providerLabel, rows, sectionLoaded, type PanelContext, type RecordValue } from './capability-data';
+import {
+  preloadCapabilitySettings,
+  providerLabel,
+  rows,
+  sectionLoaded,
+  type PanelContext,
+  type RecordValue,
+} from './capability-data';
+import { errorMessage } from '../editor-pane-session-errors';
+
+export function preloadProviderPanel(api: PanelContext['api']): Promise<unknown> {
+  return preloadCapabilitySettings(api).then((next) =>
+    preloadProviderAccounts(
+      api,
+      rows(record(next.data.providerSetup).oauth).map((provider) => String(provider.id))
+    )
+  );
+}
 
 export function ProvidersPanel({ api, data, pending, run, confirm }: PanelContext) {
   const host = (window as unknown as { mixdogDesktop?: DesktopApi }).mixdogDesktop;
@@ -91,8 +110,44 @@ export function ProvidersPanel({ api, data, pending, run, confirm }: PanelContex
       }
     />
   );
+  const keychainIssue = record(setup.keychain);
+  const keychainBlocked = typeof keychainIssue.message === 'string' && keychainIssue.message !== '';
+  const runRef = useRef(run);
+  runRef.current = run;
+  // Poll while mounted: the daemon re-checks the keyring (without prompting) on
+  // every ready read, so the alert appears/disappears live, including when the
+  // keyring locks or is unlocked while this page is open.
+  useEffect(() => {
+    const refresh = (recheckKeychain: boolean) => () =>
+      void runRef.current('getProviderSetup', [recheckKeychain ? { recheckKeychain } : {}], 'keychain-refresh', true, true);
+    const poll = refresh(false);
+    const onFocus = refresh(true);
+    const timer = window.setInterval(poll, 7000);
+    // Returning to the window re-snapshots the keyring right away instead of
+    // waiting for the daemon's TTL (secret-tool may have changed it meanwhile).
+    window.addEventListener('focus', onFocus);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, []);
+  const keychainState = String(keychainIssue.state || '');
   return (
     <>
+      {keychainBlocked && (
+        <p className="settings-error" role="alert" data-keychain-state={String(keychainIssue.state || '')}>
+          {t(String(keychainIssue.message))}
+          {(keychainState === 'locked' || keychainState === 'error' || keychainState === 'unreachable') && (
+            <ActionButton
+              disabled={busy}
+              onClick={() => void run('getProviderSetup', [{ force: true, unlockKeychain: true }])}
+            >
+              {t('Unlock keyring')}
+            </ActionButton>
+          )}
+        </p>
+      )}
+      <QuotaAutoResumeToggle />
       {/* One card PER provider: sharing a single card ran "OpenAI's accounts →
         Anthropic header" as one continuous list (user: 프로바이더별 분리된
         느낌이 없다). The section keeps the shared heading; each provider owns
@@ -151,13 +206,7 @@ export function ProvidersPanel({ api, data, pending, run, confirm }: PanelContex
           <ListEmpty text={loading ? t('Loading providers…') : t('No API-key providers available.')} />
         )}
       </Group>
-      <CustomProvidersSection
-        providers={customProviders}
-        loading={loading}
-        run={run}
-        confirm={confirm}
-        busy={busy}
-      />
+      <CustomProvidersSection providers={customProviders} loading={loading} run={run} confirm={confirm} busy={busy} />
     </>
   );
 }
@@ -189,8 +238,16 @@ export function OAuthControl({
   const flowOpen = Boolean(flow);
   const flowState = String(flow?.state || '');
   useOAuthUsageRefresh(api, flowId, flowState);
-  const manualCodeFlow = providerId === 'anthropic-oauth';
-  const loginLabel = providerId === 'cursor-oauth' ? 'Cursor OAuth' : `${providerLabel(provider)} OAuth`;
+  // A remote client signs in on its own machine, so every provider that can
+  // take the final redirect (or code) back gets a paste step.
+  const remote = isRemoteHostRenderer();
+  const manualCodeFlow = providerId === 'anthropic-oauth' || providerId === 'mimo-oauth' || remote;
+  const openSignInPage = (url: unknown) => {
+    if (typeof url === 'string' && url) void window.mixdogDesktop?.openExternal?.(url).catch(() => undefined);
+  };
+  // Provider labels such as "OpenAI OAuth" already name the method.
+  const baseLabel = providerId === 'cursor-oauth' ? 'Cursor' : providerLabel(provider);
+  const loginLabel = /\bOAuth$/u.test(baseLabel) ? baseLabel : `${baseLabel} OAuth`;
   const status = settingsStatus(flowState || 'pending');
   useEffect(() => {
     onCompleteRef.current = onComplete;
@@ -256,9 +313,11 @@ export function OAuthControl({
   const start = async () => {
     setError('');
     completedFlowRef.current = '';
-    let loginArgs: unknown[] = [providerId];
-    if (addAccount) loginArgs = [providerId, { addAccount: true }];
-    else if (accountId) loginArgs = [providerId, { accountId }];
+    // The host must not open a browser nobody is sitting at for a remote client.
+    const hostBrowser = remote ? { openBrowser: false } : {};
+    let loginArgs: unknown[] = remote ? [providerId, hostBrowser] : [providerId];
+    if (addAccount) loginArgs = [providerId, { addAccount: true, ...hostBrowser }];
+    else if (accountId) loginArgs = [providerId, { accountId, ...hostBrowser }];
     try {
       const next = await run<RecordValue>(
         'beginOAuthProviderLogin',
@@ -268,9 +327,13 @@ export function OAuthControl({
         false,
         'throw'
       );
-      if (next) setFlow(record(next));
+      if (next) {
+        const started = record(next);
+        setFlow(started);
+        if (remote) openSignInPage(started.manualUrl || started.url);
+      }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(errorMessage(reason));
     }
   };
   const close = () => {
@@ -312,6 +375,7 @@ export function OAuthControl({
       )}
       {!flow && error && <ErrorNotice error={error} />}
       {flow && (
+        // biome-ignore lint/a11y/noStaticElementInteractions: scrim click-to-dismiss; keyboard dismissal is the dialog's close button and Escape.
         <div
           className="settings-oauth-layer"
           onMouseDown={(event) => {
@@ -330,15 +394,20 @@ export function OAuthControl({
               <div>
                 <h3 id={`settings-oauth-title-${providerId}`}>{loginLabel}</h3>
                 <p id={`settings-oauth-description-${providerId}`}>
-                  {manualCodeFlow
-                    ? t('Complete the browser login, then paste the authorization code.')
-                    : t('Finish signing in in your browser. This window updates automatically.')}
+                  {remote && flow.manualCodeSupported
+                    ? t(
+                        'Sign in on the opened page. When it ends on a page that cannot load, paste that page address here.'
+                      )
+                    : manualCodeFlow
+                      ? t('Complete the browser login, then paste the authorization code.')
+                      : t('Finish signing in in your browser. This window updates automatically.')}
                 </p>
               </div>
               <button
                 type="button"
                 aria-label={t(providerId === 'cursor-oauth' ? 'Close Cursor OAuth' : 'Close OAuth login')}
                 data-settings-nested-close
+                // biome-ignore lint/a11y/noAutofocus: the dialog's close button takes focus on open.
                 autoFocus
                 onClick={close}
               >
@@ -350,11 +419,24 @@ export function OAuthControl({
                 <span>{t('Status')}</span>
                 <b className={`tone-${status.tone}`}>{t(status.label)}</b>
               </div>
-              {manualCodeFlow && Boolean(flow.manualUrl || flow.url) && (
+              {Boolean(flow.userCode) && flow.state !== 'complete' && (
+                <label className="settings-oauth-url">
+                  {t('Enter this code on the sign-in page')}
+                  <input readOnly value={String(flow.userCode)} />
+                </label>
+              )}
+              {/* A remote client opens the URL on its own machine: the host's browser is not in front of it. */}
+              {(manualCodeFlow || remote) && Boolean(flow.manualUrl || flow.url) && (
                 <label className="settings-oauth-url">
                   {t('Manual login URL')}
                   <textarea readOnly value={String(flow.manualUrl || flow.url)} />
                 </label>
+              )}
+              {remote && Boolean(flow.manualUrl || flow.url) && flow.state !== 'complete' && (
+                <button type="button" className="primary" onClick={() => openSignInPage(flow.manualUrl || flow.url)}>
+                  <ExternalLink size={14} aria-hidden="true" />
+                  {t('Open sign-in page')}
+                </button>
               )}
               {manualCodeFlow && Boolean(flow.manualCodeSupported) && flow.state !== 'complete' && (
                 <form
@@ -377,13 +459,15 @@ export function OAuthControl({
                         if (next) setFlow(record(next));
                         else setError(t('The authorization code could not be completed.'));
                       })
-                      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+                      .catch((reason) => setError(errorMessage(reason)));
                   }}
                 >
                   <input
                     name="code"
-                    placeholder={t('Authorization code or code#state')}
-                    aria-label={t('Anthropic authorization code')}
+                    placeholder={
+                      remote ? t('Paste the final redirect URL or code') : t('Authorization code or code#state')
+                    }
+                    aria-label={remote ? t('Sign-in redirect URL or code') : t('Anthropic authorization code')}
                     required
                   />
                   <button type="submit" className="primary" disabled={disabled}>

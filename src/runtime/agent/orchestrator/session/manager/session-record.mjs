@@ -78,6 +78,9 @@ export function sessionOriginFields(opts, { profile, presetObj, providerCacheOpt
     // Agent Runtime metadata — optional. Applied on every ask() to merge
     // profile-driven cache settings into provider sendOpts.
     profileId: profile?.id || null,
+    // A profile skipping `claudemd` keeps instruction files out of later
+    // empty-session prompt rebuilds too (tool-policy-refresh.mjs).
+    skipInstructionFiles: profile?.skip?.claudemd === true,
     permissionMode: opts.permissionMode ?? null,
     providerCacheOpts: providerCacheOpts || null,
     parentSessionId: opts.parentSessionId || null,
@@ -89,7 +92,7 @@ export function sessionOriginFields(opts, { profile, presetObj, providerCacheOpt
 
 // The persisted session record.
 export function buildSessionRecord({ opts, route, presetObj, surface, prompt, messages, contextMeta, origin }) {
-  const { providerName, modelName, toolPreset, effort, fast, modelParameters, contextPercent, id } = route;
+  const { providerName, modelName, toolPreset, effort, fast, autoEffort, modelParameters, contextPercent, id } = route;
   return {
     id,
     codexWireSessionId: providerName === 'openai-oauth' ? mintUuidV7() : null,
@@ -112,6 +115,8 @@ export function buildSessionRecord({ opts, route, presetObj, surface, prompt, me
     presetName: presetObj?.name || null,
     effort,
     fast,
+    // Absent means Auto effort is on; only the off state is persisted.
+    ...(autoEffort === false ? { autoEffort: false } : {}),
     modelParameters,
     contextPercent,
     selectedContextWindow: opts.selectedContextWindow || null,

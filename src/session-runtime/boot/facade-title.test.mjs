@@ -119,3 +119,16 @@ test('agent-owned reservations are excluded and direct ordinary creation still r
   );
   assert.equal(direct.generatedTitlePrefix, '260104-000 | ');
 });
+
+test('title reservations retain the durable address and refuse re-keying or closed admission', (t) => {
+  t.mock.method(Date, 'now', () => new Date(2026, 0, 5).getTime());
+  const { rt, facade } = reservedRuntime('sess_addressed_title');
+  assert.equal(rt.addressedSessionId, 'sess_addressed_title');
+  assert.equal(rt.reservedSessionTitle.prefix, '260105-000 | ');
+  assert.throws(() => facade.reserveSessionId('sess_another_title'), /cannot be re-keyed/);
+  assert.equal(rt.reservedSessionTitle.prefix, '260105-000 | ');
+  rt.admission = 'terminal';
+  assert.throws(() => facade.reserveSessionId('sess_addressed_title'), /closed to new work/);
+  assert.equal(rt.reservedSessionTitle.prefix, '260105-000 | ');
+  assert.equal(reservedRuntime('sess_after_closed_title').rt.reservedSessionTitle.prefix, '260105-001 | ');
+});

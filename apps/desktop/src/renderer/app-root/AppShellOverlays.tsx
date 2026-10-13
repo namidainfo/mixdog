@@ -2,7 +2,8 @@ import type React from 'react';
 import { lazy, Suspense, useCallback, useEffect, useRef, type ComponentProps } from 'react';
 import { OPEN_DOCTOR_EVENT } from '../command-surface-doctor-event';
 import type { SettingsSection as SlashSettingsSection } from '../slash-commands';
-import type { DesktopModelSelection } from '../../shared/contract';
+import type { DesktopModelSelection, DesktopSessionSummary } from '../../shared/contract';
+import { SessionSearchHost } from '../SessionSearchDialog';
 import { EMPTY_SNAPSHOT, type Snapshot } from '../desktop-types';
 import type { WorkspaceSelection, WorkspaceTab } from '../navigation';
 import { navigationKey } from '../text-format';
@@ -33,6 +34,9 @@ export interface AppShellOverlaysProps {
   openFileTab: (project: string, rel: string, line?: number) => void;
   setQuickAccessMode: (mode: WorkbenchQuickAccessMode | null) => void;
 
+  sessions: readonly DesktopSessionSummary[];
+  openSearchSession: (sessionId: string) => void;
+
   tabSwitcher: { keys: string[]; index: number } | null;
   focusedLeafForShortcuts: PaneLeaf | null | undefined;
   stripTitleFor: (key: string, selection: WorkspaceSelection) => string;
@@ -57,7 +61,11 @@ export interface AppShellOverlaysProps {
   commandSurfaceLane: Snapshot | null | undefined;
   setCommandSurface: ReturnType<typeof useAppShellPanels>['setCommandSurface'];
   setCommandSurfaceSessionId: (id: string) => void;
-  replaceWithInheritedSession: (sessionId: string, route: DesktopModelSelection) => Promise<void>;
+  replaceWithInheritedSession: (
+    sessionId: string,
+    route: DesktopModelSelection,
+    options?: { compact: boolean }
+  ) => Promise<void>;
 
   onboardingOpen: boolean;
   setOnboardingOpen: (open: boolean) => void;
@@ -80,6 +88,8 @@ export function AppShellOverlays({
   workbenchCommands,
   openFileTab,
   setQuickAccessMode,
+  sessions,
+  openSearchSession,
   tabSwitcher,
   focusedLeafForShortcuts,
   stripTitleFor,
@@ -151,6 +161,7 @@ export function AppShellOverlays({
           onClose={() => setQuickAccessMode(null)}
         />
       )}
+      <SessionSearchHost sessions={sessions} onOpenSession={openSearchSession} />
       {tabSwitcher && (
         <div className="workspace-tab-switcher" role="listbox" aria-label={t('Open tabs, most recent first')}>
           {tabSwitcher.keys.map((key, index) => {
@@ -160,6 +171,7 @@ export function AppShellOverlays({
               <div
                 key={key}
                 role="option"
+                tabIndex={-1}
                 aria-selected={index === tabSwitcher.index}
                 className={index === tabSwitcher.index ? 'active' : ''}
               >
@@ -196,7 +208,7 @@ export function AppShellOverlays({
             onClose={closeSettings}
           />
         )}
-        {(['context', 'usage', 'doctor', 'inherit', 'stats'] as const).map((surface) => {
+        {(['context', 'doctor', 'inherit', 'stats'] as const).map((surface) => {
           const isMounted = commandSurface === surface || mountedCommandSurfaces.current.has(surface);
           if (!isMounted) return null;
 

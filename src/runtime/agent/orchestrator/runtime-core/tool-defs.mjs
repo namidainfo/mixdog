@@ -39,6 +39,7 @@ export const CWD_TOOL = {
     openWorldHint: false,
     agentHidden: true,
   },
+  trigger: 'Show or switch the active Project; not a shell-local cd.',
   description:
     'Show or switch the active Project. list returns the registered projects (name, path); a project name instead of a path → list first, then set the matching path, ask only if several match. path must be an existing directory. A shell-local cd does not change the Project.',
   inputSchema: {
@@ -89,6 +90,7 @@ const MEMORY_RUNTIME_TOOLS = ['recall', 'memory'];
 const CODE_GRAPH_RUNTIME_TOOLS = ['code_graph'];
 const BROWSER_RUNTIME_TOOLS = ['browser', 'browser_devtools'];
 const COMPUTER_RUNTIME_TOOLS = ['computer'];
+const TERMINAL_RUNTIME_TOOLS = ['terminal'];
 const OFFICE_RUNTIME_TOOLS = ['office'];
 const MEDIA_RUNTIME_TOOLS = ['media'];
 const TIDY_RUNTIME_TOOLS = ['tidy'];
@@ -97,8 +99,7 @@ const admitted = (tools, names) => (tools || []).filter((tool) => names.includes
 
 /**
  * Assemble this runtime's tool definitions from the loaded tool-def modules.
- * Pure: callers resolve their own availability flags (skills env gate, channel
- * ownership) and pass the already-built goal/agent tool arrays.
+ * Pure: callers resolve their own availability flags (skills env gate) and pass the already-built goal/agent tool arrays.
  *
  * - `standaloneTools` is the model-facing set (also the deferred catalog base).
  * - `internalToolDefs` adds the `public: false` web-search tools: reachable
@@ -107,17 +108,16 @@ const admitted = (tools, names) => (tools || []).filter((tool) => names.includes
 export function collectStandaloneToolDefs({
   webSearchToolDefs,
   memoryToolDefs,
-  channelToolDefs,
   codeGraphToolDefs,
   browserToolDefs = [],
   computerToolDefs = [],
+  terminalToolDefs = [],
   officeToolDefs = [],
   mediaToolDefs = [],
   tidyToolDefs = [],
   setupToolDefs = [],
   goalTools = [],
   agentTools = [],
-  isChannelTool = () => false,
   skillToolEnabled = true,
 }) {
   const webSearchRuntimeTools = admitted(webSearchToolDefs?.TOOL_DEFS, WEB_SEARCH_RUNTIME_TOOLS);
@@ -128,10 +128,10 @@ export function collectStandaloneToolDefs({
     CWD_TOOL,
     ...webSearchRuntimeTools.filter((tool) => tool?.public !== false),
     ...admitted(memoryToolDefs?.TOOL_DEFS, MEMORY_RUNTIME_TOOLS),
-    ...(channelToolDefs?.TOOL_DEFS || []).filter((tool) => isChannelTool(tool?.name)),
     ...admitted(codeGraphToolDefs?.CODE_GRAPH_TOOL_DEFS, CODE_GRAPH_RUNTIME_TOOLS),
     ...admitted(browserToolDefs, BROWSER_RUNTIME_TOOLS),
     ...admitted(computerToolDefs, COMPUTER_RUNTIME_TOOLS),
+    ...admitted(terminalToolDefs, TERMINAL_RUNTIME_TOOLS),
     ...admitted(officeToolDefs, OFFICE_RUNTIME_TOOLS),
     ...admitted(mediaToolDefs, MEDIA_RUNTIME_TOOLS),
     ...admitted(tidyToolDefs, TIDY_RUNTIME_TOOLS),
@@ -142,8 +142,8 @@ export function collectStandaloneToolDefs({
   return {
     standaloneTools,
     internalToolDefs: [...standaloneTools, ...webSearchRuntimeTools.filter((tool) => tool?.public === false)],
-    // Workflow-aware model surface: a pack that declares an EMPTY agents list
-    // (Solo) must not advertise the agent tool at all — the model calling a
+    // Workflow-aware model surface: a session with no delegatable agents
+    // must not advertise the agent tool at all — the model calling a
     // schema-visible tool that policy always rejects is a guaranteed error turn
     // (user-reported in Solo). Names derive from the live agent tool defs.
     agentToolNames: new Set(agentTools.map((tool) => String(tool?.name || '')).filter(Boolean)),

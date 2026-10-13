@@ -3,18 +3,24 @@
  * Primary pages outlive panel visibility; named support pages retain their
  * bounded, session-scoped lifetimes.
  */
-import type { WebContents } from 'electron';
-import { app, BrowserWindow } from 'electron';
+import type { BaseWindow, BrowserWindow, WebContents } from 'electron';
+import { app } from 'electron';
 
 import { DESKTOP_IPC } from '../../shared/contract';
 import type { BrowserGuestCdp } from './cdp';
 import { BROWSER_PARTITION, NAVIGATE_SETTLE_TIMEOUT_MS, OFFSCREEN_VIEWPORT } from './command';
 import { type BrowserGuestStateStore, pushBounded } from './guest-state';
+import { redactBrowserUrl } from './redaction';
 import { type BrowserSessionRegistry, DEFAULT_BROWSER_SESSION_ID } from './session-registry';
 import { createBrowserPageOwner } from './page-owner';
+import { injectPageScrollbarCss } from './page-scrollbar-css';
+import { adoptBrowserPageWindow, browserPageWindow, createBrowserPageWindow } from './page-window';
 import { assertBackgroundTabCapacity, backgroundPageIdle, normalizeBackgroundTabName } from './tab-policy';
 import type { BackgroundPage } from './tabs-contract';
 import { type BrowserUrlPolicy, normalizePageUrl, normalizeRestoredPageUrl } from './url-policy';
+
+/** Prefix of a fault set by a failed main-frame load; a new load clears it. */
+const LOAD_FAULT = 'page failed to load: ';
 
 interface BrowserGuestLifecycleHost {
   window: BrowserWindow;
@@ -32,8 +38,9 @@ interface BrowserGuestLifecycleHost {
   /** The display client was asked to reveal or hide the session's surface. */
   onSurfaceRequest?(request: { sessionId: string; reveal?: boolean; hide?: boolean }): void;
   waitForLoadSettle(guest: WebContents, timeoutMs: number, signal?: AbortSignal): Promise<unknown>;
-  /** Native presentation: pages compose in their own hidden, frameless native
-   *  windows, which the pane shows over its surface (see native-view). */
+  /** Native presentation: pages compose as views in their own parked,
+   *  frameless windows; the shell adopts the view the pane shows (see
+   *  native-view and page-window). */
   nativeView?: boolean;
 }
 
@@ -47,27 +54,29 @@ export function browserSharedTextureRendering(): boolean {
 
 /** Every page owner runs on the shared partition, so its window options are
  *  fixed: hidden, unfocusable, offscreen-composited (unless natively presented)
- *  and never throttled. */
+ *  and throttled unless displayed or driven (see page-power). */
 function offscreenWindowOptions(nativeView = false): Electron.BrowserWindowConstructorOptions {
   let offscreen: boolean | { useSharedTexture: true } = true;
   if (nativeView) offscreen = false;
   else if (browserSharedTextureRendering()) offscreen = { useSharedTexture: true };
+  const toolWindowType = process.platform === 'win32' ? { type: 'toolbar' as const } : {};
   return {
     show: false,
     focusable: false,
-    // A natively presented page window is shown as nothing but the page, and
-    // as a tool window it never appears in Alt+Tab, even while parked.
+    // A page's own default, like its view (page-window.ts): the window's
+    // default would be black between pages.
+    backgroundColor: '#ffffff',
+    // A native page's window holds nothing but the page, at exactly its
+    // content size, and as a tool window never appears in Alt+Tab.
     ...(nativeView
       ? {
           frame: false,
           thickFrame: false,
-          // Only the shell's panel handle may resize this surface. Frameless
-          // windows otherwise keep native edge grips that resize just the page.
           resizable: false,
           roundedCorners: false,
           hasShadow: false,
           skipTaskbar: true,
-          ...(process.platform === 'win32' ? { type: 'toolbar' } : {}),
+          ...toolWindowType,
         }
       : {}),
     width: OFFSCREEN_VIEWPORT.width,
@@ -80,8 +89,9 @@ function offscreenWindowOptions(nativeView = false): Electron.BrowserWindowConst
       // These page owners are never shown. Offscreen rendering gives Chromium
       // a live compositor without activating a native window.
       offscreen,
-      // Keep rendering/timers running while the window is hidden.
-      backgroundThrottling: false,
+      // Pages are throttled by default; page-power lifts it while a panel
+      // displays the page or an agent command drives it.
+      backgroundThrottling: true,
     },
   };
 }
@@ -114,10 +124,10 @@ function savedPageDescriptor(
     url: guest.getURL() || 'about:blank',
     active: guest === selected,
     zoom: guest.getZoomFactor(),
-    size: (BrowserWindow.fromWebContents(guest)?.getContentSize() ?? [
-      OFFSCREEN_VIEWPORT.width,
-      OFFSCREEN_VIEWPORT.height,
-    ]) as [number, number],
+    size: (browserPageWindow(guest)?.getContentSize() ?? [OFFSCREEN_VIEWPORT.width, OFFSCREEN_VIEWPORT.height]) as [
+      number,
+      number,
+    ],
   };
 }
 
@@ -154,10 +164,7 @@ function backgroundEntryForPageId(
   pageId: string
 ): [string, BackgroundPage] | null {
   for (const entry of sessions.backgroundPages(sessionId)) {
-    if (
-      !entry[1].window.isDestroyed() &&
-      state.pageId(entry[1].window.webContents).toLowerCase() === pageId.toLowerCase()
-    ) {
+    if (!entry[1].window.isDestroyed() && state.pageId(entry[1].guest).toLowerCase() === pageId.toLowerCase()) {
       return entry;
     }
   }
@@ -225,7 +232,7 @@ function nextPopupTabName(sessions: BrowserSessionRegistry, counters: Map<string
 
 export function createBrowserGuestLifecycle(host: BrowserGuestLifecycleHost) {
   const { window, state, sessions, cdp, urlPolicy, bridgeWanted, isBackgroundBusy, waitForLoadSettle } = host;
-  const pageWindowOptions = () => offscreenWindowOptions(host.nativeView === true);
+  const createPage = () => createBrowserPageWindow(offscreenWindowOptions(host.nativeView === true), host.nativeView);
   const nextPopupIdsBySession = new Map<string, number>();
   const suspendedSessions = new Map<string, SavedPage[]>();
   const restoringSessions = new Map<string, Promise<void>>();
@@ -233,6 +240,7 @@ export function createBrowserGuestLifecycle(host: BrowserGuestLifecycleHost) {
   function initializeGuest(guest: WebContents, deferDebugger = false): void {
     state.for(guest);
     host.onGuest?.(guest);
+    injectPageScrollbarCss(guest);
     const blockNavigation = blockUnsafeNavigation(state, urlPolicy, guest);
     guest.on('will-navigate', blockNavigation);
     guest.on('will-redirect', blockNavigation);
@@ -244,38 +252,36 @@ export function createBrowserGuestLifecycle(host: BrowserGuestLifecycleHost) {
         if (url !== 'about:blank') normalizePageUrl(url, urlPolicy);
         reclaimIdleBackgroundPages(sessions, isBackgroundBusy);
         assertBackgroundTabCapacity(sessions.backgroundCount());
+        if (host.nativeView) {
+          // A native page's popup is a hosted page of its own, so the pane can
+          // present it like any tab. Electron then emits no did-create-window.
+          return {
+            action: 'allow',
+            outlivesOpener: true,
+            createWindow: (options) => {
+              const popup = createBrowserPageWindow(
+                popupWindowOptions(true),
+                true,
+                (options as { webContents?: WebContents }).webContents
+              );
+              setImmediate(() => adoptPopup(guest, popup));
+              return popup.guest;
+            },
+          };
+        }
         return {
           action: 'allow',
           outlivesOpener: true,
-          overrideBrowserWindowOptions: popupWindowOptions(host.nativeView === true),
+          overrideBrowserWindowOptions: popupWindowOptions(),
         };
       } catch (error) {
         pushBounded(state.for(guest).networkFailures, `Blocked popup navigation: ${(error as Error).message}`);
         return { action: 'deny' };
       }
     });
-    guest.on('did-create-window', (child) => {
-      reclaimIdleBackgroundPages(sessions, isBackgroundBusy);
-      try {
-        assertBackgroundTabCapacity(sessions.backgroundCount());
-      } catch (error) {
-        pushBounded(state.for(guest).networkFailures, `Blocked popup creation: ${(error as Error).message}`);
-        try {
-          child.destroy();
-        } catch {
-          /* creation already failed */
-        }
-        return;
-      }
-      const ownerSessionId = sessions.sessionIdForGuest(guest) ?? DEFAULT_BROWSER_SESSION_ID;
-      const popupName = nextPopupTabName(sessions, nextPopupIdsBySession, ownerSessionId);
-      trackBackgroundPage(ownerSessionId, popupName, child, 'popup', state.pageId(guest));
-      // The opener's next reply has to mention it: a click that opened a tab
-      // changes nothing in this document and would otherwise be reported as a
-      // click the page ignored.
-      pushBounded(state.for(guest).openedPopups, popupName);
-      host.onPopup?.(guest, child.webContents);
-    });
+    guest.on('did-create-window', (child) =>
+      adoptPopup(guest, { window: adoptBrowserPageWindow(child), guest: child.webContents })
+    );
     guest.on('render-process-gone', (_event, details) => {
       state.markCrashed(guest, `renderer ${details.reason}${details.exitCode ? ` (exit ${details.exitCode})` : ''}`);
     });
@@ -287,8 +293,23 @@ export function createBrowserGuestLifecycle(host: BrowserGuestLifecycleHost) {
     });
     guest.on('did-finish-load', () => {
       const record = state.for(guest);
-      record.fault = '';
+      // The error document of a failed load also finishes loading; only the
+      // next navigation clears that failure.
+      if (!record.fault.startsWith(LOAD_FAULT)) record.fault = '';
       record.network.finishDocument(guest.getURL());
+    });
+    // A page that never arrived (refused, unreachable, bad certificate) is a
+    // fault the pane shows; without it the pane sits on an empty document.
+    // A superseded navigation (-3) is not a failure.
+    // The address keeps two failures in a row distinct for the pane.
+    guest.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
+      if (!isMainFrame || code === -3) return;
+      state.for(guest).fault = `${LOAD_FAULT}${description || 'unknown error'} (${code}) ${redactBrowserUrl(url)}`;
+    });
+    guest.on('did-start-navigation', (details) => {
+      if (!details.isMainFrame || details.isSameDocument) return;
+      const record = state.for(guest);
+      if (record.fault.startsWith(LOAD_FAULT)) record.fault = '';
     });
     if (deferDebugger) {
       // A popup already has a navigation owned by window.open. Attaching
@@ -297,6 +318,31 @@ export function createBrowserGuestLifecycle(host: BrowserGuestLifecycleHost) {
         if (bridgeWanted() && !guest.isDestroyed()) attachDebuggerEagerly(guest);
       });
     } else if (bridgeWanted()) attachDebuggerEagerly(guest);
+  }
+
+  /** Track a popup as its opener session's page, unless capacity is gone. */
+  function adoptPopup(opener: WebContents, popup: { window: BaseWindow; guest: WebContents }): void {
+    if (popup.window.isDestroyed()) return;
+    reclaimIdleBackgroundPages(sessions, isBackgroundBusy);
+    try {
+      assertBackgroundTabCapacity(sessions.backgroundCount());
+    } catch (error) {
+      pushBounded(state.for(opener).networkFailures, `Blocked popup creation: ${(error as Error).message}`);
+      try {
+        popup.window.destroy();
+      } catch {
+        /* creation already failed */
+      }
+      return;
+    }
+    const ownerSessionId = sessions.sessionIdForGuest(opener) ?? DEFAULT_BROWSER_SESSION_ID;
+    const popupName = nextPopupTabName(sessions, nextPopupIdsBySession, ownerSessionId);
+    trackBackgroundPage(ownerSessionId, popupName, popup, 'popup', state.pageId(opener));
+    // The opener's next reply has to mention it: a click that opened a tab
+    // changes nothing in this document and would otherwise be reported as a
+    // click the page ignored.
+    pushBounded(state.for(opener).openedPopups, popupName);
+    host.onPopup?.(opener, popup.guest);
   }
 
   /** Bring CDP up ahead of the first command; a failure is a page diagnostic,
@@ -313,7 +359,7 @@ export function createBrowserGuestLifecycle(host: BrowserGuestLifecycleHost) {
   window.webContents.on('will-attach-webview', (event) => event.preventDefault());
   const primaryPages = createBrowserPageOwner({
     sessions,
-    windowOptions: pageWindowOptions,
+    create: createPage,
     initialize: initializeGuest,
   });
 
@@ -357,7 +403,7 @@ export function createBrowserGuestLifecycle(host: BrowserGuestLifecycleHost) {
         }
         let selected = primary;
         const apply = (guest: WebContents, page: SavedPage) => {
-          BrowserWindow.fromWebContents(guest)?.setContentSize(page.size[0], page.size[1]);
+          browserPageWindow(guest)?.setContentSize(page.size[0], page.size[1]);
           guest.setZoomFactor(page.zoom);
           if (page.active) selected = guest;
           // Restoration is a normal reload, not form/JS/opener resurrection.
@@ -367,11 +413,10 @@ export function createBrowserGuestLifecycle(host: BrowserGuestLifecycleHost) {
         const primaryState = saved.find((page) => page.kind === 'primary');
         if (primaryState) apply(primary, primaryState);
         for (const page of backgrounds) {
-          const win = new BrowserWindow(pageWindowOptions());
           const entry = trackBackgroundPage(
             sessionId,
             page.name!,
-            win,
+            createPage(),
             page.kind === 'popup' ? 'user' : (page.kind as BackgroundPage['kind']),
             undefined,
             true
@@ -406,14 +451,15 @@ export function createBrowserGuestLifecycle(host: BrowserGuestLifecycleHost) {
   function trackBackgroundPage(
     sessionId: string,
     name: string,
-    win: BrowserWindow,
+    page: { window: BaseWindow; guest: WebContents },
     kind: BackgroundPage['kind'],
     openerPageId?: string,
     deferDebugger = kind === 'popup'
   ): BackgroundPage {
+    const win = page.window;
     const entry: BackgroundPage = {
       window: win,
-      guest: win.webContents,
+      guest: page.guest,
       lastUsedAt: Date.now(),
       kind,
       openerPageId,
@@ -439,8 +485,7 @@ export function createBrowserGuestLifecycle(host: BrowserGuestLifecycleHost) {
     // frames). Screenshots go through CDP Page.captureScreenshot, which renders
     // server-side in the Blink compositor and does not need an on-screen
     // surface — an invalidate() before capture forces the frame.
-    const win = new BrowserWindow(pageWindowOptions());
-    return trackBackgroundPage(sessionId, name, win, 'agent');
+    return trackBackgroundPage(sessionId, name, createPage(), 'agent');
   }
 
   function requestBrowserSurface(sessionId: string, reveal: boolean | 'hide'): void {

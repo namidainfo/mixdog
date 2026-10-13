@@ -3,6 +3,7 @@ import {
   buildJobNotFoundMessage,
   peekShellJob,
   killShellJob,
+  otherSessionBackgroundShellJobCount,
   cancelBackgroundShellJobWatch,
   clearShellJobNotifyCtx,
   shellJobPublicTaskResult,
@@ -23,6 +24,7 @@ import {
 } from '../../../../shared/background-tasks.mjs';
 import { recordDeliveredCompletion } from '../../session/manager/delivered-completions.mjs';
 import { listShellJobRecords, readShellJobRecord } from './lib/shell-job-records.mjs';
+import { resourceAdmission } from '../../../../shared/resource-admission.mjs';
 import { readShellTaskOutput } from './lib/shell-task-output.mjs';
 
 // Ceiling for confirming that a cancelled task's process really exited. The
@@ -88,18 +90,42 @@ function resolveTaskWaitTimeoutMs(value) {
   return Math.min(TASK_WAIT_TIMEOUT_MAX_MS, Math.max(TASK_WAIT_TIMEOUT_MIN_MS, Math.floor(raw)));
 }
 
+// Read-only counts of this runtime's shell work owned by OTHER sessions.
+// Admission is runtime-wide while task list/cancel are session-scoped, so
+// without this those holders are invisible. Counts only: another session's
+// command text is never shown.
+function otherSessionShellHolders(options) {
+  const context =
+    options?.context && typeof options.context === 'object' ? { ...options.context, ...options } : options;
+  const mine = new Set(
+    [context?.callerSessionId, context?.routingSessionId, context?.sessionId].filter(Boolean).map(String)
+  );
+  if (mine.size === 0) return '';
+  const leases = (resourceAdmission.snapshot().activeLeases || []).filter(
+    (lease) => lease.kind === 'shell' && !mine.has(String(lease.ownerKey || ''))
+  ).length;
+  const jobs = otherSessionBackgroundShellJobCount(mine);
+  if (!leases && !jobs) return '';
+  return `[other sessions in this runtime] ${leases} foreground shell lease(s), ${jobs} background shell job(s) — read-only; only their owner sessions can cancel them.`;
+}
+
 async function listTasks(options) {
   const rendered = renderBackgroundTaskList({ context: options });
   const liveIds = new Set([...rendered.matchAll(/^-\s+(\S+)/gm)].map((match) => match[1]));
   const recovered = (await listShellJobRecords()).filter(
     (record) => recoveredTaskMatches(record, options) && !liveIds.has(record.jobId)
   );
-  if (recovered.length === 0) return rendered;
-  const rows = recovered.map(
-    (record) =>
-      `- ${record.jobId} shell ${record.terminal ? record.status : 'state-unavailable'} recovered=true command=${JSON.stringify(record.command || '')}`
-  );
-  return `${rendered}\n[recovered shell tasks]\n${rows.join('\n')}`;
+  const sections = [rendered];
+  if (recovered.length > 0) {
+    const rows = recovered.map(
+      (record) =>
+        `- ${record.jobId} shell ${record.terminal ? record.status : 'state-unavailable'} recovered=true command=${JSON.stringify(record.command || '')}`
+    );
+    sections.push(`[recovered shell tasks]\n${rows.join('\n')}`);
+  }
+  const others = otherSessionShellHolders(options);
+  if (others) sections.push(others);
+  return sections.join('\n');
 }
 
 // Blocks until the shell task settles, the timeout elapses, or the turn/user

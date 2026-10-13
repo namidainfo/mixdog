@@ -1,11 +1,13 @@
 import type React from 'react';
-import type { DesktopWorkspaceFolder } from '../../shared/contract';
+import type { DesktopProjectSummary, DesktopWorkspaceFolder } from '../../shared/contract';
 import { SessionSidebar, type NavigationSelection } from '../navigation';
 import { paneActiveSelection, type PaneLeaf } from '../pane-layout';
 import { navigationKey } from '../text-format';
 import type { usePaneWorkspace } from '../pane-workspace-state';
 import { DEFAULT_SIDEBAR_VIEW_ORDER } from '../sidebar-view-layout';
 import type { SidebarPanelKey } from '../app-shell-components';
+import { requestPaneDockClose } from '../pane-dock-chrome';
+import { BackgroundJobsPane } from '../BackgroundJobsPane';
 import { SessionDiffPane } from '../SessionDiffPane';
 import { prefetchDiffView } from '../lazy-widgets';
 import { SnapshotUtilityDock } from '../app-snapshot-views';
@@ -26,11 +28,21 @@ import type { useAppShellPanels } from '../use-app-shell-panels';
 import type { useSessionCatalog } from '../app-session-catalog';
 import type { useSideViewReordering } from '../app-shell-side-views';
 import type { useEditorNavigation } from '../use-editor-navigation';
+import type { createSideFileGuard } from '../side-file-guard';
+import { WorkbenchProblemsPane } from '../WorkbenchProblems';
+import type { EditorSaveHandle } from '../use-pane-tab-close';
 import { cleanDiffTarget } from './workspace-targets';
 
 export interface UseAppWorkbenchViewsOptions {
   sessions: ReturnType<typeof useSessionCatalog>['sessions'];
   sessionCatalogReady: boolean;
+  projects: readonly DesktopProjectSummary[];
+  sidebarNewProjectTask: (projectPath: string) => void;
+  sidebarOpenSessionInSplit: (sessionId: string, title: string) => void;
+  sidebarInheritSession: (sessionId: string) => void;
+  sidebarRenameProject: (projectPath: string, alias: string) => void;
+  sidebarRevealProject?: (projectPath: string) => void;
+  sidebarOpenProjectSettings: (projectPath: string) => void;
   workingSessionIds: ReadonlySet<string>;
   unreadSessionIds: ReadonlySet<string>;
   sidebarSelection: NavigationSelection;
@@ -40,12 +52,11 @@ export interface UseAppWorkbenchViewsOptions {
   sidebarResumeSession: (sessionId: string) => void;
   renameSession: (sessionId: string, title: string) => Promise<void>;
   archiveSession: (sessionId: string, archived: boolean) => Promise<void>;
+  favoriteSession: (sessionId: string, favorite: boolean) => Promise<void>;
   deleteSession: (sessionId: string) => Promise<void>;
 
   sideViewDescriptors: ReturnType<typeof createAppSideViewDescriptors>;
   renderSidebarPanel: (id: SidebarPanelKey, active: boolean) => React.ReactNode;
-  sessionDiffs: ReturnType<typeof useSessionPaneSurfaces>['sessionDiffs'];
-  setSessionDiff: ReturnType<typeof useSessionPaneSurfaces>['setSessionDiff'];
 
   snapshotStore: DesktopSnapshotStore;
   observedAgentSessionIds: readonly string[];
@@ -82,6 +93,9 @@ export interface UseAppWorkbenchViewsOptions {
   moveWorkbenchSideGroup: ReturnType<typeof useSideViewReordering>['moveWorkbenchSideGroup'];
   moveWorkbenchSideView: ReturnType<typeof useSideViewReordering>['moveWorkbenchSideView'];
   openFileTab: (project: string, rel: string, line?: number) => void;
+  sideFileGuard: ReturnType<typeof createSideFileGuard>;
+  handleFileDirty: (key: string, dirty: boolean) => void;
+  registerEditorSaveHandle: (key: string, save: EditorSaveHandle | null, released?: EditorSaveHandle) => void;
 
   desktopBootReady: boolean;
 
@@ -96,6 +110,13 @@ export interface UseAppWorkbenchViewsOptions {
 export function useAppWorkbenchViews({
   sessions,
   sessionCatalogReady,
+  projects,
+  sidebarNewProjectTask,
+  sidebarOpenSessionInSplit,
+  sidebarInheritSession,
+  sidebarRenameProject,
+  sidebarRevealProject,
+  sidebarOpenProjectSettings,
   workingSessionIds,
   unreadSessionIds,
   sidebarSelection,
@@ -105,11 +126,10 @@ export function useAppWorkbenchViews({
   sidebarResumeSession,
   renameSession,
   archiveSession,
+  favoriteSession,
   deleteSession,
   sideViewDescriptors,
   renderSidebarPanel,
-  sessionDiffs,
-  setSessionDiff,
   snapshotStore,
   observedAgentSessionIds,
   quickAccessProjectPath,
@@ -134,6 +154,9 @@ export function useAppWorkbenchViews({
   moveWorkbenchSideGroup,
   moveWorkbenchSideView,
   openFileTab,
+  sideFileGuard,
+  handleFileDirty,
+  registerEditorSaveHandle,
   desktopBootReady,
   bottomPanel,
   problemsFilter,
@@ -159,6 +182,13 @@ export function useAppWorkbenchViews({
       panelTitleDragProps: titleDragProps,
       sessions,
       sessionsReady: sessionCatalogReady,
+      projects,
+      onNewProjectTask: sidebarNewProjectTask,
+      onOpenSessionInSplit: sidebarOpenSessionInSplit,
+      onInheritSession: sidebarInheritSession,
+      onRenameProject: sidebarRenameProject,
+      onRevealProject: sidebarRevealProject,
+      onOpenProjectSettings: sidebarOpenProjectSettings,
       workingSessionIds,
       unreadSessionIds,
       selection: sidebarSelection,
@@ -168,6 +198,7 @@ export function useAppWorkbenchViews({
       onResumeSession: sidebarResumeSession,
       onRenameSession: renameSession,
       onArchiveSession: archiveSession,
+      onFavoriteSession: favoriteSession,
       onDeleteSession: deleteSession,
     };
     if (id === 'sessions') return <SessionSidebar {...sessionSidebarProps} />;
@@ -185,21 +216,19 @@ export function useAppWorkbenchViews({
         <SessionDiffPane
           sessionId={sessionId}
           active={active}
-          openRel={sessionDiffs.get(sessionId)?.rel ?? ''}
-          onOpenDiff={
-            sessionId && pane.projectPath
-              ? (rel) => {
-                  void prefetchDiffView().catch(() => {});
-                  setSessionDiff(sessionId, {
-                    kind: 'diff',
-                    project: pane.projectPath,
-                    rel,
-                    source: 'session',
-                    hash: sessionId,
-                  });
-                }
-              : undefined
-          }
+          onClose={() => requestPaneDockClose('session-diff')}
+          onOpenFile={pane.projectPath ? (rel) => openFileTab(pane.projectPath, rel) : undefined}
+        />
+      );
+    }
+    if (id === 'background-jobs') {
+      if (!pane) return null;
+      return (
+        <BackgroundJobsPane
+          sessionId={pane.sessionId}
+          active={active}
+          onClose={() => requestPaneDockClose('background-jobs')}
+          onOpenAgentSession={dockOpenAgentSession}
         />
       );
     }
@@ -295,6 +324,21 @@ export function useAppWorkbenchViews({
       moveWorkbenchSideGroup,
       moveWorkbenchSideView,
       openFileTab,
+      sideFileGuard,
+      renameProjectEntry,
+      renderFileProblems: (file) => (
+        <WorkbenchProblemsPane
+          projectPath={file.project}
+          active
+          activeFileRel={file.rel}
+          filter={{ ...problemsFilter, activeFileOnly: true }}
+          collapseNonce={problemsCollapseNonce}
+          onOpenFile={openFileTab}
+          onQuickFix={openProblemQuickFix}
+        />
+      ),
+      handleFileDirty,
+      registerEditorSaveHandle,
       paneProjectPathFor,
       renderRightView: (id, active, titleDragProps, pane) =>
         renderWorkbenchSideView('right', id, active, titleDragProps, pane),

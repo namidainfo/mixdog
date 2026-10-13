@@ -4,7 +4,7 @@
 // never collides with a sync mixdog-config lock (ELOCKCONTENDED).
 import { clean, hasOwn } from './session-text.mjs';
 import { modelSupportsServiceTier } from '../providers/model-service-tiers.mjs';
-import { openAiDirectSupportsFast } from '../providers/openai-direct-request.mjs';
+import { openAiDirectSupportsFast, openAiDirectSupportsUltrafast } from '../providers/openai-direct-request.mjs';
 import { supportsAnthropicFastMode } from '../../../shared/llm/anthropic-betas.mjs';
 
 const FAST_CAPABLE_PROVIDERS = new Set([
@@ -82,6 +82,13 @@ export function fastCapableFor(provider, model, effort = null, modelParameters =
   return false;
 }
 
+export function ultrafastCapableFor(provider, model) {
+  const p = clean(provider);
+  if (p === 'openai') return openAiDirectSupportsUltrafast(model);
+  if (p === 'openai-oauth') return modelSupportsServiceTier(model, 'ultrafast');
+  return false;
+}
+
 const HOSTED_WEB_SEARCH_BY_FAMILY = {
   openai: openAiModelSupportsHostedWebSearch,
   xai: grokModelSupportsHostedWebSearch,
@@ -116,6 +123,11 @@ export function saveModelSettings(cfgMod, route, { fastCapable = true, baseConfi
   else delete nextSetting.effort;
   if (fastCapable) nextSetting.fast = route.fast === true;
   else nextSetting.fast = false;
+  // Auto effort is on unless turned off: only the off state is stored.
+  if (hasOwn(route, 'autoEffort')) {
+    if (route.autoEffort === false) nextSetting.autoEffort = false;
+    else delete nextSetting.autoEffort;
+  }
   if (route.modelParameters && typeof route.modelParameters === 'object') {
     nextSetting.modelParameters = Object.fromEntries(
       Object.entries(route.modelParameters)

@@ -52,6 +52,7 @@ const _MODELSDEV_PROVIDER_ALIAS = {
   'anthropic-oauth': 'anthropic',
   'openai-oauth': 'openai',
   'grok-oauth': 'xai',
+  'mimo-oauth': 'xiaomi',
   gemini: 'google',
 };
 function _modelsDevProviderId(provider) {
@@ -64,7 +65,7 @@ function _modelsDevProviderId(provider) {
 // OpenAI and xAI SKUs at once. No catalog lists them under the relay's own
 // name, so a provider-keyed lookup finds nothing and the route silently prices
 // at zero — indistinguishable from a genuinely free local model.
-const _RELAY_PROVIDERS = new Set(['cursor-oauth', 'cursor-api', 'antigravity-oauth', 'opencode-go']);
+const _RELAY_PROVIDERS = new Set(['cursor-oauth', 'cursor-api', 'antigravity-oauth', 'opencode-go', 'muse-code-oauth']);
 
 // Which vendor actually served a relayed model, read off the model id. This is
 // a LAST resort: it runs only after the provider-keyed lookup has already
@@ -583,6 +584,8 @@ function lookupModelMetadata(originalId, provider, catalog, modelsDevCatalog) {
       preserveBaseLimits: !nativeLimitsAuthoritative,
     });
   }
+  if (!meta && String(provider || '').startsWith('custom-'))
+    return customCatalogDefaults(originalId, catalog, modelsDevCatalog);
   return meta
     ? {
         ...meta,
@@ -592,16 +595,39 @@ function lookupModelMetadata(originalId, provider, catalog, modelsDevCatalog) {
     : null;
 }
 
+// A user-defined (`custom-*`) provider is in no catalog under its own id, so
+// its discovered models match by bare model id (as listed, then without a
+// `vendor/` route prefix) under the vendor the id names. Only the reasoning
+// capabilities become defaults for the custom row (its overrides win); prices
+// and limits describe the vendor's own API, not the custom endpoint.
+function customCatalogDefaults(originalId, catalog, modelsDevCatalog) {
+  const listed = String(originalId || '');
+  for (const id of new Set([listed, listed.slice(listed.lastIndexOf('/') + 1)])) {
+    if (!id) continue;
+    const vendor = _relayedModelVendor(id) || _modelsDevProviderId(catalog[id]?.litellm_provider);
+    const meta = lookupModelMetadata(id, vendor, catalog, modelsDevCatalog);
+    if (!meta) continue;
+    return {
+      supportsReasoning: meta.supportsReasoning === true,
+      reasoningOptions: Array.isArray(meta.reasoningOptions) ? meta.reasoningOptions : [],
+      reasoningContentField: meta.reasoningContentField || null,
+    };
+  }
+  return null;
+}
+
 function _normalize(entry) {
   if (!entry || typeof entry !== 'object') return null;
   // OpenAI's Priority processing (since renamed Fast mode) columns.
   const fastPricing = litellmPricing(entry, '_priority');
+  const ultrafastPricing = litellmPricing(entry, '_ultrafast');
   return {
     contextWindow: entry.max_input_tokens || entry.max_tokens || null,
     outputTokens: entry.max_output_tokens || null,
     ...litellmPricing(entry),
     ...litellmMediaPricing(entry),
     ...(PRICING_RATE_KEYS.some((key) => fastPricing[key] != null) ? { fastPricing } : {}),
+    ...(PRICING_RATE_KEYS.some((key) => ultrafastPricing[key] != null) ? { ultrafastPricing } : {}),
     ...(entry.off_peak_multiplier ? { offPeakMultiplier: entry.off_peak_multiplier } : {}),
     supportsVision: entry.supports_vision === true,
     supportsFunctionCalling: entry.supports_function_calling === true,

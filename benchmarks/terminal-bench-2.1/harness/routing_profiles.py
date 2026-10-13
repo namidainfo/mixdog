@@ -19,7 +19,6 @@ PROFILE_ROLES = (
     "worker",
     "heavy-worker",
     "reviewer",
-    "debugger",
 )
 EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 ROUTE_FIELDS = {"provider", "model", "effort", "fast"}
@@ -29,7 +28,6 @@ AGENT_CONFIG_KEYS = {
     "worker": "worker",
     "heavy-worker": "heavy-worker",
     "reviewer": "reviewer",
-    "debugger": "debugger",
 }
 PROFILE_LEAD_PRESET_ID = "terminal-bench-route-profile-lead"
 
@@ -92,7 +90,8 @@ def validate_profile_document(document: Any) -> dict[str, Any]:
             or profile_fields - PROFILE_REQUIRED_FIELDS - PROFILE_OPTIONAL_FIELDS
         ):
             raise RouteProfileError(
-                f"profile {profile_name!r} must contain routes and optionally leadFallback"
+                f"profile {profile_name!r} must contain routes and optionally "
+                "leadFallback"
             )
         if "leadFallback" in profile:
             _validate_route(profile_name, "leadFallback", profile["leadFallback"])

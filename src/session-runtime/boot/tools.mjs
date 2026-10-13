@@ -16,6 +16,7 @@ import { envFlag } from '../../runtime/shared/env.mjs';
 // never see them); execution lives in internal-tool-executor.mjs.
 import { TOOL_DEFS as BROWSER_BRIDGE_TOOL_DEFS } from '../../runtime/browser-bridge/tool-defs.mjs';
 import { TOOL_DEFS as COMPUTER_BRIDGE_TOOL_DEFS } from '../../runtime/computer-bridge/tool-defs.mjs';
+import { TOOL_DEFS as TERMINAL_BRIDGE_TOOL_DEFS } from '../../runtime/terminal-bridge/tool-defs.mjs';
 import { TOOL_DEFS as OFFICE_TOOL_DEFS } from '../../runtime/office/tool-defs.mjs';
 import { TOOL_DEFS as MEDIA_TOOL_DEFS } from '../../runtime/media/tool-defs.mjs';
 import { TOOL_DEFS as TIDY_TOOL_DEFS } from '../../runtime/tidy/tool-defs.mjs';
@@ -26,7 +27,10 @@ import { createRoutedAgentTool } from '../agent-tool-routing.mjs';
 import { createGoalRuntime } from '../../runtime/agent/orchestrator/runtime-core/goal-runtime.mjs';
 import { collectStandaloneToolDefs } from '../../runtime/agent/orchestrator/runtime-core/tool-defs.mjs';
 import { createToolSurface } from '../tool-surface.mjs';
-import { contextStatusForSession, createContextStatus } from '../../runtime/agent/orchestrator/runtime-core/context-status.mjs';
+import {
+  contextStatusForSession,
+  createContextStatus,
+} from '../../runtime/agent/orchestrator/runtime-core/context-status.mjs';
 import { createInternalToolExecutor } from '../internal-tool-executor.mjs';
 import { STANDALONE_ROOT, STANDALONE_DATA_DIR } from '../runtime-paths.mjs';
 import { dataDirOf, workflowHelpers } from './shared.mjs';
@@ -140,22 +144,21 @@ function wireChannels(boot) {
 // Tool definitions, then the lead tool surface (workflow-gated agent tool,
 // pre-session preview, deferred replay) from tool-surface.mjs.
 function wireToolSurface(boot) {
-  const { rt, cfgMod, mgr, goalRuntime, agentTool, channels, featureDisallowedTools } = boot;
+  const { rt, cfgMod, mgr, goalRuntime, agentTool, featureDisallowedTools } = boot;
   const toolsStartedAt = performance.now();
   const { standaloneTools, internalToolDefs, agentToolNames } = collectStandaloneToolDefs({
     webSearchToolDefs: boot.webSearchToolDefs,
     memoryToolDefs: boot.memoryToolDefs,
-    channelToolDefs: boot.channelToolDefs,
     codeGraphToolDefs: boot.codeGraphToolDefs,
     browserToolDefs: BROWSER_BRIDGE_TOOL_DEFS,
     computerToolDefs: COMPUTER_BRIDGE_TOOL_DEFS,
+    terminalToolDefs: TERMINAL_BRIDGE_TOOL_DEFS,
     officeToolDefs: OFFICE_TOOL_DEFS,
     mediaToolDefs: MEDIA_TOOL_DEFS,
     tidyToolDefs: TIDY_TOOL_DEFS,
     setupToolDefs: SETUP_TOOL_DEFS,
     goalTools: goalRuntime.tools,
     agentTools: agentTool.tools,
-    isChannelTool: (name) => channels.isChannelTool(name),
     skillToolEnabled: !envFlag('MIXDOG_DISABLE_SKILLS'),
   });
   bootProfile('tools:ready', { ms: (performance.now() - toolsStartedAt).toFixed(1), count: standaloneTools.length });

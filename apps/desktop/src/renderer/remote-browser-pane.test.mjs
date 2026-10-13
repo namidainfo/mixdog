@@ -12,6 +12,11 @@ installTestDom(null, {
 });
 window.requestAnimationFrame = (callback) => window.setTimeout(callback, 0);
 window.cancelAnimationFrame = (handle) => window.clearTimeout(handle);
+// React's IE input polyfill runs on focus in this jsdom setup and needs these.
+window.HTMLElement.prototype.attachEvent = function attachEvent(_name, handler) {
+  this.propertyChange = handler;
+};
+window.HTMLElement.prototype.detachEvent = () => {};
 
 const { default: RemoteBrowserPane } = await import('./RemoteBrowserPane.tsx');
 const { createRemoteTouchController } = await import('./remote-browser-touch.ts');
@@ -86,7 +91,15 @@ async function showFrame(state) {
   await flush();
   const image = document.querySelector('.browser-remote-content img');
   image.getBoundingClientRect = () => ({
-    left: 0, top: 0, right: 200, bottom: 100, width: 200, height: 100, x: 0, y: 0, toJSON() {},
+    left: 0,
+    top: 0,
+    right: 200,
+    bottom: 100,
+    width: 200,
+    height: 100,
+    x: 0,
+    y: 0,
+    toJSON() {},
   });
   const content = document.querySelector('.browser-remote-content');
   content.setPointerCapture = () => {};
@@ -166,14 +179,24 @@ test('mouse maps to hover, press/release, wheel, and keyboard/IME through the sh
     const mouse = pointers(state);
     assert.deepEqual(
       mouse.map((input) => [input.phase, input.button]),
-      [['mouseMoved', 'none'], ['mousePressed', 'left'], ['mouseReleased', 'left']]
+      [
+        ['mouseMoved', 'none'],
+        ['mousePressed', 'left'],
+        ['mouseReleased', 'left'],
+      ]
     );
     assert.equal(mouse[1].x, 50);
     assert.equal(mouse[1].y, 25);
     assert.ok(state.controls.every(({ input }) => input.documentId === 'd1'));
 
     await act(async () => {
-      const wheel = new window.WheelEvent('wheel', { bubbles: true, cancelable: true, clientX: 50, clientY: 25, deltaY: 40 });
+      const wheel = new window.WheelEvent('wheel', {
+        bubbles: true,
+        cancelable: true,
+        clientX: 50,
+        clientY: 25,
+        deltaY: 40,
+      });
       content.dispatchEvent(wheel);
     });
     await flush();
@@ -186,11 +209,12 @@ test('mouse maps to hover, press/release, wheel, and keyboard/IME through the sh
     await flush();
     assert.deepEqual(state.controls.at(-1).input, { type: 'text', text: 'A', documentId: 'd1' });
     await act(async () => {
-      textarea.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Backspace', bubbles: true, cancelable: true }));
+      textarea.dispatchEvent(
+        new window.KeyboardEvent('keydown', { key: 'Backspace', bubbles: true, cancelable: true })
+      );
     });
     await flush();
     assert.deepEqual(state.controls.at(-1).input, { type: 'key', key: 'Backspace', documentId: 'd1' });
-
   } finally {
     await pane.unmount();
   }
@@ -201,7 +225,8 @@ test('touch maps tap, long-press, drag, and two-finger pan to mouse input', asyn
   const pane = await mount();
   try {
     const content = await showFrame(state);
-    const touch = (type, id, x, y) => content.dispatchEvent(pointerEvent(type, { pointerType: 'touch', pointerId: id, clientX: x, clientY: y }));
+    const touch = (type, id, x, y) =>
+      content.dispatchEvent(pointerEvent(type, { pointerType: 'touch', pointerId: id, clientX: x, clientY: y }));
 
     // Tap: move + press + release, left button, with an immediate local dot.
     await act(async () => {
@@ -212,7 +237,11 @@ test('touch maps tap, long-press, drag, and two-finger pan to mouse input', asyn
     await flush();
     assert.deepEqual(
       pointers(state).map((input) => [input.phase, input.button]),
-      [['mouseMoved', 'none'], ['mousePressed', 'left'], ['mouseReleased', 'left']]
+      [
+        ['mouseMoved', 'none'],
+        ['mousePressed', 'left'],
+        ['mouseReleased', 'left'],
+      ]
     );
 
     // Long-press without movement: right click.
@@ -223,7 +252,11 @@ test('touch maps tap, long-press, drag, and two-finger pan to mouse input', asyn
     await flush();
     assert.deepEqual(
       pointers(state).map((input) => [input.phase, input.button]),
-      [['mouseMoved', 'none'], ['mousePressed', 'right'], ['mouseReleased', 'right']]
+      [
+        ['mouseMoved', 'none'],
+        ['mousePressed', 'right'],
+        ['mouseReleased', 'right'],
+      ]
     );
 
     // One-finger drag: press at the start, streamed left-button moves, release last.
@@ -241,7 +274,9 @@ test('touch maps tap, long-press, drag, and two-finger pan to mouse input', asyn
     assert.equal(phases.indexOf('mouseReleased'), phases.length - 1);
     assert.equal(drag[1].x, 10);
     assert.equal(drag.at(-1).x, 90);
-    assert.ok(drag.slice(2, -1).every((input) => input.phase === 'mouseMoved' && input.button === 'left' && input.buttons === 1));
+    assert.ok(
+      drag.slice(2, -1).every((input) => input.phase === 'mouseMoved' && input.button === 'left' && input.buttons === 1)
+    );
 
     // Two-finger pan scrolls instead of clicking.
     state.controls.length = 0;
@@ -257,7 +292,10 @@ test('touch maps tap, long-press, drag, and two-finger pan to mouse input', asyn
     assert.equal(pointers(state).length, 0);
     const wheels = state.controls.map(({ input }) => input).filter((input) => input.type === 'wheel');
     assert.ok(wheels.length > 0);
-    assert.equal(wheels.reduce((sum, wheel) => sum + wheel.deltaY, 0), 20);
+    assert.equal(
+      wheels.reduce((sum, wheel) => sum + wheel.deltaY, 0),
+      20
+    );
   } finally {
     await pane.unmount();
   }
@@ -311,13 +349,26 @@ test('a document change applies metadata at once and drops input for the old doc
       // Coalesced motion is still waiting for its animation frame when the
       // desktop reports a different document.
       content.dispatchEvent(pointerEvent('pointermove', { clientX: 80, clientY: 25, buttons: 1 }));
-      state.listener(streamFrame({ seq: 2, documentId: 'd2', url: 'https://next.test/', title: 'Next', canGoBack: true, image: undefined }));
+      state.listener(
+        streamFrame({
+          seq: 2,
+          documentId: 'd2',
+          url: 'https://next.test/',
+          title: 'Next',
+          canGoBack: true,
+          image: undefined,
+        })
+      );
     });
     assert.equal(document.querySelector('.browser-pane-address').value, 'https://next.test/');
     assert.equal(document.querySelector('button[aria-label="Back"]').disabled, false);
     await flush();
     const sent = pointers(state);
-    assert.deepEqual(sent.map((input) => input.phase), ['mouseReleased'], 'pending move dropped, press released');
+    assert.deepEqual(
+      sent.map((input) => input.phase),
+      ['mouseReleased'],
+      'pending move dropped, press released'
+    );
     assert.equal(sent[0].documentId, 'd1');
     state.controls.length = 0;
     await act(async () => content.dispatchEvent(pointerEvent('pointermove', { clientX: 20, clientY: 20, buttons: 0 })));
@@ -343,6 +394,206 @@ test('a page-changed control error is not shown, and a reconnect restarts the st
     await act(async () => window.dispatchEvent(new window.Event('mixdog:remote-connection-ready')));
     assert.equal(state.streams.length, count + 1);
     assert.ok(state.streams.at(-1)[1]);
+  } finally {
+    await pane.unmount();
+  }
+});
+
+test('a browserParity host adds a tab strip whose selection moves the stream and whose + opens a tab', async () => {
+  const state = fakeApi();
+  const tabsSeen = { watch: [], opened: [], closed: [], push: null };
+  const list = [
+    { id: 'main-browser-a', title: 'Alpha', url: 'https://a.test/', loading: false },
+    { id: 'main-browser-b', title: 'Beta', url: 'https://b.test/', loading: false },
+  ];
+  Object.assign(window.mixdogDesktop, {
+    remoteBrowserTabs: async (watch) => {
+      tabsSeen.watch.push(watch);
+      return list;
+    },
+    onRemoteBrowserTabs: (listener) => {
+      tabsSeen.push = listener;
+      return () => {
+        tabsSeen.push = null;
+      };
+    },
+    remoteBrowserOpenTab: async (url) => {
+      tabsSeen.opened.push(url);
+      return { id: 'main-browser-c', title: '', url, loading: true };
+    },
+    remoteBrowserCloseTab: async (id) => {
+      tabsSeen.closed.push(id);
+    },
+  });
+  const pane = await mount({ sessionId: 'main-browser-a', active: true });
+  try {
+    await flush();
+    assert.deepEqual(tabsSeen.watch, [true]);
+    const selectors = [...document.querySelectorAll('[role="tab"]')];
+    assert.deepEqual(
+      selectors.map((tab) => tab.getAttribute('data-page-id')),
+      ['main-browser-a', 'main-browser-b']
+    );
+    assert.equal(state.streams.at(-1)[0], 'main-browser-a');
+
+    // Picking the sibling retargets this client's stream, and the old one stops.
+    await act(async () => selectors[1].click());
+    await flush();
+    assert.equal(state.streams.at(-1)[0], 'main-browser-b');
+    assert.ok(state.streams.some(([id, options]) => id === 'main-browser-a' && options === null));
+
+    // A pushed list replaces the strip.
+    await act(async () => tabsSeen.push([list[1]]));
+    assert.equal(document.querySelectorAll('[role="tab"]').length, 1);
+    await act(async () => tabsSeen.push(list));
+
+    // "+" waits for an address, then opens and follows the new tab.
+    await act(async () => document.querySelector('button[aria-label="New tab"]').click());
+    const address = document.querySelector('input[aria-label="Address bar"]');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(address, 'example.com');
+      address.dispatchEvent(new window.Event('input', { bubbles: true }));
+      // Without a native input event here, React's polyfill reads value changes off propertychange.
+      address.propertyChange({ propertyName: 'value', target: address });
+    });
+    await act(async () => address.form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })));
+    await flush();
+    assert.equal(tabsSeen.opened.length, 1);
+    assert.match(tabsSeen.opened[0], /example\.com/);
+    assert.equal(state.streams.at(-1)[0], 'main-browser-c');
+
+    // Closing the streamed tab leaves it first, then releases it.
+    await act(async () => document.querySelector('button[aria-label^="Close tab: "]:last-of-type').click());
+    await flush();
+    assert.equal(tabsSeen.closed.length, 1);
+  } finally {
+    await pane.unmount();
+  }
+  assert.deepEqual(tabsSeen.watch, [true, false]);
+});
+
+function tabHost(list) {
+  const seen = { watch: [], closed: [], log: [] };
+  const stream = window.mixdogDesktop.remoteBrowserStream;
+  Object.assign(window.mixdogDesktop, {
+    remoteBrowserStream: (sessionId, options) => {
+      seen.log.push(`stream:${sessionId}:${options ? 'on' : 'off'}`);
+      return stream(sessionId, options);
+    },
+    remoteBrowserTabs: async (watch) => {
+      seen.watch.push(watch);
+      return list;
+    },
+    onRemoteBrowserTabs: () => () => {},
+    remoteBrowserCloseTab: async (id) => {
+      seen.log.push(`close:${id}`);
+      seen.closed.push(id);
+    },
+  });
+  return seen;
+}
+
+test('closing the streamed tab leaves it for a neighbour and is not restarted after the release', async () => {
+  const state = fakeApi();
+  const seen = tabHost([
+    { id: 'main-browser-a', title: 'Alpha', url: 'https://a.test/', loading: false },
+    { id: 'main-browser-b', title: 'Beta', url: 'https://b.test/', loading: false },
+    { id: 'main-browser-c', title: 'Gamma', url: 'https://c.test/', loading: false },
+  ]);
+  const pane = await mount({ sessionId: 'main-browser-a', active: true });
+  try {
+    await flush();
+    // A sibling that is not streamed closes without moving the stream.
+    const streamed = state.streams.length;
+    await act(async () => document.querySelector('button[aria-label="Close tab: Gamma"]').click());
+    await flush();
+    assert.deepEqual(seen.closed, ['main-browser-c']);
+    assert.equal(state.streams.length, streamed);
+    assert.equal(document.querySelectorAll('[role="tab"]').length, 2);
+
+    seen.log.length = 0;
+    await act(async () => document.querySelector('button[aria-label="Close tab: Alpha"]').click());
+    await flush();
+    assert.deepEqual(seen.closed, ['main-browser-c', 'main-browser-a']);
+    const release = seen.log.indexOf('close:main-browser-a');
+    assert.ok(release >= 0);
+    assert.ok(seen.log.includes('stream:main-browser-a:off'));
+    assert.ok(!seen.log.slice(release).includes('stream:main-browser-a:on'), 'the released page is not restarted');
+    assert.equal(state.streams.at(-1)[0], 'main-browser-b');
+    assert.ok(state.streams.at(-1)[1]);
+    assert.deepEqual(
+      [...document.querySelectorAll('[role="tab"]')].map((tab) => [
+        tab.getAttribute('data-page-id'),
+        tab.getAttribute('aria-selected'),
+      ]),
+      [['main-browser-b', 'true']]
+    );
+    // A frame for the released page no longer reaches this client.
+    await act(async () => state.listener(streamFrame({ sessionId: 'main-browser-a', seq: 7 })));
+    await flush();
+    assert.ok(!state.acks.some(([id]) => id === 'main-browser-a'));
+  } finally {
+    await pane.unmount();
+  }
+});
+
+test('panes share one host-side tab watch that stops with the last pane', async () => {
+  fakeApi();
+  const seen = tabHost([{ id: 'main-browser-a', title: 'Alpha', url: 'https://a.test/', loading: false }]);
+  const first = await mount({ sessionId: 'main-browser-a', active: true });
+  const second = await mount({ sessionId: 'main-browser-b', active: true });
+  try {
+    await flush();
+    assert.deepEqual(seen.watch, [true, true]);
+    await first.unmount();
+    assert.deepEqual(seen.watch, [true, true]);
+    await second.rerender({ sessionId: 'main-browser-b', active: false });
+    assert.deepEqual(seen.watch, [true, true, false]);
+    await second.rerender({ sessionId: 'main-browser-b', active: true });
+    await flush();
+    assert.deepEqual(seen.watch, [true, true, false, true]);
+  } finally {
+    await first.unmount().catch(() => {});
+    await second.unmount();
+  }
+  assert.deepEqual(seen.watch, [true, true, false, true, false]);
+});
+
+test('a host without the tab members keeps the single-stream pane', async () => {
+  fakeApi();
+  const pane = await mount({ sessionId: 'main-browser-a', active: true });
+  try {
+    await flush();
+    assert.equal(document.querySelector('[role="tablist"]'), null);
+    assert.equal(document.querySelector('button[aria-label="More actions"], .dock-overflow-trigger'), null);
+  } finally {
+    await pane.unmount();
+  }
+});
+
+test('stored-login suggestions come from the host and filling names only the credential id', async () => {
+  const state = fakeApi();
+  const filled = [];
+  Object.assign(window.mixdogDesktop, {
+    browserCredentialSuggestions: async () => [{ id: 'c'.repeat(24), label: 'alice@example.com' }],
+    browserCredentialFill: async (sessionId, credentialId) => {
+      filled.push([sessionId, credentialId]);
+      return { usernameFilled: true, passwordFilled: true };
+    },
+  });
+  const pane = await mount({ sessionId: 's', active: true });
+  try {
+    await showFrame(state);
+    await flush();
+    const menu = document.querySelector('[aria-label="More actions"]');
+    assert.ok(menu, 'the overflow menu appears once a suggestion exists');
+    await act(async () => menu.click());
+    const item = [...document.querySelectorAll('[role="menuitem"]')].find((node) =>
+      /stored credentials/.test(node.textContent)
+    );
+    await act(async () => item.click());
+    await flush();
+    assert.deepEqual(filled, [['s', 'c'.repeat(24)]]);
   } finally {
     await pane.unmount();
   }

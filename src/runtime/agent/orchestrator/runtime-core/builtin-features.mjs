@@ -21,12 +21,15 @@ import { readBridgeDiscovery } from '../../../bridge-discovery.mjs';
 import { HEADLESS_MODEL_TOOL_NAMES, HEADLESS_TOOL_PROFILE, normalizeToolProfile } from './tool-profile.mjs';
 import { DEFERRED_DEFAULT_LEAD_TOOLS } from './tool-catalog-data.mjs';
 import { gitExecutablePresent } from '../../../shared/path-executable.mjs';
+import { onnxRuntimeSupported } from '../../../shared/onnx-runtime-support.mjs';
+import { setBuiltinInstalledInConfig, withGrandfatheredBuiltins } from '../../../shared/builtin-grandfathering.mjs';
 
 // Browser Use / Computer Use have no install marker: the desktop app publishes
 // a loopback bridge discovery file while the feature is on. The same file
 // names gate the session tool surface in the bridge clients.
 const BROWSER_BRIDGE_DISCOVERY_FILE = 'browser-bridge.json';
 const COMPUTER_BRIDGE_DISCOVERY_FILE = 'computer-bridge.json';
+const TERMINAL_BRIDGE_DISCOVERY_FILE = 'terminal-bridge.json';
 
 function bridgePresent(file) {
   try {
@@ -36,8 +39,14 @@ function bridgePresent(file) {
   }
 }
 
-export const INSTALLABLE_BUILTIN_IDS = Object.freeze(['git', 'memory', 'office', 'tidy', 'localProvider', 'autoEffort']);
-const GRANDFATHERED_BUILTIN_IDS = Object.freeze(['git', 'memory', 'office']);
+export const INSTALLABLE_BUILTIN_IDS = Object.freeze([
+  'git',
+  'memory',
+  'office',
+  'tidy',
+  'localProvider',
+  'autoEffort',
+]);
 
 /** Model-facing activation for one gated feature: an explicit MIXDOG_FEATURE_*
  *  env override (headless/bench) wins, otherwise the install marker and the
@@ -78,13 +87,14 @@ export function builtinFeatureActive(configLike, id) {
   if (id === 'localProvider') {
     return builtinInstalled(configLike, 'localProvider') && moduleEnabled(configLike, 'localProvider', true);
   }
-  // Auto effort adds no tools: it picks each turn's reasoning effort from the
-  // local effort judge. Installing verifies the judge model is on disk.
+  // Auto effort adds no tools: it picks the reasoning effort of each turn and
+  // step from the local effort judge, only on models that can change it
+  // without breaking the prompt cache. It is on unless the user turns it off:
+  // the judge model downloads at boot, and until it is on disk every call keeps
+  // the user's effort.
   if (id === 'autoEffort') {
-    return (
-      featureEnvOverride('MIXDOG_FEATURE_AUTO_EFFORT') ??
-      (builtinInstalled(configLike, 'autoEffort') && moduleEnabled(configLike, 'autoEffort', true))
-    );
+    if (!onnxRuntimeSupported()) return false;
+    return featureEnvOverride('MIXDOG_FEATURE_AUTO_EFFORT') ?? moduleEnabled(configLike, 'autoEffort', true);
   }
   // Media Studio is a hidden built-in like setup: no Settings card, no install
   // step, always on. The lane catalog ships with the runtime and sign-in happens
@@ -103,6 +113,9 @@ export function builtinFeatureActive(configLike, id) {
   if (id === 'computer') {
     return featureEnvOverride('MIXDOG_FEATURE_COMPUTER') ?? bridgePresent(COMPUTER_BRIDGE_DISCOVERY_FILE);
   }
+  if (id === 'terminal') {
+    return featureEnvOverride('MIXDOG_FEATURE_TERMINAL') ?? bridgePresent(TERMINAL_BRIDGE_DISCOVERY_FILE);
+  }
   return false;
 }
 
@@ -113,10 +126,17 @@ export function builtinFeatureActive(configLike, id) {
  *  overrides), which the caller passes in. */
 export function featureDisallowedToolsFor(
   configLike,
-  { browserAvailable = false, computerAvailable = false, toolProfile = 'interactive', gitAvailable } = {}
+  {
+    browserAvailable = false,
+    computerAvailable = false,
+    terminalAvailable = false,
+    toolProfile = 'interactive',
+    gitAvailable,
+  } = {}
 ) {
   const browser = featureEnvOverride('MIXDOG_FEATURE_BROWSER') ?? browserAvailable === true;
   const computer = featureEnvOverride('MIXDOG_FEATURE_COMPUTER') ?? computerAvailable === true;
+  const terminal = featureEnvOverride('MIXDOG_FEATURE_TERMINAL') ?? terminalAvailable === true;
   const denied = [
     ...(builtinFeatureActive(configLike, 'webSearch') ? [] : ['web_search', 'web_fetch']),
     ...(builtinFeatureActive(configLike, 'memory') ? [] : ['memory', 'recall']),
@@ -124,6 +144,7 @@ export function featureDisallowedToolsFor(
     ...(builtinFeatureActive(configLike, 'git') ? [] : ['github']),
     ...(browser ? [] : ['browser', 'browser_devtools']),
     ...(computer ? [] : ['computer']),
+    ...(terminal ? [] : ['terminal']),
     ...(builtinFeatureActive(configLike, 'office') ? [] : ['office']),
     ...(builtinFeatureActive(configLike, 'media') ? [] : ['media']),
     ...(builtinFeatureActive(configLike, 'tidy') ? [] : ['tidy']),
@@ -156,35 +177,4 @@ export function localGitToolsActive(configLike, { gitAvailable } = {}) {
   );
 }
 
-export function setBuiltinInstalledInConfig(configLike, id, installed = true) {
-  const next = { ...(configLike || {}) };
-  next.builtins = { ...(next.builtins || {}) };
-  if (installed === true) {
-    next.builtins[id] = { ...(next.builtins[id] || {}), installed: true };
-  } else {
-    const entry = { ...(next.builtins[id] || {}) };
-    delete entry.installed;
-    next.builtins[id] = entry;
-  }
-  return next;
-}
-
-/** Stamp or grandfather the `builtins` section on config adoption. Returns the
- *  same object when the section already exists, so callers can use identity to
- *  decide whether a persist is needed. */
-export function withGrandfatheredBuiltins(configLike) {
-  const config = configLike && typeof configLike === 'object' ? configLike : {};
-  if (config.builtins && typeof config.builtins === 'object') return config;
-  let next = { ...config, builtins: {} };
-  // User-mark keys only: a default in-memory config may carry harmless
-  // structural keys before onboarding ever writes, and must stay "fresh".
-  const existingProfile = ['presets', 'providers', 'modules', 'default', 'memoryTools', 'recap'].some(
-    (key) => config[key] !== undefined
-  );
-  if (existingProfile) {
-    for (const id of GRANDFATHERED_BUILTIN_IDS) {
-      next = setBuiltinInstalledInConfig(next, id, true);
-    }
-  }
-  return next;
-}
+export { setBuiltinInstalledInConfig, withGrandfatheredBuiltins };

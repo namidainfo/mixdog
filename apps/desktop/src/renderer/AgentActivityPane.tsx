@@ -3,17 +3,19 @@ import type React from 'react';
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { InitialSurface } from './InitialSurface';
 import { AGENT_GROUP_EXPANSION_EVENT, AgentGroupsMenu, useHiddenAgentGroups } from './agent-group-visibility';
-import { RowOverflowMenu } from './RowOverflowMenu';
+import { RowOverflowMenu, rowOverflowHostProps } from './RowOverflowMenu';
 import { beginBootSurface, reportBootSurfaceReady } from './boot-metrics';
 import { beginPaneDrag, finishPaneDrag, type PaneDragSession } from './pane-drag-session';
 import type { DesktopAgentPoolRow, DesktopSessionSummary } from '../shared/contract';
 import {
   desktopAgentActivityState,
   hasPendingDesktopAgentWork,
+  type DesktopAgentActivityState,
 } from '../shared/agent-activity';
 import { sessionSummaryTitle } from '../shared/session-title.mjs';
 import { t } from './i18n';
-import { modelDisplayName, ModelRouteLabel, ProviderIcon } from './provider-display';
+import { cachedAutoEffortCapable } from './auto-effort-store';
+import { modelDisplayName, ModelRouteLabel, ProviderIcon, routeDaybreakBlue } from './provider-display';
 import { formatWorkElapsed, timeMs } from './transcript-primitives';
 import { TextShimmer } from './transcript-primitives';
 import {
@@ -38,9 +40,10 @@ export {
   preloadAgentPool,
 } from './agent-activity-model';
 
-function AgentPoolRow({
+export function AgentPoolRow({
   agent,
   clock,
+  stateOverride,
   ownerSessionId,
   depth = 0,
   parentSessionId = '',
@@ -58,6 +61,9 @@ function AgentPoolRow({
 }: {
   agent: DesktopAgentPoolRow;
   clock: number;
+  /** A lifecycle state the caller already resolved (the composer island's
+   *  rows, which merge worker and job entries); the sidebar derives its own. */
+  stateOverride?: DesktopAgentActivityState;
   ownerSessionId: string;
   /** Generations below the group heading: 0 for the visible root row (the Lead
    *  when the pool publishes one), 1 for its direct children, and so on. */
@@ -83,7 +89,7 @@ function AgentPoolRow({
   // stopped agent can never borrow the running timer or the "Completed" notice
   // (an agent cancelled mid-turn still carries stage `running`, and one
   // cancelled while waiting still carries stage `queued`).
-  const state = desktopAgentActivityState(agent, { unread, waitingForTasks });
+  const state = stateOverride ?? desktopAgentActivityState(agent, { unread, waitingForTasks });
   const queued = state === 'queued';
   const running = state === 'running';
   const role = agentRoleLabel(agent.agent || agent.tag);
@@ -104,6 +110,8 @@ function AgentPoolRow({
   let elapsed = t('Idle');
   if (queued) elapsed = t('Queued');
   else if (running) elapsed = workMeta;
+  // Blocked on the user: what it waits for, never a running timer.
+  else if (state === 'needs-user') elapsed = t('Waiting for approval');
   else if (state === 'cancel-unconfirmed') elapsed = t('Cancel unconfirmed');
   else if (state === 'cancelled') elapsed = t('Cancelled');
   // A finished turn reads as a plain completion (user: 태스크 없애고 컴플리트만).
@@ -112,6 +120,7 @@ function AgentPoolRow({
   else if (state === 'unknown') elapsed = t('Unknown');
   const modelLabel = modelDisplayName(String(agent.model || ''), String(agent.provider || ''));
   const effortValue = String(agent.effort || '').trim();
+  const autoEffortCapable = cachedAutoEffortCapable(String(agent.provider || ''), String(agent.model || ''));
   const prefetch = () => {
     if (sessionId) onPrefetchSession?.(lead ? ownerSessionId : sessionId);
   };
@@ -195,10 +204,19 @@ function AgentPoolRow({
           {lead && descendantCount > 0 && <span className="dock-review-count">{descendantCount}</span>}
         </span>
         <small className="agent-route-summary" title={String(agent.model || '') || undefined}>
-          <ModelRouteLabel model={modelLabel} effort={effortValue} fast={agent.fast === true} />
+          <ModelRouteLabel
+            model={modelLabel}
+            effort={effortValue}
+            fast={agent.fast === true}
+            ultra={(agent.modelParameters as Record<string, string> | undefined)?.serviceTier === 'ultrafast'}
+            blue={routeDaybreakBlue(agent.modelParameters as Record<string, string> | undefined)}
+            autoEffortCapable={autoEffortCapable}
+            autoEffort={agent.autoEffort}
+          />
         </small>
       </span>
       <span className="agent-activity-status">
+        {/* biome-ignore lint/a11y/useAriaPropsSupportedByRole: aria-label on <time> gives the elapsed duration an explicit accessible name */}
         <time
           className="agent-activity-elapsed"
           aria-label={elapsed}
@@ -343,7 +361,9 @@ function AgentActivityTree({
           ownerSessionId={group.ownerId}
           descendantCount={descendantCount}
           unread={unreadSessionIds?.has(node.sessionId) === true}
-          waitingForTasks={flattenAgentActivityNodes(node.children).some(({ agent }) => hasPendingDesktopAgentWork(agent))}
+          waitingForTasks={flattenAgentActivityNodes(node.children).some(({ agent }) =>
+            hasPendingDesktopAgentWork(agent)
+          )}
           onPrefetchSession={onPrefetchSession}
           onOpenLeadSession={onOpenLeadSession}
           onOpenSession={onOpenSession}
@@ -457,7 +477,7 @@ function renderAgentActivityGroup({
   const setGroupCollapsed = (collapsed: boolean): void => setSessionExpanded(group.ownerId, !collapsed);
   return (
     <section key={group.ownerId} className="workflows-models" data-agent-owner-session-id={group.ownerId}>
-      <div className="workflows-section-head">
+      <div className="workflows-section-head" {...rowOverflowHostProps()}>
         <button
           type="button"
           className="agent-session-heading"

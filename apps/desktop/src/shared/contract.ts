@@ -2,8 +2,14 @@ import type { GithubRequest, GithubResult } from '../../../../src/runtime/github
 import type { FileLaunchConfirmation, LocalLinkOpened } from './local-files';
 import type { DesktopFeedbackInput, DesktopFeedbackReceipt } from './contract-feedback';
 import type {
+  DesktopComputerInputAccess,
+  DesktopComputerPermissionPane,
+  DesktopComputerReadiness,
+} from './contract-computer';
+import type {
   DesktopAbortOptions,
   DesktopAgentPoolRow,
+  DesktopSessionContentMatch,
   DesktopModelCatalogOptions,
   DesktopModelOption,
   DesktopModelSelection,
@@ -27,6 +33,7 @@ import type { DesktopSettingKey, DesktopSettings } from './contract-settings';
 import type { ActivityRailPinsState } from './activity-rail-pins';
 import type { ProviderModelsChange } from './provider-models';
 import type { DesktopSessionOpenDelivery, DesktopSessionOpenResult } from './session-open-request';
+import type { SettingsChange } from './settings-changed';
 import type {
   DesktopBrowserCredentialFillResult,
   DesktopBrowserCredentialSuggestion,
@@ -39,12 +46,14 @@ import type {
   DesktopBrowserOpenRequest,
   DesktopBrowserPageControl,
   DesktopBrowserPageFrame,
+  DesktopBrowserPageIdentity,
   DesktopBrowserPageResample,
   DesktopBrowserRemoteViewerChange,
   DesktopBrowserViewportConfig,
   DesktopRemoteBrowserControl,
   DesktopRemoteBrowserStreamFrame,
   DesktopRemoteBrowserStreamOptions,
+  DesktopRemoteBrowserTab,
 } from './contract-browser';
 import type {
   DesktopGitBranch,
@@ -82,7 +91,11 @@ import type {
   DesktopLspStatusEvent,
   DesktopProjectSummary,
   DesktopRemoteAccessInfo,
+  DesktopRemoteAccessSettings,
   DesktopRemoteClientClaim,
+  DesktopRemoteHost,
+  DesktopRemotePairCode,
+  DesktopRemotePairCodeUnsupported,
   DesktopRendererDiagnostic,
   DesktopSessionSummary,
   DesktopTextFileEncoding,
@@ -101,8 +114,10 @@ export * from './contract-capabilities';
 export * from './contract-settings';
 export * from './activity-rail-pins';
 export * from './provider-models';
+export * from './settings-changed';
 export * from './contract-browser';
 export * from './contract-git';
+export * from './contract-computer';
 export * from './contract-workspace';
 
 export type { GithubRequest, GithubResult } from '../../../../src/runtime/github/contract.mjs';
@@ -112,6 +127,10 @@ export type { GithubRequest, GithubResult } from '../../../../src/runtime/github
 export interface DesktopApi {
   /** Immutable process timeline identity injected before renderer modules run. */
   readonly bootContext?: DesktopBootContext;
+  /** The host accepts per-route Auto reasoning: `autoEffort` in model
+   *  selections and `+noauto` automation model refs. Absent on an older
+   *  remote host, which rejects both. */
+  readonly routeAutoEffort?: boolean;
   chooseProject(): Promise<string | null>;
   chooseFile?(defaultPath?: string | null): Promise<{
     projectPath: string;
@@ -122,6 +141,10 @@ export interface DesktopApi {
   chooseWorkspace?(): Promise<DesktopWorkspace | null>;
   saveWorkspace?(workspaceFile: string | null, folders: DesktopWorkspaceFolder[]): Promise<DesktopWorkspace | null>;
   readEditorSettings?(projectPath: string, relPath: string, workspaceFile?: string): Promise<DesktopEditorSettings>;
+  readMarkdownDefaultView?(): Promise<DesktopEditorSettings['markdownDefaultView']>;
+  writeMarkdownDefaultView?(
+    view: DesktopEditorSettings['markdownDefaultView']
+  ): Promise<DesktopEditorSettings['markdownDefaultView']>;
   startProject(projectPath: string): Promise<SessionSnapshot>;
   startProjectTask(projectPath: string): Promise<SessionSnapshot>;
   startTask(): Promise<SessionSnapshot>;
@@ -144,6 +167,10 @@ export interface DesktopApi {
   /** Desktop-only: a loopback http address that serves a local web page (and
    *  the web assets beside it) for the session browser pane. */
   localPageUrl?(projectPath: string, relPath: string, accessToken?: string): Promise<string>;
+  /** Remote-only counterpart of `localPageUrl`: a self-contained HTML document
+   *  (relative assets inlined over the encrypted RPC lane) for a sandboxed
+   *  `srcdoc` frame, since a browser cannot reach the host's loopback server. */
+  localPageSource?(projectPath: string, relPath: string, accessToken?: string): Promise<string>;
   /** Settings → About: gh-CLI star state for the mixdog repo. Desktop-only;
    *  the remote shim omits both and the Star button falls back to the repo
    *  link. */
@@ -156,10 +183,18 @@ export interface DesktopApi {
   /** Extensions → Office: LibreOffice dependency probe + guided install. */
   libreOfficeStatus?(): Promise<DesktopLibreOfficeStatus>;
   installLibreOffice?(): Promise<DesktopLibreOfficeStatus>;
+  /** Extensions → Computer Use: what this OS still needs before the tool runs
+   *  fully (Linux capabilities, macOS grants). Desktop-only. */
+  computerReadiness?(): Promise<DesktopComputerReadiness>;
+  requestLinuxInputAccess?(): Promise<DesktopComputerInputAccess>;
+  openComputerPermissionSettings?(pane: DesktopComputerPermissionPane): Promise<void>;
   githubCliStatus?(): Promise<DesktopGithubCliStatus>;
   installGithubCli?(): Promise<DesktopGithubCliStatus>;
   githubCliLoginStart?(): Promise<DesktopGithubCliLoginFlow>;
   githubCliLoginStatus?(flowId: string): Promise<DesktopGithubCliLoginFlow>;
+  /** Lets gh open the device page; false when it already did. With
+   *  `openBrowser: false` (remote client) the host opens nothing. */
+  githubCliLoginOpenBrowser?(flowId: string, options?: { openBrowser?: boolean }): Promise<boolean>;
   githubCliLoginCancel?(flowId: string): Promise<void>;
   githubCliLogout?(): Promise<DesktopGithubCliStatus>;
   githubCliAccount?(): Promise<DesktopGithubCliAccount>;
@@ -180,6 +215,9 @@ export interface DesktopApi {
     mtimeMs: number;
     binary: boolean;
     tooLarge: boolean;
+    /** Oversized or invalidly encoded text: viewable, never saved. */
+    readOnly?: boolean;
+    readOnlyReason?: 'encoding';
     encoding: DesktopTextFileEncoding;
   }>;
   previewProjectFile?(
@@ -278,27 +316,76 @@ export interface DesktopApi {
   subscribeSessions?(listener: (sessions: DesktopSessionSummary[]) => void): () => void;
   /** Event-driven process-global agent lifecycle pool. */
   listAgentPool?(): Promise<DesktopAgentPoolRow[]>;
+  /** Full-text search over session message content. */
+  searchSessionContent?(query: string): Promise<DesktopSessionContentMatch[]>;
   subscribeAgentPool?(listener: (agents: DesktopAgentPoolRow[]) => void): () => void;
   renameSession(sessionId: string, title: string): Promise<void>;
+  /** Switches an existing session to `route` in place (quota exhausted); starts no turn. */
+  continueSessionInModel(sessionId: string, route: DesktopModelSelection): Promise<boolean>;
+  /** Arms the session's auto-resume at its quota reset time. */
+  scheduleQuotaResume(sessionId: string): Promise<boolean>;
+  /** Drops a waiting auto-resume; the session stays stopped. */
+  cancelQuotaResume(sessionId: string): Promise<boolean>;
+  /** Whether quota-stopped sessions resume by themselves at reset (default true). */
+  getQuotaAutoResume(): Promise<boolean>;
+  /** The device name this window's own actions are stamped with (the host's
+   *  name locally, the paired client's name on a remote surface). */
+  viewerDevice?(): Promise<string>;
+  setQuotaAutoResume(enabled: boolean): Promise<boolean>;
   setSessionArchived?(sessionId: string, archived: boolean): Promise<void>;
+  setSessionFavorite?(sessionId: string, favorite: boolean): Promise<void>;
   deleteSession(sessionId: string): Promise<SessionSnapshot>;
   /** /inherit — copy this conversation into a NEW session id that runs on the
    *  supplied (currently selected) model. The source session is left as it is,
    *  so both transcripts continue from the same point. */
   inheritSession(
     sourceSessionId: string,
-    route?: DesktopModelSelection | null
+    route?: DesktopModelSelection | null,
+    options?: { compact: boolean } | null
   ): Promise<{ sessionId: string; snapshot: SessionSnapshot | null }>;
   /** Settings → Connection: pairing QRs + URLs for the phone remote. Only
    *  the in-process desktop implements it (null while the bridge is off);
    *  the remote shim omits it — a phone never needs its own pairing card. */
-  getRemoteAccessInfo?(): Promise<DesktopRemoteAccessInfo | null>;
+  /** `activate: false` only reads: it never starts the relay or activates
+   *  remote access on an install that has not used it yet. Default true. */
+  getRemoteAccessInfo?(options?: { activate?: boolean }): Promise<DesktopRemoteAccessInfo | null>;
   /** Settings → Connection: revoke every paired phone by minting a new
    *  pairing token and restarting the bridge/relay legs. */
   rotateRemoteAccess?(): Promise<DesktopRemoteAccessInfo | null>;
   /** Settings → Connection: revoke one browser while preserving every other
    *  browser's individual credential. */
   revokeRemoteAccessClient?(clientId: string): Promise<DesktopRemoteAccessInfo | null>;
+  /** "Use this PC from other devices" and this PC's name. `defaultName` is the OS hostname. */
+  getRemoteAccessSettings?(): Promise<DesktopRemoteAccessSettings>;
+  /** Off closes the relay link (no codes, no claims) but keeps paired devices. */
+  setRemoteAccessEnabled?(enabled: boolean): Promise<DesktopRemoteAccessSettings>;
+  /** Trimmed, max 64 chars; empty resets to `defaultName`. */
+  setRemotePcName?(name: string): Promise<DesktopRemoteAccessSettings>;
+  /** Fires when the switch or the PC name changes. */
+  subscribeRemoteAccessSettings?(listener: (settings: DesktopRemoteAccessSettings) => void): () => void;
+  /** Local nickname for a paired device on this PC; empty clears it. Refetch
+   *  `getRemoteAccessInfo` for the updated list. */
+  setRemoteClientAlias?(clientId: string, alias: string): Promise<void>;
+  /** Local alias for a saved PC; empty resets to the name it announced. */
+  renameRemoteHost?(id: string, name: string): Promise<void>;
+  /** "Connect to another PC": hosts saved on this machine. Native desktop only. */
+  listRemoteHosts?(): Promise<DesktopRemoteHost[]>;
+  /** Redeems the main PC's 6-digit code, saves that host and opens its remote
+   *  window, which asks the host for approval. */
+  connectRemoteHostByCode?(code: string): Promise<DesktopRemoteHost>;
+  /** Settings → Connection → Connect to this PC: the 6-digit code. 'ensure'
+   *  returns the live one (minting it if needed), 'renew' replaces it, and
+   *  'release' withdraws it when the screen closes. */
+  getRemotePairCode?(
+    action: 'ensure' | 'renew' | 'release'
+  ): Promise<DesktopRemotePairCode | DesktopRemotePairCodeUnsupported | null>;
+  /** A remote window's PC switcher asked this machine to show Settings →
+   *  Connection → Connect to another PC. */
+  subscribeShowConnectionSettings?(listener: () => void): () => void;
+  /** Opens (or focuses) a saved host's remote window. */
+  openRemoteHost?(id: string): Promise<DesktopRemoteHost[]>;
+  /** Closes the host's window and clears its stored pairing. */
+  forgetRemoteHost?(id: string): Promise<DesktopRemoteHost[]>;
   /** Web Push. Only the relay shim implements these — an Electron window has
    *  the taskbar/dock signal instead, and its absence is what hides the
    *  notification toggle outside the web app. */
@@ -315,12 +402,14 @@ export interface DesktopApi {
   resyncSessionState?(sessionId: string): void;
   /** Register every visible session for owner-pipe mirroring. */
   setVisibleSessions?(sessionIds: string[]): Promise<boolean>;
-  /** `includeIgnored` also searches gitignored folders (chat file links). */
+  /** `includeIgnored` also searches gitignored folders (chat file links);
+   *  `includeDirectories` also returns folders as `path/` (@-mentions). */
   searchProjectFiles(
     projectIdOrWorkspaceId: string,
     query: string,
     limit?: number,
-    includeIgnored?: boolean
+    includeIgnored?: boolean,
+    includeDirectories?: boolean
   ): Promise<string[]>;
   searchWorkspaceText?(
     projectPath: string,
@@ -340,6 +429,8 @@ export interface DesktopApi {
   rendererDiagnostic?(diagnostic: DesktopRendererDiagnostic): void;
   /** First React commit signal — main defers window.show until it lands. */
   rendererReady?(): void;
+  /** The running version's What's new notice was shown (or has no notes): main retires its pending announcement. */
+  acknowledgeWhatsNew?(version: string): void;
   /** Dock terminal: create or reattach the shared PTY (main-process owned). */
   termEnsure?(id: string | null, cwd?: string | null, shell?: string | null): Promise<{ id: string; replay: string }>;
   termWrite?(id: string, data: string): void;
@@ -451,6 +542,13 @@ export interface DesktopApi {
    *  renderer holds those bytes only as a session-lifetime preview data URL, so
    *  they travel here and the main process owns the temp file. */
   openAttachmentImage?(dataUrl: string, name?: string): Promise<void>;
+  /** Any `data:` attachment → OS app, keeping the (safe) extension of `name`. */
+  openAttachmentFile?(dataUrl: string, name: string): Promise<void>;
+  /** Writes a `data:` attachment to the temp dir and returns a one-file access
+   *  grant, so the editor pane can open it like a chat file link. */
+  stageAttachmentFile?(dataUrl: string, name: string): Promise<DesktopLocalPathEntry>;
+  /** Save an http(s) or data URL through a save dialog; false when cancelled. */
+  saveFileAs?(source: string, suggestedName?: string): Promise<boolean>;
   getUpdaterState(): Promise<DesktopUpdaterState>;
   subscribeUpdaterState(listener: (state: DesktopUpdaterState) => void): () => void;
   checkForDesktopUpdate(): Promise<DesktopUpdaterState>;
@@ -476,6 +574,12 @@ export interface DesktopApi {
   setFast(enabled: boolean, sessionId?: string): Promise<SessionSnapshot>;
   readSettings(): Promise<DesktopSettings>;
   updateSetting(key: DesktopSettingKey, enabled: boolean): Promise<DesktopSettings>;
+  /** Desktop-only: notification sound volume in percent. */
+  setNotificationVolume?(volume: number): Promise<DesktopSettings>;
+  /** Desktop-only: play the notification sound at the saved volume. */
+  previewNotificationSound?(): Promise<string>;
+  /** A desktop setting or the global Git identity was written (here or on the host). */
+  subscribeSettingsChanged?(listener: (change: SettingsChange) => void): () => void;
   readActivityRailPins(): Promise<ActivityRailPinsState | null>;
   /** Only Electron seeds a missing shared value from its existing local pins. */
   updateActivityRailPins(pins: string[], initializeIfMissing?: boolean): Promise<ActivityRailPinsState>;
@@ -499,6 +603,8 @@ export interface DesktopApi {
   onBrowserSessionReleased?(listener: (sessionId: string, reason?: 'unloaded' | 'gone') => void): () => void;
   /** Bind one persistent guest to its owning conversation session. */
   browserSetActiveGuest?(sessionId: string, webContentsId: number, active: boolean): Promise<void>;
+  /** Free the page behind a closed main-workspace browser tab. */
+  browserReleasePage?(pageId: string): Promise<void>;
   browserPageFrame?(
     sessionId: string,
     previousFrameId?: string
@@ -538,6 +644,10 @@ export interface DesktopApi {
   /** Current session's Browser Use page only. Passwords never cross this API. */
   browserCredentialSuggestions?(sessionId: string): Promise<DesktopBrowserCredentialSuggestion[]>;
   browserCredentialFill?(sessionId: string, credentialId: string): Promise<DesktopBrowserCredentialFillResult>;
+  /** What the in-app browser saw of `url` (or of its site), or null. */
+  browserPageIdentity?(url: string): Promise<DesktopBrowserPageIdentity | null>;
+  /** Identity facts changed for pages of `origin`. */
+  onBrowserPageIdentityChanged?(listener: (origin: string) => void): () => void;
   /** Paired web app live view of the desktop's current Browser Use guest,
    * preserving its cookies and agent-visible page. Options start or renew the
    * session's pushed frame stream (renew within 2s while shown; the desktop
@@ -547,6 +657,14 @@ export interface DesktopApi {
   remoteBrowserStreamAck?(sessionId: string, seq: number): void;
   onRemoteBrowserFrame?(listener: (frame: DesktopRemoteBrowserStreamFrame) => void): () => void;
   remoteBrowserControl?(sessionId: string, input: DesktopRemoteBrowserControl): Promise<void>;
+  /** Paired web app, host advertising `browserParity` only (absent otherwise,
+   *  as are the history, saved-login and profile-import members above):
+   *  the main-workspace browser tabs. `watch` starts or stops pushes to
+   *  onRemoteBrowserTabs and, when starting, answers the current list. */
+  remoteBrowserTabs?(watch: boolean): Promise<DesktopRemoteBrowserTab[]>;
+  remoteBrowserOpenTab?(url: string): Promise<DesktopRemoteBrowserTab>;
+  remoteBrowserCloseTab?(id: string): Promise<void>;
+  onRemoteBrowserTabs?(listener: (tabs: DesktopRemoteBrowserTab[]) => void): () => void;
   /** systemPreference keeps DWM on 'system' so OS theme tracking survives. */
   applyTitleBarTheme(theme: string, systemPreference?: boolean): Promise<void>;
   /** Scrim-composited WCO caption colors while a fullscreen modal is open;

@@ -152,10 +152,10 @@ function nearestExistingParentRel(workDir, missingPath) {
 function spaceJoinedPathHint(requestedPath) {
   if (typeof requestedPath !== 'string') return '';
   const trimmed = requestedPath.trim();
-  if (!/\s/.test(trimmed)) return '';
-  const segments = trimmed.split(/\s+/).filter(Boolean);
+  if (!/[\s,]/.test(trimmed)) return '';
+  const segments = trimmed.split(/[\s,]+/).filter(Boolean);
   if (segments.length < 2) return '';
-  return ' Pass multiple scopes as path[] array (not a space-joined string).';
+  return ' To pass several paths, send an array (path[]), not a comma- or space-joined string.';
 }
 
 function appendEnoentFindNudge(text = '') {
@@ -167,16 +167,34 @@ function appendEnoentFindNudge(text = '') {
 
 export function finalizeReadFamilyEnoentTail(hint, requestedPath, errCode = 'ENOENT') {
   if (!NOT_FOUND_CODES.has(String(errCode || 'ENOENT'))) return String(hint || '');
-  return appendEnoentFindNudge(String(hint || '') + spaceJoinedPathHint(requestedPath));
+  const multiPathHint = spaceJoinedPathHint(requestedPath);
+  // A multi-path-looking input is not a basename to locate; the array hint wins.
+  if (multiPathHint) return String(hint || '') + multiPathHint;
+  return appendEnoentFindNudge(String(hint || ''));
+}
+
+// The base the missing relative path was resolved against (a `cd` in an earlier
+// shell call never moves it), appended to every not-found hint, empty or not.
+export function appendNotFoundCwdNote(hint, workDir, errCode = 'ENOENT') {
+  if (!workDir || !NOT_FOUND_CODES.has(String(errCode || 'ENOENT'))) return hint;
+  return `${hint} (relative paths resolve from ${normalizeOutputPath(workDir)})`;
 }
 
 export function buildNotFoundHint(workDir, missingPath, actionVerb, errCode = 'ENOENT', cache = null) {
+  return appendNotFoundCwdNote(
+    buildNotFoundHintBody(workDir, missingPath, actionVerb, errCode, cache),
+    workDir,
+    errCode
+  );
+}
+
+export function buildNotFoundHintBody(workDir, missingPath, actionVerb, errCode = 'ENOENT', cache = null) {
   if (!NOT_FOUND_CODES.has(String(errCode || 'ENOENT'))) return '';
   // `C:tmpsmp` shape: a Windows path whose separators were eaten by JSON
   // escaping (`"C:\\tmp\\smp"` written as `"C:\tmp\smp"`). Name the cause —
   // the sibling/basename hints below can never resolve such a path.
   const rawMissing = String(missingPath || '');
-  if (/^[A-Za-z]:(?![\\/])[^\\/]/.test(rawMissing.replace(/\\/g, '\\'))) {
+  if (/^[A-Za-z]:(?![\\/])[^\\/]/.test(rawMissing)) {
     return ` The path has a drive letter but no separator after it — the backslashes were probably lost in escaping. Re-issue with forward slashes (e.g. "C:/tmp/smp").`;
   }
   if (missingPathIsOutsideProject(workDir, missingPath)) {

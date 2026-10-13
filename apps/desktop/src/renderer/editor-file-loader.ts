@@ -9,6 +9,8 @@ export interface EditorFileLoad {
   mtimeMs: number;
   binary: boolean;
   tooLarge: boolean;
+  readOnly?: boolean;
+  readOnlyReason?: 'encoding';
   encoding: DesktopTextFileEncoding;
 }
 

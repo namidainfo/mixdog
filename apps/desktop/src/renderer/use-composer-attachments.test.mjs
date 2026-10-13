@@ -158,7 +158,10 @@ test('native file-item drops fall back without needing a Files transfer entry', 
   });
   assert.equal(harness.current.draft, `${path} `);
   assert.equal(harness.current.attachments.length, 0);
-  assert.match(harness.current.attachmentError, /pelican\.svg: this file type can't be attached; its path was inserted/);
+  assert.match(
+    harness.current.attachmentError,
+    /pelican\.svg: this file type can't be attached; its path was inserted/
+  );
 });
 
 test('native directories insert only their path without reading or attaching them', async (t) => {
@@ -230,7 +233,7 @@ test('files without an accessible local path show the limitation without inventi
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 const XLSM_MIME = 'application/vnd.ms-excel.sheet.macroEnabled.12';
 
-test('Office files attach as file attachments with OOXML MIME types and [File #n] tokens', async (t) => {
+test('Office files attach as chip-only file attachments with OOXML MIME types and [File #n] tokens', async (t) => {
   const harness = await mountComposer(t);
   await harness.attach([
     new File(['PK'], 'brief.docx', { type: '' }),
@@ -243,8 +246,8 @@ test('Office files attach as file attachments with OOXML MIME types and [File #n
       { name: 'macro.xlsm', kind: 'office', mimeType: XLSM_MIME, token: '[File #2: macro.xlsm]' },
     ]
   );
-  assert.ok(harness.current.draft.includes('[File #1: brief.docx]'));
-  assert.ok(harness.current.draft.includes('[File #2: macro.xlsm]'));
+  assert.ok(harness.current.attachments.every((attachment) => attachment.chipOnly === true));
+  assert.ok(!harness.current.draft.includes('[File #'));
   assert.equal(harness.current.attachmentError, '');
 });
 
@@ -273,7 +276,14 @@ test('Office files count toward the attachment limit and the combined file budge
   const harness = await mountComposer(t, { api: { folderPathForFile: (file) => `C:/o/${file.name}` } });
   await act(async () =>
     harness.current.replaceAttachments([
-      { id: 1, name: 'big.pdf', kind: 'pdf', mimeType: 'application/pdf', data: 'A'.repeat(MAX_INLINE_FILE_BASE64_TOTAL), token: '' },
+      {
+        id: 1,
+        name: 'big.pdf',
+        kind: 'pdf',
+        mimeType: 'application/pdf',
+        data: 'A'.repeat(MAX_INLINE_FILE_BASE64_TOTAL),
+        token: '',
+      },
     ])
   );
   await harness.attach([new File(['PK'], 'more.pptx')]);
@@ -301,7 +311,11 @@ test('Office files count toward the attachment limit and the combined file budge
 test('Office size cap, legacy formats, empty files and fake PDFs get clear rejections', async (t) => {
   const harness = await mountComposer(t, { api: { folderPathForFile: (file) => `C:/r/${file.name}` } });
   const cases = [
-    [{ name: 'huge.docx', type: '', size: MAX_OFFICE_FILE_BYTES + 1 }, /huge\.docx: Office files must be under 20 MB/, true],
+    [
+      { name: 'huge.docx', type: '', size: MAX_OFFICE_FILE_BYTES + 1 },
+      /huge\.docx: Office files must be under 20 MB/,
+      true,
+    ],
     [new File(['x'], 'old.doc'), /old\.doc: legacy Office files can't be attached\. Save it as \.docx/, false],
     [new File(['x'], 'sheet.xls'), /sheet\.xls: legacy Office files can't be attached\. Save it as \.xlsx/, false],
     [new File(['x'], 'deck.ppt'), /deck\.ppt: legacy Office files can't be attached\. Save it as \.pptx/, false],
@@ -388,7 +402,10 @@ test('internal absolute drops preserve source paths even for files with identica
   await harness.drop(pathTransfer(paths));
   assert.equal(harness.current.draft, `${paths.join(' ')} `);
   assert.equal(harness.current.attachments.length, 0);
-  assert.match(harness.current.attachmentError, /pelican\.svg: this file type can't be attached; its path was inserted/);
+  assert.match(
+    harness.current.attachmentError,
+    /pelican\.svg: this file type can't be attached; its path was inserted/
+  );
 });
 
 test('project SVG drops retain their existing project mention behavior', async (t) => {

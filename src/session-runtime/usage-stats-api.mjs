@@ -14,13 +14,26 @@ import {
 } from '../runtime/shared/provider-accounts.mjs';
 
 const MAX_MODEL_LIMIT = 50;
+const SNAPSHOT_REUSE_MS = 1000;
+const SNAPSHOT_CACHE_LIMIT = 8;
 
 const quotaText = (value) => (typeof value === 'string' ? value.slice(0, 200) : '');
 
 // What the ledger cannot know: each subscription account's label and place in
 // its provider's account pool, the order the account picker lists them in.
-function labelQuotaHistory(history, accountPool) {
+function labelQuotaHistory(history, accountPool, accountEmails) {
   const rosters = new Map();
+  const emails = new Map();
+  const emailsOf = (provider) => {
+    if (!emails.has(provider)) {
+      try {
+        emails.set(provider, accountEmails(provider) || {});
+      } catch {
+        emails.set(provider, {});
+      }
+    }
+    return emails.get(provider);
+  };
   const rosterOf = (provider) => {
     if (!ACCOUNT_PROVIDERS.includes(provider)) return [];
     if (!rosters.has(provider)) {
@@ -37,7 +50,19 @@ function labelQuotaHistory(history, accountPool) {
     subscriptions: (history.subscriptions || []).map((row) => {
       const roster = rosterOf(row.provider);
       const rank = roster.findIndex((entry) => entry.id === row.account);
-      return { ...row, accountLabel: roster[rank]?.label || '', accountRank: rank < 0 ? null : rank };
+      const email = rank < 0 ? '' : quotaText(emailsOf(row.provider)[row.account]);
+      // History of an account that left the roster stays stored, but the
+      // picker must not offer it. The implicit `default` account of a provider
+      // with no stored roster is still current.
+      const inRoster =
+        !ACCOUNT_PROVIDERS.includes(row.provider) || rank >= 0 || (row.account === 'default' && !roster.length);
+      return {
+        ...row,
+        accountLabel: roster[rank]?.label || '',
+        accountRank: rank < 0 ? null : rank,
+        accountInRoster: inRoster,
+        ...(email ? { accountEmail: email } : {}),
+      };
     }),
   };
 }
@@ -122,10 +147,13 @@ export function createUsageStatsApi({
   ledger = getUsageLedger,
   importHistory = importUsageHistory,
   accountPool = readProviderAccountPool,
+  // provider -> { [accountId]: email } for the picker's secondary text.
+  accountEmails = () => ({}),
   getSessionId = () => null,
 } = {}) {
   let importing = null;
   let imported = false;
+  const snapshots = new Map();
   // Until the first instrumented send establishes the cutover, the legacy
   // writer may still be active. A previous import is not a live subscription.
   async function ensureHistoryImported(store, liveSince) {
@@ -156,6 +184,15 @@ export function createUsageStatsApi({
       const period = usagePeriodFor(options, now);
       // The rollup query runs off the event loop (usage-rollup-worker.mjs).
       const rollup = await store.rollupAsync(usageRollupQuery(period));
+      // The ledger returns the same rollup object while nothing was committed
+      // (and while a rolling window lost no record), so identical back-to-back
+      // requests over it are one answer; the clock bound keeps the snapshot's
+      // time-relative fields from ageing.
+      const cacheKey = JSON.stringify([options, liveSince]);
+      const held = snapshots.get(cacheKey);
+      if (held && held.rollup === rollup && now - held.now >= 0 && now - held.now < SNAPSHOT_REUSE_MS) {
+        return held.snapshot;
+      }
       const snapshot = usageStatsSnapshot({
         rollup,
         days: normalizeDays(options?.days),
@@ -170,6 +207,9 @@ export function createUsageStatsApi({
       });
       snapshot.coverage.ledger = true;
       snapshot.coverage.liveSince = liveSince || null;
+      snapshots.delete(cacheKey);
+      snapshots.set(cacheKey, { rollup, now, snapshot });
+      if (snapshots.size > SNAPSHOT_CACHE_LIMIT) snapshots.delete(snapshots.keys().next().value);
       return snapshot;
     },
 
@@ -226,7 +266,7 @@ export function createUsageStatsApi({
         toMs: period?.toMs ?? null,
         now,
       });
-      return labelQuotaHistory(period ? { ...ownAccount(history), period } : ownAccount(history), accountPool);
+      return labelQuotaHistory(period ? { ...ownAccount(history), period } : ownAccount(history), accountPool, accountEmails);
     },
   };
 }

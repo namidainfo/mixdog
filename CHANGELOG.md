@@ -5,6 +5,146 @@ the Unreleased section is empty, and stamps it with the released version.
 
 ## Unreleased
 
+## v1.1.2 - 2026-10-12
+
+The "What's new" notice now appears after an update even if the app's local storage was lost, waits until the starter welcome or tour is closed, and no longer reappears after a downgrade.
+
+The starter guide no longer reappears for existing users after local storage is lost or the app updates.
+
+Muse Code and MiMo usage now appears under its own row in the sidebar instead of being shown as Grok.
+
+The Ultrafast speed is shown in orange on model labels, including the agent rows in the side dock.
+
+In the composer island, clicking the files segment opens the changed-file list in the right side dock when several files changed (a single changed file still opens its diff). The agent and shell segments open their lists in the side dock too, formatted like the Agents sidebar and navigable with the keyboard.
+
+Tool rows no longer show the light sweep while running.
+
+Adding an MCP server from the add dialog now creates it, and a name that already exists is rejected instead of overwriting the existing server.
+
+On Linux, "Allow" for Computer Use input access now verifies real access to `/dev/uinput`, repairs it when needed, and explains what to do if it still fails: sign out and back in, add your user to the `input` group, or enable the missing uinput module (#32).
+
+## v1.1.1 - 2026-10-12
+
+Continuing a session after switching its model ("Continue in <model>"), and retrying a failed turn ("Retry"), no longer fail with "submit options contains an unsupported field."
+
+Muse Code (Meta) is available as a subscription provider: sign in with a device code in your browser, and see your rolling and weekly usage directly in Mixdog.
+
+MiMo (Xiaomi) sign-in is available under Settings → Developer options, alongside Cursor and Antigravity (off by default).
+
+A new "Instruction files" setting under Settings → General can automatically include AGENTS.md / CLAUDE.md rules in new sessions, from your home folders (~/.codex and ~/.claude) and the project folder. Choose AGENTS.md, CLAUDE.md, All, or Off. It is off by default; because these files are trusted as instructions, only enable it for repositories you trust.
+
+Daybreak Blue is now a per-route switch under "Auto reasoning" on the models that support it, based on the provider's model list. The separate Blue model is retired, and existing routes move to a supported model with Blue turned on.
+
+- The Auto reasoning judge v6 installs automatically after updating. It is EmbeddingGemma 2 fine-tuned solely for judging reasoning effort, and it judges both requests and agent tool steps. On the same 12,029 held-out items it is more accurate than Jev 1.13 (exact level 78.5% vs 72.7%; two or more levels off 0.6% vs 1.4%), and it decides in about 115 ms on your PC. Details: `docs/auto-reasoning-effort.md`
+
+Auto reasoning now appears as "Auto" wherever a model and effort are shown, including the agents sidebar, Workflows, schedules, and webhooks. The working status line shows the effort that Auto actually chose, translated into your language (for example "Thinking (medium)").
+
+The composer island above the message input is redesigned. Goals show a state icon, per-task progress pips, and "In progress"; agents, shells, and changed files are counted separately with their own icons; and agents waiting for your approval show "Waiting for approval" and a "Needs you" count instead of appearing busy. Clicking an agent opens its session, agent elapsed time now counts from the current turn instead of from creation, and the island stays briefly after work finishes instead of flickering away. The Agents pane also marks agents waiting for approval.
+
+Your own messages no longer show "from <this PC>"; device attribution appears only on messages sent from other devices.
+
+The Usage window opens immediately with your last figures while the latest numbers refresh in the background.
+
+macOS auto-update now works. Earlier releases were missing the macOS update feed, so Mac installs could not update themselves.
+
+The "what's new" notice after updating is no longer lost if it fails to appear; it is marked as seen only once it has actually been shown.
+
+The Connection settings page no longer jumps when it opens, and the "Use" button on the phone's "Reset credits" is more compact.
+
+Tool paths like /C:/… are now accepted, edit accepts old_str / new_str as aliases, several paths joined in one string are understood (inside the project), and error messages are clearer.
+
+Long-running background shell commands, such as dev servers, no longer block new shell commands.
+
+Temporary files are now cleaned up more safely, and new tasks are no longer reported as failed when only the automatic title fails to save.
+
+Mixdog Desktop now runs on Linux as an AppImage or a .deb package, for x86_64 and arm64 (glibc 2.31 or newer (Ubuntu 20.04, Debian 11 and later)), and updates itself automatically. On GNOME with Wayland, Computer Use captures screenshots through the bundled Mixdog GNOME Shell extension, shows its "in use" indicator in the shell without taking focus from the window being controlled, and stops with Ctrl+Alt+Esc; after the extension is first installed, sign out and back in once.
+
+Mixdog for Android 0.1.12 has new pairing: on your PC, open Settings > Connection > Phone, scan the QR code to install the app, then enter the 6-digit code shown there in the app and allow it on your PC. It also fixes the message box being hidden behind the keyboard on Android 15.
+
+## v1.1.0 - 2026-10-11
+
+- A new Phone option in Settings > Connection displays a QR code to install the Mixdog mobile app (available on iPhone via TestFlight beta and on Android as an APK). Once installed, pairing completes by entering a 6-digit code in the mobile app and approving it on your desktop PC.
+
+- The web app can now receive push notifications from all paired PCs, keeping you notified of completed tasks and model responses across your computers.
+
+- Markdown files now feature Preview, Rich, and Source views, an outline, and a side-by-side preview. The rich editor writes edits directly back to the file while preserving frontmatter, line endings, and untouched formatting, with conflict detection and held backups if the file changes on disk.
+
+- Registered projects in the session sidebar are now organized into folders above Recent sessions, showing their latest conversations and a button to start a new task in that project. Categories and folders can be reordered by dragging, and right-click context menus let you quickly open, rename, favorite, archive, delete, or inherit sessions.
+
+- Desktop app support returns for Intel-based Macs (macOS x64) without ONNX dependencies. Memory retains lexical search, while local semantic search and auto reasoning are omitted on Intel hardware.
+
+- Save As downloads no longer overwrite or delete the existing file if the download fails. Removing a paired device from Settings > Connection retries automatically when reconnecting if the relay was temporarily unavailable.
+
+- File reading and editing align cache reuse and range indexes with verified exact file versions. Deleting or patching large files over 8 MiB in apply_patch bounds memory use instead of reading files whole, and local HTML preview permissions stay strictly scoped to their originating session.
+
+- Configuration settings keep their defaults in code rather than on disk: configuration files now store only your custom changes, allowing untouched settings to seamlessly adopt updated defaults in new versions.
+
+- Background resource usage is significantly reduced when idle, with fewer daemon reviews, debounced file watching during search, and cached daily rollups for usage statistics.
+
+- Shift+Enter reliably inserts a line break in the message composer even after shifted characters, and single-line Enter commits no longer trigger prematurely while composing Korean text in an IME.
+
+- Translation quality pass across all 11 supported languages, correcting interface labels and updating localized dialogs.
+
+## v1.0.12 - 2026-10-10
+
+- The changelog in Settings > About lists the installed version's notes;
+  in v1.0.11 it still ended at v1.0.10, on the desktop app and the remote
+  web page alike.
+
+- The changelog is available in every app language, and after an update
+  the app shows what is new in that version once.
+
+- Auto reasoning is on by default on supported models: each message and
+  each tool step gets the reasoning effort it needs. Its model downloads in
+  the background on first use instead of at startup, and the Built-in card
+  shows the model and what it is based on.
+
+- File links in a conversation open beside it in the side panel as tabs. A
+  new link replaces the preview tab, so links no longer pile up tabs; a tab
+  is kept once you double-click it, choose Keep open, or edit the file. At
+  most eight file tabs stay open. Settings > General > Link preview turns
+  this off.
+
+- CSV and TSV files open as an editable table: copy and paste cells, add or
+  remove rows and columns, save with Ctrl+S, and undo or redo with Ctrl+Z
+  and Ctrl+Y.
+
+- PDF and Office files (Word, PowerPoint, Excel) preview in the side panel.
+  Office pages reopen instantly, and a link starts converting its document
+  as soon as you point at it.
+
+- Conversations can be starred: favorites stay at the top of the session
+  list, and the star appears when you hover a row.
+
+- Search finds text across past conversations. A deleted conversation
+  leaves no search results behind, whichever way it was removed.
+
+- Scrolling up while a reply streams keeps your place instead of jumping
+  back to the bottom.
+
+- GitHub actions in a reply are grouped into one GitHub card, and the
+  thinking indicator's loop no longer jumps when it restarts.
+
+- Provider accounts show their sign-in email, and connecting the same
+  account again keeps its name and usage history instead of adding a new
+  entry. The usage dialog no longer lists accounts that were disconnected.
+
+- A prompt pulled back from the queue into the draft no longer reappears
+  after a restart, and reopening the app quickly keeps the conversation
+  editable instead of opening it read-only.
+
+- Translation fixes: wrong labels such as Git in Italian, Models in
+  Vietnamese and Effort in Chinese and Japanese now read correctly.
+
+- On the phone web UI, Enter inserts a line break and the send button
+  sends.
+
+- Memory starts on Windows profiles whose user folder name is not plain
+  ASCII.
+
+- Security updates for the image-size and js-yaml dependencies
+  (CVE-2025-71329, CVE-2026-84375).
+
 ## v1.0.11 - 2026-10-08
 
 - The built-in browser shows pages again on Windows displays scaled above
@@ -1913,11 +2053,11 @@ the Unreleased section is empty, and stamps it with the released version.
   recover pending requests when that panel opens, and finish only after the
   browser proves its authenticated E2EE connection.
 
-## v0.9.142
+## v0.9.142 - 2026-08-20
 
 - Linux desktop packaging validates the target architecture in the ABI
   prebuild directory that `node-pty` actually loads, while compiled Windows and
-  macOS packages keep their `build/Release` validation path. - 2026-08-20
+  macOS packages keep their `build/Release` validation path.
 
 - Installed web apps resume one pending desktop approval across reloads, while
   the desktop replaces stale prompts, expires them with the relay request, and

@@ -6,6 +6,11 @@ param(
     # Not part of the fingerprint: an A/B pair must stay comparable in history,
     # so the switch under test is recorded in the manifest instead.
     [string[]]$AgentEnv = @(),
+    # Effort judge (product Auto effort) for any preset: steps (product
+    # default) = judge each turn and each tool-result step, on = each turn
+    # only, off = the route's fixed effort.
+    # Fingerprinted only when not off, so off matches the pre-switch history.
+    [ValidateSet("on", "steps", "off")][string]$EffortJudge = "steps",
     # Disable the local Docker dependency-archive cache for setup comparisons.
     [switch]$ColdSetup,
     [switch]$DryRun,
@@ -72,6 +77,68 @@ function Assert-PrebakeCurrent {
     "prebake $baked ok"
 }
 
+function Get-EffortJudgeBundleProblem([string]$Mode, [string]$TarPath, [string]$Release) {
+    # $null when the bundle holds exactly the manifest release (step-trained
+    # for steps mode) and matches its stamp digest; else what is wrong.
+    $stampPath = "$TarPath.json"
+    if (-not (Test-Path -LiteralPath $TarPath -PathType Leaf) -or -not (Test-Path -LiteralPath $stampPath -PathType Leaf)) {
+        return "effort-judge bundle or its stamp missing ($TarPath)"
+    }
+    try {
+        $stamp = Get-Content -Raw -LiteralPath $stampPath | ConvertFrom-Json
+    }
+    catch {
+        return "effort-judge bundle stamp unreadable ($stampPath)"
+    }
+    if ([string]$stamp.release -ne $Release) {
+        return "effort-judge bundle holds $($stamp.release) but the manifest names $Release"
+    }
+    $repoRoot = (Resolve-Path (Join-Path $benchRoot "..\..")).Path
+    $runtime = [string]((Get-Content -Raw -LiteralPath (Join-Path $repoRoot "package.json") | ConvertFrom-Json).dependencies.'onnxruntime-node')
+    if ([string]::IsNullOrWhiteSpace($runtime) -or [string]$stamp.onnxruntime -ne $runtime) {
+        return "effort-judge bundle ONNX Runtime $($stamp.onnxruntime) != pinned $runtime"
+    }
+    if ($Mode -eq "steps" -and $stamp.steps -ne $true) {
+        return "effort judge $Release is not step-trained; -EffortJudge steps needs one"
+    }
+    if ((Get-FileHash -LiteralPath $TarPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne [string]$stamp.sha256) {
+        return "effort-judge bundle digest differs from its stamp"
+    }
+    return $null
+}
+
+function Assert-EffortJudgeBundle([string]$Mode) {
+    # The bundle must hold exactly the release the product manifest names;
+    # check it here, in seconds, instead of in every trial container. A real
+    # run builds a missing or stale bundle; a dry run never does.
+    $repoRoot = (Resolve-Path (Join-Path $benchRoot "..\..")).Path
+    $release = [string]((Get-Content -Raw -LiteralPath (Join-Path $repoRoot "src/runtime/effort-judge/model-manifest.json") | ConvertFrom-Json).release)
+    $tarPath = [string]$env:MIXDOG_TB_EFFORT_JUDGE_BUNDLE
+    if ([string]::IsNullOrWhiteSpace($tarPath)) {
+        $tarPath = Join-Path $benchRoot "mixdog-prebake/effort-judge-bundle.tar"
+    }
+    $rebuildHint = "rebuild with: pwsh -NoLogo -NoProfile -File harness/build-effort-judge-bundle.ps1 (or run with -EffortJudge off)"
+    $problem = Get-EffortJudgeBundleProblem $Mode $tarPath $release
+    if ($null -eq $problem) {
+        return $release
+    }
+    if ($DryRun) {
+        Write-Host "NOTICE: $problem - effort-judge bundle missing/stale; a real run builds it automatically"
+        return $release
+    }
+    Write-Host "$problem; building the effort-judge bundle (harness/build-effort-judge-bundle.ps1)"
+    try {
+        & (Join-Path $benchRoot "harness/build-effort-judge-bundle.ps1") -Out $tarPath | ForEach-Object { Write-Host $_ }
+    }
+    catch {
+        throw "effort-judge bundle build failed: $($_.Exception.Message); $rebuildHint"
+    }
+    $problem = Get-EffortJudgeBundleProblem $Mode $tarPath $release
+    if ($null -ne $problem) {
+        throw "$problem after the automatic build; $rebuildHint"
+    }
+    return $release
+}
 function Write-JsonAtomic([object]$Value, [string]$Path) {
     $temporary = "$Path.tmp-$PID"
     $Value | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $temporary -Encoding utf8
@@ -146,13 +213,22 @@ if (-not [string]::IsNullOrWhiteSpace([string]$presetConfig.compareTo)) {
     if ($null -eq $baselineProperty) {
         throw "Preset '$Preset' references unknown baseline '$($presetConfig.compareTo)'."
     }
-    $baselineJobsDir = Resolve-JobsPath ([string]$baselineProperty.Value.jobsDir)
+    # The full local jobs directory when present, else the committed raw-runs/
+    # export (the report then reads the pinned figures for what it omits).
+    $baselineConfig = $baselineProperty.Value
+    $baselineJobsDir = Resolve-JobsPath ([string]$baselineConfig.jobsDir)
     if (-not (Test-Path -LiteralPath $baselineJobsDir -PathType Container)) {
-        throw "Pinned baseline jobs directory not found: $baselineJobsDir"
+        $archivedJobsDir = "raw-runs/$($baselineConfig.jobsDir)"
+        $baselineJobsDir = Resolve-JobsPath $archivedJobsDir
+        if (-not (Test-Path -LiteralPath $baselineJobsDir -PathType Container)) {
+            throw "Pinned baseline jobs directory not found locally or in raw-runs: $($baselineConfig.jobsDir)"
+        }
+        $baselineConfig = $baselineConfig | Select-Object *
+        $baselineConfig.jobsDir = $archivedJobsDir
     }
     $comparison = [ordered]@{
         name     = [string]$presetConfig.compareTo
-        baseline = $baselineProperty.Value
+        baseline = $baselineConfig
     }
 }
 
@@ -189,6 +265,12 @@ $definition = [ordered]@{
     attempts     = $attempts
     maxRetries   = $maxRetries
 }
+if ($EffortJudge -ne "off") {
+    $definition.effortJudge = [ordered]@{
+        mode    = $EffortJudge
+        release = Assert-EffortJudgeBundle $EffortJudge
+    }
+}
 $definitionJson = $definition | ConvertTo-Json -Depth 20 -Compress
 $sha = [Security.Cryptography.SHA256]::Create()
 try {
@@ -208,6 +290,7 @@ $resolvedJobsDir = Resolve-JobsPath $JobsDir
 $lead = $routeProperty.Value.routes.lead
 $taskLabel = if ($tasks.Count -eq 0) { "full" } else { [string]$tasks.Count }
 "preset ${Preset}: suite=$taskLabel model=$($lead.provider)/$($lead.model) effort=$($lead.effort) concurrent=$concurrent repeat=$attempts"
+"effort-judge $EffortJudge$(if ($EffortJudge -ne 'off') { " ($($definition.effortJudge.release))" })"
 "fingerprint $fingerprint"
 "jobs $resolvedJobsDir"
 if ($null -ne $comparison) {
@@ -222,6 +305,7 @@ $runnerArgs = @{
     Attempts     = $attempts
     MaxRetries   = $maxRetries
     RouteProfile = $routeProfile
+    EffortJudge  = $EffortJudge
     DryRun       = [bool]$DryRun
     FastSetup    = ($tasks.Count -eq 8 -and $attempts -eq 1 -and -not $ColdSetup)
 }
@@ -256,7 +340,8 @@ $manifestPath = Join-Path $resolvedJobsDir "preset-run.json"
 # archived with the run.
 $provenancePath = Join-Path $resolvedJobsDir "runtime-provenance.json"
 $runnerArgs.ProvenanceOut = $provenancePath
-# The fingerprint pins dataset and routes only. Capture the prompt surface —
+# The fingerprint pins the run definition (dataset, suite, routes, concurrency,
+# attempts, retries, effort judge), not the prompt surface. Capture the prompt surface —
 # rules and tool schemas as the container will see them — before the snapshot
 # is taken, so the report identifies the exact contract under measurement.
 $contractArgs = @(
@@ -265,7 +350,7 @@ $contractArgs = @(
     "--model", [string]$lead.model,
     "--workflow", "headless"
 )
-foreach ($slot in @('worker', 'heavy-worker', 'reviewer', 'debugger')) {
+foreach ($slot in @('worker', 'heavy-worker', 'reviewer')) {
     $routeSlot = $routeProperty.Value.routes.PSObject.Properties[$slot]
     if ($null -eq $routeSlot -or $null -eq $routeSlot.Value) { continue }
     $contractArgs += @(

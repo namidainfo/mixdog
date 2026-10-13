@@ -1,5 +1,5 @@
-import { Paperclip, X } from 'lucide-react';
 import { useRef } from 'react';
+import { AttachmentCard, composerCardKind, composerCardMeta } from './attachment-card';
 import {
   fileExtension,
   hasPdfHeader,
@@ -8,12 +8,7 @@ import {
   officeMimeForName,
   SUPPORTED_IMAGE_TYPES,
 } from './composer-attachments';
-import {
-  ATTACHMENT_ACCEPT,
-  MAX_IMAGE_FILE_BYTES,
-  MAX_OFFICE_FILE_BYTES,
-  MAX_PDF_FILE_BYTES,
-} from './composer-support';
+import { ATTACHMENT_ACCEPT, MAX_IMAGE_FILE_BYTES, MAX_OFFICE_FILE_BYTES, MAX_PDF_FILE_BYTES } from './composer-support';
 import { fileLooksLikeText } from './file-content';
 import { canonicalPromptFileMimeType, MAX_PROMPT_FILE_BASE64_TOTAL, PDF_MIME_TYPE } from '../shared/prompt-limits';
 import { t } from './i18n';
@@ -221,28 +216,19 @@ export function AutomationAttachmentChips({
 }) {
   if (attachments.length === 0) return null;
   return (
+    // biome-ignore lint/a11y/useAriaPropsSupportedByRole: the chip list container keeps its tag; the label names the attachments
     <div className="composer-attachments schedules-attachments" aria-label={t('Attachments')}>
       {attachments.map((attachment, index) => (
-        <div className={`attachment-chip ${attachment.kind}`} key={attachmentDomKey(attachment)}>
-          {attachment.kind === 'image' ? (
-            <img src={`data:${attachment.mimeType};base64,${attachment.data}`} alt="" />
-          ) : (
-            <span aria-hidden="true">
-              <Paperclip size={14} />
-            </span>
-          )}
-          <span data-tooltip={attachment.name}>{attachment.name}</span>
-          <button
-            type="button"
-            className="attachment-remove"
-            aria-label={t('Remove {{name}}', { name: attachment.name })}
-            data-tooltip={t('Remove')}
-            disabled={disabled}
-            onClick={() => onChange(attachments.filter((_, itemIndex) => itemIndex !== index))}
-          >
-            <X size={14} aria-hidden="true" />
-          </button>
-        </div>
+        <AttachmentCard
+          key={attachmentDomKey(attachment)}
+          kind={composerCardKind({ kind: attachment.kind, source: 'file' })}
+          name={attachment.name}
+          imageUrl={attachment.kind === 'image' ? `data:${attachment.mimeType};base64,${attachment.data}` : undefined}
+          content={attachment.kind === 'image' ? undefined : attachment.data}
+          meta={composerCardMeta(attachment)}
+          removeDisabled={disabled}
+          onRemove={() => onChange(attachments.filter((_, itemIndex) => itemIndex !== index))}
+        />
       ))}
     </div>
   );

@@ -14,6 +14,7 @@ import { createOAuthPkce, parseOAuthCodeInput } from './lib/oauth-pkce.mjs';
 import { OAUTH_PAGE_CONTENT_TYPE, oauthSuccessHtml, oauthErrorHtml } from './lib/oauth-page.mjs';
 import { classifyTransportError, transportErrorText } from '../../../shared/transport-error-text.mjs';
 import { withOAuthTlsDiagnostics } from './openai-oauth-tls-diagnostics.mjs';
+import { openLoginUrl } from './lib/open-login-url.mjs';
 
 const TOKEN_URL = 'https://auth.openai.com/oauth/token';
 const AUTHORIZE_URL = 'https://auth.openai.com/oauth/authorize';
@@ -38,11 +39,12 @@ function _scrubOAuthLoginBody(text) {
  * @param {string} deps.clientId
  * @param {string} deps.originator
  * @param {(token:string)=>(string|undefined)} deps.extractAccountId
+ * @param {(...tokens:string[])=>(object|null)} deps.identityFromTokens
  * @param {(token:string)=>number} deps.expiryFromAccessToken
  * @param {(tokens:object)=>void} deps.saveTokens
  */
 export function createOpenAIOAuthLogin(deps) {
-  const { clientId, originator, extractAccountId, expiryFromAccessToken, saveTokens, createServerFn = createServer } = deps;
+  const { clientId, originator, extractAccountId, identityFromTokens, expiryFromAccessToken, saveTokens, createServerFn = createServer } = deps;
 
   async function exchangeAuthorizationCode({ pkce, code, signal }) {
     const cleanCode = String(code || '').trim();
@@ -85,13 +87,14 @@ export function createOpenAIOAuthLogin(deps) {
       refresh_token: json.refresh_token,
       expires_at: expiresAt,
       account_id: extractAccountId(json.access_token),
+      identity: identityFromTokens(json.id_token, json.access_token),
     };
     signal.throwIfAborted();
     saveTokens(tokens);
     return tokens;
   }
 
-  async function beginOAuthLogin() {
+  async function beginOAuthLogin({ openBrowser = true } = {}) {
     const pkce = createOAuthPkce(64);
     const state = randomBytes(16).toString('hex');
     const url = new URL(AUTHORIZE_URL);
@@ -162,12 +165,7 @@ export function createOpenAIOAuthLogin(deps) {
         process.stderr.write(
           `\n[openai-oauth] Open this URL to log in to ChatGPT (OpenAI OAuth):\n${url.toString()}\n\n`
         );
-        try {
-          const { openInBrowser } = await import('../../../shared/open-url.mjs');
-          openInBrowser(url.toString());
-        } catch (err) {
-          process.stderr.write(`[openai-oauth] browser open failed: ${String(err?.message || err).slice(0, 200)}\n`);
-        }
+        if (openBrowser) await openLoginUrl('openai-oauth', url.toString());
       });
       server.on('error', (err) =>
         finish(

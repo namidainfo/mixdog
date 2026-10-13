@@ -43,8 +43,7 @@ EXPECTED_AUDIT_LINE = (
     "lead=anthropic-oauth/claude-fable-5 effort=xhigh fast=false; "
     "worker=openai-oauth/gpt-5.6-terra effort=high fast=true; "
     "heavy-worker=openai-oauth/gpt-5.6-sol effort=xhigh fast=true; "
-    "reviewer=openai-oauth/gpt-5.6-sol effort=xhigh fast=true; "
-    "debugger=openai-oauth/gpt-5.6-sol effort=xhigh fast=true"
+    "reviewer=openai-oauth/gpt-5.6-sol effort=xhigh fast=true"
 )
 
 
@@ -79,7 +78,6 @@ const agentKeys = {{
   worker: 'worker',
   'heavy-worker': 'heavy-worker',
   reviewer: 'reviewer',
-  debugger: 'debugger',
 }};
 const agents = Object.fromEntries(Object.entries(agentKeys).map(
   ([role, key]) => [role, cleanRoute(normalizeAgentRoute(config.agents?.[key]))]
@@ -150,12 +148,6 @@ class RoutingProfileTests(unittest.TestCase):
                     "fast": True,
                 },
                 "reviewer": {
-                    "provider": "openai-oauth",
-                    "model": "gpt-5.6-sol",
-                    "effort": "xhigh",
-                    "fast": True,
-                },
-                "debugger": {
                     "provider": "openai-oauth",
                     "model": "gpt-5.6-sol",
                     "effort": "xhigh",
@@ -325,7 +317,7 @@ class RoutingProfileTests(unittest.TestCase):
             resolved["agents"],
             {
                 role: profile["routes"][role]
-                for role in ("worker", "heavy-worker", "reviewer", "debugger")
+                for role in ("worker", "heavy-worker", "reviewer")
             },
         )
 
@@ -671,6 +663,23 @@ class AdapterRunEnvironmentTests(unittest.TestCase):
         await agent._run_lead(Environment(), "adapter task", None, base_env)
         return captured[0]
 
+    def test_effort_judge_defaults_to_steps_and_maps_to_auto_effort_env(self) -> None:
+        module = self.load_adapter_module()
+
+        self.assertEqual(module.MixdogAgent()._effort_judge, "steps")
+        with self.assertRaises(ValueError):
+            module.MixdogAgent(effort_judge="sometimes")
+        expected = {
+            "off": ("off", None),
+            "on": ("on", "off"),
+            "steps": ("on", "on"),
+        }
+        for mode, (auto_effort, steps) in expected.items():
+            with self.subTest(mode=mode):
+                env = module.MixdogAgent(effort_judge=mode)._auto_effort_env()
+                self.assertEqual(env["MIXDOG_AUTO_EFFORT"], auto_effort)
+                self.assertEqual(env.get("MIXDOG_AUTO_EFFORT_STEPS"), steps)
+
     def test_headless_exec_uses_product_usage_contract(self) -> None:
         module = self.load_adapter_module()
         child_env = asyncio.run(
@@ -729,6 +738,7 @@ class AdapterRunEnvironmentTests(unittest.TestCase):
         agent = module.MixdogAgent.__new__(module.MixdogAgent)
         agent.model_name = None
         agent._route_profile_name = "fixture"
+        agent._effort_judge = "off"
         agent._route_profile = {"routes": {}, "leadFallback": fallback}
         agent._mode = "lead"
         calls = []
@@ -847,6 +857,7 @@ class AdapterRunEnvironmentTests(unittest.TestCase):
                     agent = module.MixdogAgent.__new__(module.MixdogAgent)
                     agent.model_name = None
                     agent._route_profile_name = "fixture"
+                    agent._effort_judge = "off"
                     agent._route_profile = {
                         "routes": {},
                         "leadFallback": fallback,
@@ -934,6 +945,7 @@ class AdapterRunEnvironmentTests(unittest.TestCase):
         agent = module.MixdogAgent.__new__(module.MixdogAgent)
         agent.model_name = None
         agent._route_profile_name = None
+        agent._effort_judge = "off"
         agent._route_profile = None
         agent._mode = "lead"
         captured = []
@@ -1032,6 +1044,7 @@ class AdapterRunEnvironmentTests(unittest.TestCase):
 
             agent = module.MixdogAgent.__new__(module.MixdogAgent)
             agent._route_profile_name = "fable-xhigh"
+            agent._effort_judge = "off"
             agent._route_profile = load_route_profile("fable-xhigh")
             agent._workflow = "default"
             agent._mode = "lead"
@@ -1489,6 +1502,7 @@ INSTALLER
                 return None
 
         agent = module.MixdogAgent.__new__(module.MixdogAgent)
+        agent._effort_judge = "off"
         agent._route_profile = None
         agent._provider = None
         agent._effort = None

@@ -17,9 +17,16 @@ import {
   subscribeModelCatalogInvalidation,
 } from './model-catalog-cache';
 import { filterConfiguredModels } from './model-catalog';
-import { EFFORT_FALLBACK_ORDER, preferredModelParameters } from './model-route-utils';
+import {
+  EFFORT_FALLBACK_ORDER,
+  modelOffersUltrafast,
+  preferredModelParameters,
+  type RouteSpeed,
+  speedRouteFields,
+} from './model-route-utils';
 import { RouteEditor } from './RouteEditor';
-import { refreshAutoEffort, setAutoEffortEnabled, useAutoEffort } from './auto-effort-store';
+import { cancelQuotaContinue, takeQuotaContinue } from './quota-continue';
+import { hostRouteAutoEffort, routeAutoEffortCapable, useAutoEffortRoute } from './auto-effort-store';
 import { OpenSelect } from './OpenSelect';
 import { InitialSurface } from './InitialSurface';
 import { modelContextWindow, modelDisplayName, modelFastAvailable, modelMaxContextWindow } from './provider-display';
@@ -65,6 +72,7 @@ export const WorkflowSelect = memo(function WorkflowSelect({
     if (!workflowReady) return;
     reportBootSurfaceReady('workflow-controls', 'catalog', 'shell');
   }, [workflowReady]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reloadNonce is a deliberate trigger that forces the workflow list to reload.
   useEffect(() => {
     const shared = freshWorkflowOptions();
     if (shared) {
@@ -281,9 +289,24 @@ function routeModelParameters(parameters: Record<string, string>, maxContextWind
 
 /** The model's default window as a slider stop: a multiple of 10 within
  *  10–100, or 100 when the model has no adjustable window. */
-function defaultContextPercent(defaultWindow: number, maxWindow: number): number {
+export function defaultContextPercent(defaultWindow: number, maxWindow: number): number {
   if (!(maxWindow > 0)) return 100;
   return Math.max(10, Math.min(100, Math.round((defaultWindow / maxWindow) * 10) * 10));
+}
+
+/** A requested Context percent as a slider stop: a multiple of 10 within 10–100. */
+export function contextSliderPercent(requested: number): number {
+  return Math.max(10, Math.min(100, Math.round(requested / 10) * 10));
+}
+
+/** Tokens a slider stop routes; the default stop keeps the model's own default window. */
+export function contextTokensForPercent(
+  percent: number,
+  contextWindow: { defaultPercent: number; defaultTokens: number; maxTokens: number }
+): number {
+  return percent === contextWindow.defaultPercent
+    ? contextWindow.defaultTokens
+    : Math.floor((contextWindow.maxTokens * percent) / 100);
 }
 
 export const ModelSelector = memo(function ModelSelector({
@@ -292,6 +315,7 @@ export const ModelSelector = memo(function ModelSelector({
   effort: sourceEffort,
   fast: sourceFast,
   fastCapable: sourceFastCapable,
+  autoEffort: sourceAutoEffort,
   modelParameters: sourceModelParameters,
   contextPercent: sourceContextPercent,
   modelDisabled,
@@ -311,6 +335,8 @@ export const ModelSelector = memo(function ModelSelector({
   effort: string;
   fast: boolean;
   fastCapable: boolean;
+  /** The route's own Auto reasoning flag; absent means on. */
+  autoEffort?: boolean;
   modelParameters?: Record<string, string>;
   contextPercent?: number;
   modelDisabled: boolean;
@@ -322,7 +348,7 @@ export const ModelSelector = memo(function ModelSelector({
   applySnapshot: (snapshot: SessionSnapshot | null) => void;
   onOpenSettings: (section?: SettingsSection | null) => void;
   onDraftSelection?: (selection: DesktopModelSelection) => void;
-  onRoutePreferenceApplied?: (selection: DesktopModelSelection) => void;
+  onRoutePreferenceApplied?: (selection: DesktopModelSelection, options?: { modelChoice?: boolean }) => void;
 }) {
   const [cachedCatalog] = useState(readCachedModelCatalog);
   const [models, setModels] = useState<DesktopModelOption[]>(cachedCatalog.models);
@@ -332,26 +358,19 @@ export const ModelSelector = memo(function ModelSelector({
   const [catalogLoaded, setCatalogLoaded] = useState(cachedCatalog.models.length > 0);
   const [startupCatalogSettled, setStartupCatalogSettled] = useState(cachedCatalog.models.length > 0);
   const [catalogRefreshing, setCatalogRefreshing] = useState(false);
-  const [autoEffortPending, setAutoEffortPending] = useState(false);
-  const changeAutoEffort = async (enabled: boolean) => {
-    setAutoEffortPending(true);
-    try {
-      await setAutoEffortEnabled(enabled);
-    } catch {
-      await refreshAutoEffort();
-    } finally {
-      setAutoEffortPending(false);
-    }
-  };
   const { selection, begin, settle } = useModelSelection(sessionId || '', {
     provider: sourceProvider,
     model: sourceModel,
     effort: sourceEffort,
     fast: sourceFast,
+    ...(typeof sourceAutoEffort === 'boolean' ? { autoEffort: sourceAutoEffort } : {}),
     modelParameters: sourceModelParameters,
     contextPercent: sourceContextPercent,
   });
-  const { provider, model, effort = '', fast = false, modelParameters, contextPercent } = selection;
+  const { provider, model, effort = '', fast = false, autoEffort, modelParameters, contextPercent } = selection;
+  // Every route write carries the route's known Auto flag, like `fast`.
+  // An older host rejects the field, so it travels only to a host that takes it.
+  const autoEffortField = hostRouteAutoEffort() && typeof autoEffort === 'boolean' ? { autoEffort } : {};
   const catalogInFlight = useRef<Promise<void> | null>(null);
   // Newest request wins. An older reply may land after a newer choice, so only
   // the current token may publish its snapshot; useModelSelection already
@@ -385,7 +404,9 @@ export const ModelSelector = memo(function ModelSelector({
   // 모델이 그대로 표기되게). The RAW catalog answers those cases.
   const known = selected || models.find((option) => option.provider === provider && option.model === model);
   const awaitingRoute = !known && !startupCatalogSettled;
-  const autoEffort = useAutoEffort(known?.autoEffortCapable === true);
+  const autoEffortRoute = useAutoEffortRoute(known?.autoEffortCapable === true, autoEffort, (enabled) =>
+    changeAutoEffort(enabled)
+  );
   useEffect(() => {
     reportBootSurfaceStage('model-controls', modelBootKey, 'module');
     if (!awaitingRoute) reportBootSurfaceReady('model-controls', modelBootKey, 'shell');
@@ -395,17 +416,14 @@ export const ModelSelector = memo(function ModelSelector({
   const defaultContextWindow = known ? modelContextWindow(known) : 0;
   const maxContextWindow = known ? modelMaxContextWindow(known) : 0;
   const contextDefaultPercent = defaultContextPercent(defaultContextWindow, maxContextWindow);
-  const normalizedContextPercent = Math.max(
-    10,
-    Math.min(
-      100,
-      Math.round((Number(contextPercent) || Number(known?.savedContextPercent) || contextDefaultPercent) / 10) * 10
-    )
+  const normalizedContextPercent = contextSliderPercent(
+    Number(contextPercent) || Number(known?.savedContextPercent) || contextDefaultPercent
   );
-  const contextTokens =
-    normalizedContextPercent === contextDefaultPercent
-      ? defaultContextWindow
-      : Math.floor((maxContextWindow * normalizedContextPercent) / 100);
+  const contextTokens = contextTokensForPercent(normalizedContextPercent, {
+    defaultPercent: contextDefaultPercent,
+    defaultTokens: defaultContextWindow,
+    maxTokens: maxContextWindow,
+  });
   const routedModelParameters = routeModelParameters(selectedModelParameters, maxContextWindow);
   const routedParameterFields = Object.keys(routedModelParameters).length
     ? { modelParameters: routedModelParameters }
@@ -520,7 +538,7 @@ export const ModelSelector = memo(function ModelSelector({
     reportBootSurfaceStage('model-controls', modelBootKey, 'data');
   }, [model, modelBootKey, startupCatalogSettled]);
 
-  const route = async (selection: DesktopModelSelection) => {
+  const route = async (selection: DesktopModelSelection, modelChoice = false) => {
     if (modelUnavailable) return false;
     if (onDraftSelection) {
       onDraftSelection(selection);
@@ -536,7 +554,7 @@ export const ModelSelector = memo(function ModelSelector({
         settle(token, next);
         if (latestRouteToken.current === token) {
           applySnapshot(next);
-          if (applied) onRoutePreferenceApplied?.(selection);
+          if (applied) onRoutePreferenceApplied?.(selection, modelChoice ? { modelChoice: true } : undefined);
         }
       }
     } finally {
@@ -562,6 +580,12 @@ export const ModelSelector = memo(function ModelSelector({
       else if (typeof option.savedFast === 'boolean') requestedFast = option.savedFast;
       else requestedFast = option.fastPreferred;
     }
+    let nextAutoEffort: boolean | undefined;
+    if (routeAutoEffortCapable(option)) {
+      if (sameModel) nextAutoEffort = autoEffort !== false;
+      else if (typeof remembered?.autoEffort === 'boolean') nextAutoEffort = remembered.autoEffort;
+      else nextAutoEffort = option.savedAutoEffort ?? true;
+    }
     const nextModelParameters = preferredModelParameters(
       option,
       sameModel ? selectedModelParameters : remembered?.modelParameters || {}
@@ -576,16 +600,25 @@ export const ModelSelector = memo(function ModelSelector({
       requestedFast === undefined
         ? undefined
         : modelFastAvailable(option, nextEffort, nextModelParameters) && requestedFast;
-    return route({
+    const selection: DesktopModelSelection = {
       provider: option.provider,
       model: option.model,
       ...(nextEffort ? { effort: nextEffort } : {}),
       ...(nextFast === undefined ? {} : { fast: nextFast }),
+      ...(nextAutoEffort === undefined ? {} : { autoEffort: nextAutoEffort }),
       ...(option.modelParameterOptions?.length
         ? { modelParameters: routeModelParameters(nextModelParameters, optionMaxWindow) }
         : {}),
       ...(optionMaxWindow > 0 ? { contextPercent: nextContextPercent } : {}),
-    });
+    };
+    // "Continue in another model" after a quota stop: this explicit pick goes
+    // to the continue flow instead of the ordinary route change.
+    const continueInModel = sessionId ? takeQuotaContinue(sessionId) : null;
+    if (continueInModel) {
+      continueInModel(selection);
+      return true;
+    }
+    return route(selection, !sameModel);
   };
   const changeFast = async (enabled: boolean) => {
     if (tuningUnavailable) return;
@@ -595,6 +628,7 @@ export const ModelSelector = memo(function ModelSelector({
         model,
         ...(effort ? { effort } : {}),
         fast: enabled,
+        ...autoEffortField,
         contextPercent: normalizedContextPercent,
       });
       return;
@@ -621,6 +655,23 @@ export const ModelSelector = memo(function ModelSelector({
       if (!accepted) settle(token);
     }
   };
+  const changeSpeed = async (speed: RouteSpeed) => {
+    if (!known || !modelOffersUltrafast(known)) {
+      await changeFast(speed !== 'standard');
+      return;
+    }
+    if (tuningUnavailable) return;
+    const next = speedRouteFields(speed, selectedModelParameters, true);
+    await route({
+      provider,
+      model,
+      ...(effort ? { effort } : {}),
+      fast: next.fast,
+      ...autoEffortField,
+      modelParameters: routeModelParameters(next.modelParameters, maxContextWindow),
+      contextPercent: normalizedContextPercent,
+    });
+  };
   const changeEffort = async (effort: string) => {
     if (tuningUnavailable) return;
     const nextFast = fastCapable
@@ -632,6 +683,7 @@ export const ModelSelector = memo(function ModelSelector({
         model,
         effort,
         ...(nextFast === undefined ? {} : { fast: nextFast }),
+        ...autoEffortField,
         ...routedParameterFields,
         contextPercent: normalizedContextPercent,
       });
@@ -643,6 +695,7 @@ export const ModelSelector = memo(function ModelSelector({
         model,
         effort,
         fast: false,
+        ...autoEffortField,
         ...routedParameterFields,
         contextPercent: normalizedContextPercent,
       });
@@ -674,6 +727,7 @@ export const ModelSelector = memo(function ModelSelector({
             model,
             effort,
             ...(nextFast === undefined ? {} : { fast: nextFast }),
+            ...autoEffortField,
             ...routedParameterFields,
             contextPercent: normalizedContextPercent,
           });
@@ -691,9 +745,28 @@ export const ModelSelector = memo(function ModelSelector({
       model,
       ...(effort ? { effort } : {}),
       ...(fastControlVisible ? { fast: displayedFast } : {}),
+      ...autoEffortField,
       ...routedParameterFields,
       contextPercent: nextContextPercent,
     });
+  };
+  // This route's Auto reasoning switch: the route changes, never the master.
+  const changeAutoEffort = async (enabled: boolean) => {
+    if (!known || tuningUnavailable || !provider || !model) return;
+    const selection: DesktopModelSelection = {
+      provider,
+      model,
+      ...(effort ? { effort } : {}),
+      ...(fastControlVisible ? { fast: displayedFast } : {}),
+      autoEffort: enabled,
+      ...routedParameterFields,
+      contextPercent: normalizedContextPercent,
+    };
+    if (onDraftSelection) {
+      onDraftSelection(selection);
+      return;
+    }
+    await route(selection);
   };
   const changeModelParameter = async (id: string, value: string) => {
     if (!known || tuningUnavailable) return;
@@ -706,6 +779,7 @@ export const ModelSelector = memo(function ModelSelector({
       model,
       ...(effort ? { effort } : {}),
       ...(nextFast === undefined ? {} : { fast: nextFast }),
+      ...autoEffortField,
       modelParameters: routeModelParameters(nextModelParameters, maxContextWindow),
       contextPercent: normalizedContextPercent,
     });
@@ -748,21 +822,18 @@ export const ModelSelector = memo(function ModelSelector({
         }
         onSelectModel={chooseModel}
         onChangeEffort={(value) => void changeEffort(value)}
-        onChangeFast={(enabled) => void changeFast(enabled)}
+        onChangeSpeed={(speed) => void changeSpeed(speed)}
         onChangeContext={(value) => void changeContext(value)}
         onChangeModelParameter={(id, value) => void changeModelParameter(id, value)}
         onOpenProviders={() => onOpenSettings('providers')}
         onOpenModelPane={() => void loadCatalog()}
-        autoEffort={
-          known?.autoEffortCapable && autoEffort?.installed
-            ? { enabled: autoEffort.enabled, pending: autoEffortPending }
-            : null
-        }
-        onChangeAutoEffort={(enabled) => void changeAutoEffort(enabled)}
-        onOpenSheet={() => {
-          if (known?.autoEffortCapable) void refreshAutoEffort();
-        }}
+        autoEffort={autoEffortRoute.autoEffort}
+        onChangeAutoEffort={autoEffortRoute.onChangeAutoEffort}
+        onOpenSheet={autoEffortRoute.onOpenSheet}
         answersModelPickerRequests={answersModelPickerRequests}
+        onClosed={() => {
+          if (sessionId) cancelQuotaContinue(sessionId);
+        }}
       />
     </div>
   );

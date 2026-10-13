@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { localPageUrl } from './local-page-server';
 
+const projectPageUrl = (root, rel) => localPageUrl(root, rel, { scope: 'project', authorize: async () => {} });
+
 function get(url, path, headers = {}) {
   const { hostname, port } = new URL(url);
   return new Promise((resolve, reject) => {
@@ -13,7 +15,11 @@ function get(url, path, headers = {}) {
       const chunks = [];
       response.on('data', (chunk) => chunks.push(chunk));
       response.on('end', () =>
-        resolve({ status: response.statusCode, type: response.headers['content-type'], body: Buffer.concat(chunks).toString() })
+        resolve({
+          status: response.statusCode,
+          type: response.headers['content-type'],
+          body: Buffer.concat(chunks).toString(),
+        })
       );
     });
     req.on('error', reject);
@@ -36,7 +42,7 @@ async function site(t) {
 
 test('a page and its relative web assets are served from an unguessable loopback prefix', async (t) => {
   const root = await site(t);
-  const url = await localPageUrl(root, 'page.html');
+  const url = await projectPageUrl(root, 'page.html');
   const { pathname } = new URL(url);
   assert.match(url, /^http:\/\/127\.0\.0\.1:\d+\/[A-Za-z0-9_-]{32}\/page\.html$/);
   const page = await get(url, pathname);
@@ -45,13 +51,28 @@ test('a page and its relative web assets are served from an unguessable loopback
   assert.equal(page.body, '<p>한글 페이지</p>');
   const prefix = pathname.slice(0, pathname.lastIndexOf('/'));
   assert.equal((await get(url, `${prefix}/assets/style.css`)).status, 200);
-  // The same root keeps one prefix.
-  assert.equal(new URL(await localPageUrl(root, 'assets/../page.html')).pathname, pathname);
+  // A fresh invocation gets independent authority, even for the same page.
+  const another = await projectPageUrl(root, 'assets/../page.html');
+  assert.notEqual(new URL(another).pathname, pathname);
+  assert.equal((await get(another, new URL(another).pathname)).body, page.body);
+});
+
+test('newly supported web asset types carry their content type', async (t) => {
+  const root = await site(t);
+  await writeFile(join(root, 'app.webmanifest'), '{}');
+  await writeFile(join(root, 'notes.md'), '# hi');
+  await writeFile(join(root, 'model.glb'), 'glb');
+  const url = await projectPageUrl(root, 'page.html');
+  const { pathname } = new URL(url);
+  const prefix = pathname.slice(0, pathname.lastIndexOf('/'));
+  assert.equal((await get(url, `${prefix}/app.webmanifest`)).type, 'application/manifest+json; charset=utf-8');
+  assert.equal((await get(url, `${prefix}/notes.md`)).type, 'text/markdown; charset=utf-8');
+  assert.equal((await get(url, `${prefix}/model.glb`)).type, 'model/gltf-binary');
 });
 
 test('nothing outside the root, no dotfiles and no non-web files are served', async (t) => {
   const root = await site(t);
-  const url = await localPageUrl(root, 'page.html');
+  const url = await projectPageUrl(root, 'page.html');
   const { pathname } = new URL(url);
   const prefix = pathname.slice(0, pathname.lastIndexOf('/'));
   for (const path of [
@@ -66,7 +87,7 @@ test('nothing outside the root, no dotfiles and no non-web files are served', as
   }
   // A DNS-rebound name pointing at loopback never reaches the files.
   assert.equal((await get(url, pathname, { host: 'evil.example' })).status, 403);
-  await assert.rejects(localPageUrl(join(root, 'assets'), '../page.html'), /inside its folder/);
+  await assert.rejects(projectPageUrl(join(root, 'assets'), '../page.html'), /inside its folder/);
 });
 
 test('directory links cannot expose hidden or out-of-root files, but public assets still load', async (t) => {
@@ -76,7 +97,7 @@ test('directory links cannot expose hidden or out-of-root files, but public asse
   await symlink(join(root, '.git'), join(root, 'hidden-link'), linkType);
   await symlink(outside, join(root, 'outside-link'), linkType);
   await symlink(join(root, 'assets'), join(root, 'assets-link'), linkType);
-  const url = await localPageUrl(root, 'page.html');
+  const url = await projectPageUrl(root, 'page.html');
   const { pathname } = new URL(url);
   const prefix = pathname.slice(0, pathname.lastIndexOf('/'));
 
@@ -86,4 +107,20 @@ test('directory links cannot expose hidden or out-of-root files, but public asse
   assert.equal(asset.status, 200);
   assert.equal(asset.type, 'text/css; charset=utf-8');
   assert.equal(asset.body, 'p{color:red}');
+});
+
+test('a selected page outside every Project serves only that page, never its neighbors', async (t) => {
+  const base = await mkdtemp(join(tmpdir(), 'mixdog-outside-page-'));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await mkdir(join(base, 'pages'), { recursive: true });
+  await mkdir(join(base, 'shared'), { recursive: true });
+  await writeFile(join(base, 'pages', 'page.html'), '<p>x</p>');
+  await writeFile(join(base, 'pages', 'data.json'), '{"a":1}');
+  await writeFile(join(base, 'shared', 'style.css'), 'p{color:blue}');
+  const url = await localPageUrl(join(base, 'pages'), 'page.html', { scope: 'file', authorize: async () => {} });
+  const { pathname } = new URL(url);
+  const dir = pathname.replace(/[^/]+$/, '');
+  assert.equal((await get(url, pathname)).status, 200);
+  assert.equal((await get(url, `${dir}data.json`)).status, 404);
+  assert.equal((await get(url, `${dir}../shared/style.css`)).status, 404);
 });

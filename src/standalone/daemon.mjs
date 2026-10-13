@@ -54,18 +54,23 @@ import {
 } from '../runtime/agent/orchestrator/providers/stream-json-pool.mjs';
 import { createAgentDispatchBroker } from './agent-dispatch-broker.mjs';
 import { createChannelTransport } from './channel-transport.mjs';
+import { drainDeferral } from './daemon-drain-policy.mjs';
 import { createChannelSessionRouter } from '../session-runtime/services/channel-session-router.mjs';
 import { createSessionTransport } from './session-transport.mjs';
 import { createSessionService } from './session-service.mjs';
 import { createLocalSessionBridge } from './daemon-local-session-bridge.mjs';
 import { createStoredSessionViews } from './daemon-stored-session-views.mjs';
+import * as quotaResumeStore from '../runtime/shared/quota-resume-store.mjs';
 import { createInlineSessionRuntimeHost } from './session-runtime-inline-host.mjs';
 import { getStandaloneMemoryRuntime } from '../session-runtime/services/memory-runtime-proxy.mjs';
 import { createBootPhaseProfiler } from './boot-phase-profiler.mjs';
 import { createDaemonBootCoordinator } from './daemon-boot-coordinator.mjs';
 import { createDaemonLog } from './daemon-log.mjs';
 import { daemonCrashCaptureDir } from '../session-runtime/services/daemon-crash-capture/paths.mjs';
-import { installDaemonExitRecorder, reconcileLostDaemonCaptures } from '../session-runtime/services/daemon-crash-capture/daemon-exit-record.mjs';
+import {
+  installDaemonExitRecorder,
+  reconcileLostDaemonCaptures,
+} from '../session-runtime/services/daemon-crash-capture/daemon-exit-record.mjs';
 import { createDaemonTelemetry } from './daemon-telemetry.mjs';
 import { createLagProfiler } from './daemon-lag-profiler.mjs';
 import { createChannelsRuntimeLoader } from './daemon-channels-loader.mjs';
@@ -128,8 +133,10 @@ let daemonTelemetry = null;
 
 function registerMemoryRuntimeLazy() {
   // Register the shared proxy immediately so daemon shutdown owns its
-  // lifecycle, but keep the isolated process off the startup path. A real
-  // memory call or the post-connect idle warmup starts the exact singleton.
+  // lifecycle, but keep the isolated process off the startup path. The first
+  // real memory call (memory/recall tools, the Memory install) starts the
+  // singleton; nothing warms it at boot. The PG cluster itself usually starts
+  // earlier: the channels schedules/webhooks stores open it at boot.
   if (process.env.MIXDOG_DAEMON_SKIP_MEMORY === '1') {
     log('memory runtime skipped (MIXDOG_DAEMON_SKIP_MEMORY=1)');
     return;
@@ -347,7 +354,11 @@ function maybeSelfShutdown(reason) {
     return;
   }
   const { activeCalls, queuedCalls, busySessions, busyMemoryAgents } = inFlightWork();
-  if (activeCalls > 0 || queuedCalls > 0) {
+  const deferral = drainDeferral(
+    { activeCalls, queuedCalls, busySessions, busyMemoryAgents },
+    { force: replacementRequested?.force === true }
+  );
+  if (deferral === 'calls') {
     log(`shutdown deferred (${reason}): activeCalls=${activeCalls} queuedCalls=${queuedCalls}`);
     if (!shutdownRecheckTimer) {
       shutdownRecheckTimer = setTimeout(() => {
@@ -360,7 +371,7 @@ function maybeSelfShutdown(reason) {
   }
   // A turn in flight outlives every view — closing the app or the terminal is
   // not a reason to abandon work the daemon is still running.
-  if (busySessions > 0 || busyMemoryAgents > 0) {
+  if (deferral === 'busy') {
     log(`shutdown deferred (${reason}): busySessions=${busySessions}` + ` memoryAgents=${busyMemoryAgents}`);
     if (!shutdownRecheckTimer) {
       shutdownRecheckTimer = setTimeout(() => {
@@ -378,8 +389,10 @@ function maybeSelfShutdown(reason) {
   void shutdown(reason);
 }
 
-function requestDaemonReplacement({ protocol, revision, version } = {}) {
+function requestDaemonReplacement({ protocol, revision, version, force } = {}) {
+  const forced = force === true;
   const requested = {
+    force: forced,
     protocol: Number(protocol),
     revision: Math.max(0, Number(revision) || 0),
     version: String(version || '0.0.0'),
@@ -391,12 +404,14 @@ function requestDaemonReplacement({ protocol, revision, version } = {}) {
   if (
     replacementRequested &&
     requested.revision === replacementRequested.revision &&
-    requested.version === replacementRequested.version
+    requested.version === replacementRequested.version &&
+    !(forced && replacementRequested.force !== true)
   )
     return true;
   replacementRequested = requested;
   const reason = `daemon replacement by revision/build ${requested.revision}/${requested.version}`;
-  log(`${reason} requested — preserving clients until live work settles`);
+  if (forced) log(`${reason} FORCED — aborting in-flight work (sessions, service calls, agent runs)`);
+  else log(`${reason} requested — preserving clients until live work settles`);
   sessionTransport?.beginDrain?.(reason);
   transport?.beginDrain?.(reason);
   maybeSelfShutdown(reason);
@@ -607,6 +622,13 @@ async function main() {
   // The daemon owns prompt attachments; its census runs off the boot path
   // (first attempt after the store's start delay, then per its interval).
   void import('../runtime/attachments/store.mjs').then((store) => store.startAttachmentGc()).catch(() => {});
+  // Session-search backfill: once per run, well after boot, low priority.
+  const sessionSearchBackfillTimer = setTimeout(() => {
+    void import('../runtime/session-search/session-search-ingest.mjs')
+      .then((search) => search.backfillSessionSearch())
+      .catch((error) => log(`session-search backfill failed: ${error?.message || error}`));
+  }, 60_000);
+  sessionSearchBackfillTimer.unref?.();
   // The first session per repository would otherwise run `git status` and
   // `git check-ignore` synchronously while composing its prompt. Registered
   // projects (a small JSON list, most recently selected first) are the cwds
@@ -691,6 +713,7 @@ async function main() {
   const bootCoordinator = createDaemonBootCoordinator({
     prewarmKeychain: () => sessionRuntimeHost.prewarmKeychain(),
     recoverActiveGoals: () => sessionService.recoverActiveGoals(),
+    startQuotaResume: () => sessionService.startQuotaResume(),
     // The modules every rail catalog request needs (session summaries,
     // projects, statusline segments) — warm them once the desktop is up so
     // the first Sessions/Projects click reads a hot module graph.
@@ -717,6 +740,11 @@ async function main() {
       maybeSelfShutdown('remote clients changed');
     },
     onDesktopReady: () => bootCoordinator.notifyDesktopReady(),
+    quotaResumeStore,
+    readQuotaUsable: async (provider, model) => {
+      const { providerQuotaUsable } = await import('../runtime/agent/orchestrator/providers/quota-reading.mjs');
+      return providerQuotaUsable(provider, model);
+    },
     log,
   });
   sessionTransport = createSessionTransport({

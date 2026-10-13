@@ -31,7 +31,15 @@ const {
   setSecret: _setSecret,
   deleteSecret: _deleteSecret,
   hasSecret: _hasSecret,
+  setSecretAsync: _setSecretAsyncImpl,
+  deleteSecretAsync: _deleteSecretAsyncImpl,
+  keychainStatus: _keychainStatus,
+  retryKeychain: _retryKeychain,
+  refreshKeychainStatus: _refreshKeychainStatus,
+  onKeychainRecovered: _onKeychainRecovered,
 } = _require('../../lib/keychain-cjs.cjs');
+const _setSecretAsync = _setSecretAsyncImpl ?? (async (account, value) => _setSecret(account, value));
+const _deleteSecretAsync = _deleteSecretAsyncImpl ?? (async (account) => _deleteSecret(account));
 
 // Resolved per call: the pristine-execution boundary retargets
 // MIXDOG_resolvePluginData() at runtime, so an import-time capture would write into the
@@ -41,6 +49,22 @@ function configPath() {
 }
 
 const GENERATED_KEY = '_generated';
+
+// Marker of the one-time "defaults live in code" separation (see
+// defaults-separation.mjs). A file created by this code is born separated, so
+// the first write into an empty config stamps the current version.
+export const DEFAULTS_VERSION = 2;
+export const DEFAULTS_VERSION_KEY = 'defaultsVersion';
+
+function isFreshConfig(root) {
+  return !isPlainObject(root) || Object.keys(root).length === 0;
+}
+
+function withFreshDefaultsVersion(fresh, root) {
+  if (fresh && isPlainObject(root) && !hasOwn(root, DEFAULTS_VERSION_KEY))
+    root[DEFAULTS_VERSION_KEY] = DEFAULTS_VERSION;
+  return root;
+}
 
 // Process-wide short-TTL cache of the RAW utf8 string of configPath() (never
 // the parsed object). Parallel agent spawns each hit the non-RMW read path
@@ -410,9 +434,10 @@ export function updateConfig(updater) {
   let saved = null;
   withConfigLock(() => {
     const current = stripGeneratedMarker(readAllForRmW()) || {};
+    const fresh = isFreshConfig(current);
     const next = typeof updater === 'function' ? updater({ ...current }) : updater;
     if (!isPlainObject(next)) throw new Error('[config] updateConfig updater must return an object');
-    saved = canonicalizeUnifiedConfig(stripGeneratedMarker(next) || {});
+    saved = withFreshDefaultsVersion(fresh, canonicalizeUnifiedConfig(stripGeneratedMarker(next) || {}));
     writeAll(saved);
   });
   return saved;
@@ -421,9 +446,10 @@ export function updateConfig(updater) {
 export function updateSection(section, updater) {
   withConfigLock(() => {
     const all = readAllForRmW();
+    const fresh = isFreshConfig(all);
     const current = stripGeneratedMarker(all[section] || {});
     all[section] = stripGeneratedMarker(typeof updater === 'function' ? updater(current) : updater);
-    writeAll(all);
+    writeAll(withFreshDefaultsVersion(fresh, all));
   });
 }
 
@@ -495,9 +521,10 @@ export function updateConfigAsync(updater) {
     let saved = null;
     await withConfigLockAsync(async () => {
       const current = stripGeneratedMarker(readAllForRmW()) || {};
+      const fresh = isFreshConfig(current);
       const next = typeof updater === 'function' ? updater({ ...current }) : updater;
       if (!isPlainObject(next)) throw new Error('[config] updateConfigAsync updater must return an object');
-      saved = canonicalizeUnifiedConfig(stripGeneratedMarker(next) || {});
+      saved = withFreshDefaultsVersion(fresh, canonicalizeUnifiedConfig(stripGeneratedMarker(next) || {}));
       await writeAllAsync(saved);
     });
     return saved;
@@ -508,9 +535,10 @@ export function updateSectionAsync(section, updater) {
   return trackConfigWrite(() =>
     withConfigLockAsync(async () => {
       const all = readAllForRmW();
+      const fresh = isFreshConfig(all);
       const current = stripGeneratedMarker(all[section] || {});
       all[section] = stripGeneratedMarker(typeof updater === 'function' ? updater(current) : updater);
-      await writeAllAsync(all);
+      await writeAllAsync(withFreshDefaultsVersion(fresh, all));
     })
   );
 }
@@ -568,6 +596,21 @@ export function saveSecret(account, value) {
   try {
     _setSecret(account, value);
   } catch (err) {
+    throw saveSecretError(account, err);
+  }
+}
+
+/** Non-blocking saveSecret: Linux secret-tool runs off the event loop. */
+export async function saveSecretAsync(account, value) {
+  try {
+    await _setSecretAsync(account, value);
+  } catch (err) {
+    throw saveSecretError(account, err);
+  }
+}
+
+function saveSecretError(account, err) {
+  {
     // On WSL/headless Linux (and any host missing a usable keychain provider,
     // e.g. secret-tool/libsecret not installed or no running Secret Service) the OS
     // write throws a cryptic provider error. Surface an actionable message that
@@ -579,16 +622,41 @@ export function saveSecret(account, value) {
     const envHint = stdEnv ? `${stdEnv} (or ${envKey})` : envKey;
     const e = new Error(
       `[config] could not save secret to the OS keychain: ${err?.message ? err.message : err}\n` +
-        `  No usable keychain provider on this host (common on WSL / headless Linux without libsecret).\n` +
         `  Set the ${envHint} environment variable instead — the runtime reads it directly.`
     );
     e.cause = err;
-    throw e;
+    return e;
   }
 }
 
 export function deleteSecret(account) {
   _deleteSecret(account);
+}
+
+/** Non-blocking deleteSecret: Linux secret-tool runs off the event loop. */
+export async function deleteSecretAsync(account) {
+  await _deleteSecretAsync(account);
+}
+
+/** Retry a failed Linux keyring read; true when it just recovered. */
+export async function retryKeychain(options) {
+  return typeof _retryKeychain === 'function' ? await _retryKeychain(options) : false;
+}
+
+/** Passively detect a keyring that locked after it was read and re-snapshot a
+ *  stale cache (no unlock prompt). Resolves true when stored values changed. */
+export async function refreshKeychainStatus(options) {
+  return typeof _refreshKeychainStatus === 'function' ? (await _refreshKeychainStatus(options)) === true : false;
+}
+
+/** Subscribe to a locked/failed Linux keyring becoming readable again. */
+export function onKeychainRecovered(listener) {
+  return typeof _onKeychainRecovered === 'function' ? _onKeychainRecovered(listener) : () => {};
+}
+
+/** Keyring health for the UI: { state: ok|locked|missing|error|unknown, message }. */
+export function getKeychainStatus() {
+  return typeof _keychainStatus === 'function' ? _keychainStatus() : { state: 'unknown', message: '' };
 }
 
 /**

@@ -51,6 +51,7 @@ export function sessionModelSelection(snapshot: Snapshot): DesktopModelSelection
     model,
     ...(effort ? { effort } : {}),
     ...(typeof snapshot.fast === 'boolean' ? { fast: snapshot.fast } : {}),
+    ...(typeof snapshot.autoEffort === 'boolean' ? { autoEffort: snapshot.autoEffort } : {}),
     ...(snapshot.modelParameters ? { modelParameters: { ...snapshot.modelParameters } } : {}),
     ...(Number(snapshot.contextPercent) >= 10 ? { contextPercent: Number(snapshot.contextPercent) } : {}),
   };
@@ -132,7 +133,8 @@ export async function inheritancePreflight(
 export async function inheritSessionDirectly(
   sessionId: string,
   route: DesktopModelSelection,
-  inherit: (sourceSessionId: string, route: DesktopModelSelection) => Promise<void>
+  inherit: (sourceSessionId: string, route: DesktopModelSelection, options?: { compact: boolean }) => Promise<void>,
+  options?: { compact: boolean }
 ): Promise<boolean> {
   const fit = await inheritancePreflight(sessionId, route);
   if (fit?.known && !fit.fits) {
@@ -142,6 +144,6 @@ export async function inheritSessionDirectly(
     }
     showDesktopToast(t('This conversation is compacted for the new model before it carries over.'), 'info');
   }
-  await inherit(sessionId, route);
+  await (options ? inherit(sessionId, route, options) : inherit(sessionId, route));
   return true;
 }

@@ -9,7 +9,7 @@ import { createApiHelpers } from './shared.mjs';
 // published before the runtime write settles. What is NOT previewed about the
 // route (effort options, Fast capability, context window) is provider
 // metadata the runtime resolves while the preview is already on screen.
-const ROUTE_PREVIEW_KEYS = ['provider', 'model', 'effort', 'fast', 'modelParameters', 'contextPercent'];
+const ROUTE_PREVIEW_KEYS = ['provider', 'model', 'effort', 'fast', 'autoEffort', 'modelParameters', 'contextPercent'];
 
 /**
  * The patch that publishes a requested route before the runtime write settles.
@@ -61,6 +61,8 @@ export function createSessionRouteApi(bag) {
 
   const setRoute = async (opts) => {
     if (getState().commandBusy && !routeWrite) return false;
+    // Any route change supersedes waiting for the old route's quota reset.
+    bag.supersedeQuotaResume?.(getState().sessionId);
     const token = ++routeSequence;
     const previousWrite = routeWrite;
     const routeOpts = opts && typeof opts === 'object' ? opts : {};
@@ -76,8 +78,9 @@ export function createSessionRouteApi(bag) {
         // Explicit addressing initializes an empty session in place; the
         // runtime continues to own established-session route policy.
         const applyToCurrentSession = routeOpts.applyToCurrentSession === true;
-        const { applyToCurrentSession: _drop, ...nextRoute } = routeOpts;
-        const resolvedRoute = await runtime.setRoute(nextRoute, { applyToCurrentSession });
+        const keepMainModel = routeOpts.keepMainModel === true;
+        const { applyToCurrentSession: _drop, keepMainModel: _keep, ...nextRoute } = routeOpts;
+        const resolvedRoute = await runtime.setRoute(nextRoute, { applyToCurrentSession, keepMainModel });
         if (token === routeSequence) {
           if (applyToCurrentSession) syncContextStats({ allowEstimated: true });
           publishRoute();
@@ -145,8 +148,8 @@ export function createSessionRouteApi(bag) {
     listProviders: () => {
       return runtime.listProviders();
     },
-    getProviderSetup: () => {
-      return runtime.getProviderSetup();
+    getProviderSetup: (options = {}) => {
+      return runtime.getProviderSetup(options);
     },
     setRoute,
     setAgentRoute: async (agentId, opts) => {

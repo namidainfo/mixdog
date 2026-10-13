@@ -3,6 +3,19 @@
 // injected route provider (for sort priority) and webSearchCapableFor predicate.
 import { clean } from '../runtime/agent/orchestrator/runtime-core/session-text.mjs';
 import { contextWindowRange } from '../runtime/shared/llm/default-context-window.mjs';
+import { isCustomProviderName } from '../runtime/agent/orchestrator/providers/custom-reasoning.mjs';
+
+// A custom provider's effective row fields, carried when the row states them
+// (explicit false included); first-party rows never carry them.
+function customRowFields(name, m) {
+  if (!isCustomProviderName(name)) return {};
+  return {
+    ...(typeof m.name === 'string' && m.name ? { name: m.name } : {}),
+    ...(typeof m.hidden === 'boolean' ? { hidden: m.hidden } : {}),
+    ...(typeof m.manual === 'boolean' ? { manual: m.manual } : {}),
+    ...(m.customReasoning && typeof m.customReasoning === 'object' ? { customReasoning: m.customReasoning } : {}),
+  };
+}
 
 function parsedProviderModelVersion(id) {
   const text = clean(id).toLowerCase();
@@ -138,6 +151,9 @@ export function providerModelCacheRow(name, m, webSearchCapableFor) {
     serviceTiers: Array.isArray(m.serviceTiers) ? m.serviceTiers : [],
     additionalSpeedTiers: Array.isArray(m.additionalSpeedTiers) ? m.additionalSpeedTiers : [],
     defaultServiceTier: m.defaultServiceTier || null,
+    ...(Array.isArray(m.accessPrograms) ? { accessPrograms: m.accessPrograms } : {}),
+    // A catalog-hidden model leaves the pickers; its metadata still resolves.
+    ...(m.hidden === true ? { hidden: true } : {}),
     fastCapable: m.fastCapable === true,
     fastEfforts: Array.isArray(m.fastEfforts) ? m.fastEfforts : undefined,
     modelParameterOptions: Array.isArray(m.modelParameterOptions) ? m.modelParameterOptions : [],
@@ -148,5 +164,6 @@ export function providerModelCacheRow(name, m, webSearchCapableFor) {
     defaultFast: m.defaultFast === true,
     supportsMaxMode: m.supportsMaxMode === true,
     mode: m.mode || null,
+    ...customRowFields(name, m),
   };
 }

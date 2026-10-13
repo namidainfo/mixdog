@@ -35,6 +35,7 @@ export function createSessionSettingsApi(bag) {
     // acknowledge an older route.
     setModel: withCommandLock(
       async (m) => {
+        bag.supersedeQuotaResume?.(getState().sessionId);
         await runtime.setRoute({ model: m });
         publishRoute();
         return true;
@@ -132,6 +133,7 @@ export function createSessionSettingsApi(bag) {
     getDeveloperSettings: () => runtime.getDeveloperSettings?.(),
     setDeveloperOption: lockedRuntimeCall((id, enabled) => runtime.setDeveloperOption?.(id, enabled)),
     setWebSearchEnabled: lockedRuntimeCall((enabled) => runtime.setWebSearchEnabled?.(enabled)),
+    setInstructionFiles: lockedRuntimeCall((mode) => runtime.setInstructionFiles?.(mode)),
     setMemoryToolsEnabled: lockedRuntimeCall((enabled) => runtime.setMemoryToolsEnabled?.(enabled)),
     setBuiltinToolEnabled: lockedRuntimeCall((name, enabled) => runtime.setBuiltinToolEnabled?.(name, enabled)),
     installBuiltinFeature: lockedRuntimeCall((name) => runtime.installBuiltinFeature?.(name)),
@@ -140,6 +142,7 @@ export function createSessionSettingsApi(bag) {
     // even while a legacy blocking install owns commandBusy.
     startLocalProviderInstallation: (phase, modelId) => runtime.startLocalProviderInstallation(phase, modelId),
     cancelLocalProviderInstallation: (jobId) => runtime.cancelLocalProviderInstallation(jobId),
+    discardLocalProviderInstallation: (phase, modelId) => runtime.discardLocalProviderInstallation(phase, modelId),
     setLocalProviderIdleTtl: (seconds) => runtime.setLocalProviderIdleTtl(seconds),
     setLocalProviderContext: (modelId, tokens) => runtime.setLocalProviderContext(modelId, tokens),
     getLocalProviderModelDetails: (modelId) => runtime.getLocalProviderModelDetails(modelId),

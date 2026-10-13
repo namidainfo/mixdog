@@ -10,6 +10,7 @@ import {
   localProviderStatus,
   stopLocalProviderServer,
   cancelLocalInstallation,
+  discardLocalInstallation,
   configureLocalProviderIdleTtl,
 } from '../../runtime/local-provider/managed-runtime.mjs';
 import { deferComputerSessionRelease, endComputerExecution } from '../../runtime/computer-bridge/client.mjs';
@@ -38,11 +39,22 @@ import { createChannelConfigApi } from '../channel-config-api.mjs';
 import { createMediaApi } from '../media-api.mjs';
 import { createProviderAuthApi } from '../provider-auth-api.mjs';
 import { createUsageStatsApi } from '../usage-stats-api.mjs';
+import { listProviderAccounts } from '../services/provider-admin.mjs';
 import { createLifecycleApi } from '../lifecycle-api.mjs';
+import {
+  assertAdmissionOpen,
+  assertNotAddressed,
+  assertResumeTarget,
+  beginCanonicalClose,
+  finishCanonicalClose,
+  isAdmissionOpen,
+  markTerminal,
+} from '../session-address.mjs';
 import { createResourceApi } from '../resource-api.mjs';
 import { createModelRouteApi } from '../model-route-api.mjs';
 import { createWorkflowAgentsApi } from '../workflow-agents-api.mjs';
 import { createToolPolicyRefresh } from '../tool-policy-refresh.mjs';
+import { loadInstructionFilesContext } from '../../runtime/agent/orchestrator/context/instruction-files.mjs';
 import { createSessionTurnApi } from '../session-turn-api.mjs';
 import { createGoalFacadeApi } from '../goal-facade-api.mjs';
 import { createRuntimeReviewApi } from '../runtime-review-api.mjs';
@@ -67,7 +79,11 @@ export function wireApis(boot) {
     // though the boot-time autostart window has already passed.
     ensureAutomationRuntime: () => boot.scheduleChannelStart(0),
   });
-  boot.usageStatsApi = createUsageStatsApi({ getSessionId: () => boot.rt.session?.id || null });
+  boot.usageStatsApi = createUsageStatsApi({
+    getSessionId: () => boot.rt.session?.id || null,
+    accountEmails: (provider) =>
+      Object.fromEntries(listProviderAccounts(provider).accounts.map((row) => [row.id, row.email || ''])),
+  });
   boot.providerAuthApi = providerAuthApiFor(boot);
   boot.mediaApi = createMediaApi();
   boot.sessionTitles = createSessionTitleController({
@@ -108,6 +124,10 @@ function wireToolPolicyRefresh(boot) {
     modelStandaloneTools: boot.modelStandaloneTools,
     featureDisallowedTools: boot.featureDisallowedTools,
     loadCoreMemoryContext: boot.loadCoreMemoryContext,
+    loadInstructionFilesContext: (session) =>
+      session.skipInstructionFiles
+        ? ''
+        : loadInstructionFilesContext({ mode: rt.config?.instructionFiles, cwd: session.cwd }),
     activeWorkflowContext: workflowHelpers.activeWorkflowContext,
     invalidatePreSessionToolSurface: boot.invalidatePreSessionToolSurface,
   });
@@ -136,10 +156,9 @@ function builtinFeatureAdapters(boot) {
       } else if (name === 'localProvider') {
         await installLocalProviderRuntime();
       } else if (name === 'autoEffort') {
-        const { effortJudgeAvailable, effortJudgeModelDir } = await import('../../runtime/effort-judge/judge-client.mjs');
-        if (!effortJudgeAvailable()) {
-          throw new Error(`The Auto reasoning model is not installed (expected in ${effortJudgeModelDir()}).`);
-        }
+        // Downloads the judge model (verified per file) unless it is current.
+        const { installEffortJudge } = await import('../../runtime/effort-judge/judge-client.mjs');
+        await installEffortJudge();
       }
     },
     tidyEngineStatus: async () => {
@@ -160,6 +179,7 @@ function localProviderAdapters(boot) {
     getLocalProviderStatus: () => localProviderStatus(),
     stopLocalProviderServer,
     cancelLocalProviderInstallation: (jobId) => cancelLocalInstallation(jobId),
+    discardLocalProviderInstallation: (phase, modelId) => discardLocalInstallation(phase, modelId),
     configureLocalProviderIdleTtl,
     syncLocalProviderRegistry: async (enabled) => {
       invalidateProviderCaches();
@@ -317,6 +337,13 @@ function lifecycleApiFor(boot) {
       rt.memoryModPromise = v;
     },
     getReservedSessionId: () => rt.reservedSessionId,
+    getAddressedSessionId: () => rt.addressedSessionId,
+    assertNotAddressed: (operation) => assertNotAddressed(rt, operation),
+    assertResumeTarget: (id) => assertResumeTarget(rt, id),
+    markAddressTerminal: () => markTerminal(rt),
+    beginCanonicalClose: (id) => beginCanonicalClose(rt, id),
+    finishCanonicalClose: (previous, closed) => finishCanonicalClose(rt, previous, closed),
+    isCanonicallyClosed: () => rt.admission === 'terminal',
     abortActiveTurns: boot.abortActiveTurns,
     hooks: boot.hooks,
     hookCommonPayload: boot.hookCommonPayload,
@@ -397,6 +424,7 @@ function modelRouteApiFor(boot) {
     },
     getSession: () => rt.session,
     setSession: boot.adoptSession,
+    getAddressedSessionId: () => rt.addressedSessionId,
     getConfigHasSecrets: () => rt.configHasSecrets,
     getWebSearchRouteState: () => rt.webSearchRoute,
     setWebSearchRouteState: (v) => {
@@ -516,6 +544,8 @@ function sessionTurnApiFor(boot) {
     mcpTurnGraceMs: tunables.mcpTurnGraceMs,
     awaitRoutePreparation: () => routePreparation.wait(),
     getReservedSessionId: () => rt.reservedSessionId,
+    assertSessionAdmission: () => assertAdmissionOpen(rt),
+    isSessionAdmissionOpen: () => isAdmissionOpen(rt),
     registerActiveTurnController: boot.registerActiveTurnController,
     sessionTitles: boot.sessionTitles,
     endComputerExecution,

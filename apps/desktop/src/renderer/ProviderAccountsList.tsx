@@ -29,6 +29,8 @@ type ProviderAccount = {
   reauthRequired: boolean;
   /** Provider-side identity (email / account id) when the token exposes one. */
   identity?: string;
+  /** Sign-in email of the real account, when the provider exposes one. */
+  email?: string;
   blockedUntil?: number;
   usage?: { windows?: { label?: string; usedPct: number | null; resetAt?: number }[] };
 };
@@ -37,6 +39,33 @@ type Pool = { accounts: ProviderAccount[]; selectedId: string | null; auto: bool
 // Last roster per provider. The rail picker remounts on every open; seeding
 // from here paints instantly and the fresh read merely revalidates.
 const lastPools = new Map<string, Pool>();
+// Bumped by every list-adopted roster (read or mutation result): a preload
+// started before it is stale and must not overwrite the newer roster.
+const poolGenerations = new Map<string, number>();
+const bumpPoolGeneration = (provider: string): number => {
+  const next = (poolGenerations.get(provider) ?? 0) + 1;
+  poolGenerations.set(provider, next);
+  return next;
+};
+
+/** Settings open: seed the rosters so the Providers page paints complete cards
+ *  on its first visit instead of growing under the rows below. */
+export function preloadProviderAccounts(api: UsageApi | undefined, providers: string[]): Promise<unknown> {
+  const invokeCapability = api?.invokeCapability;
+  if (!invokeCapability) return Promise.resolve();
+  return Promise.all(
+    providers.map((provider) => {
+      const generation = bumpPoolGeneration(provider);
+      return invokeCapability({ capability: 'getProviderAccounts', args: [provider] })
+        .then((response) => {
+          const result = record(response.value);
+          if (poolGenerations.get(provider) !== generation || !Array.isArray(result.accounts)) return;
+          lastPools.set(provider, result as unknown as Pool);
+        })
+        .catch(() => undefined);
+    })
+  );
+}
 
 /** Pointer-driven reorder: the grabbed row lifts and follows the pointer; the
  *  rows it passes slide out of its way; release commits the new order. HTML5
@@ -74,6 +103,7 @@ export function ProviderAccountsList({
   const [pool, setPoolState] = useState<Pool | null>(() => lastPools.get(provider) ?? null);
   const setPool = useCallback(
     (next: Pool) => {
+      bumpPoolGeneration(provider);
       lastPools.set(provider, next);
       setPoolState(next);
     },
@@ -250,6 +280,7 @@ export function ProviderAccountsList({
     if (moved) reorder(from, to);
   };
   const dragging = drag !== null;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: clearGesture is recreated every render but only touches refs and a state setter; the listener must follow `dragging` only.
   useEffect(() => {
     if (!dragging) return;
     const onKey = (event: KeyboardEvent) => {
@@ -384,6 +415,7 @@ export function ProviderAccountsList({
                               }}
                             >
                               <input
+                                // biome-ignore lint/a11y/noAutofocus: inline rename opens from an explicit action and should take typing at once.
                                 autoFocus
                                 value={name}
                                 maxLength={80}
@@ -428,9 +460,10 @@ export function ProviderAccountsList({
                             </span>
                           )}
                         </div>
-                        {account.identity && account.identity !== account.label && (
-                          <small className="provider-account-meta">{account.identity}</small>
-                        )}
+                        {(account.email || account.identity) &&
+                          (account.email || account.identity) !== account.label && (
+                            <small className="provider-account-meta">{account.email || account.identity}</small>
+                          )}
                       </div>
                     </div>
                     <div className="settings-resource-actions">

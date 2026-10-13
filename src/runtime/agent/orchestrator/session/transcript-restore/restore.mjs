@@ -23,6 +23,7 @@ import {
   aggregateLoadingTargets,
   aggregateRawResult,
   aggregateResultPatch,
+  assignToolMetaFromMessage,
   assignUiDiffFromMessage,
   mergeAggregateCategoryEntries,
   stringUiDiffPatch,
@@ -47,14 +48,12 @@ function restoredTranscriptMetadata(message) {
   if (completionValue && completionStatus && Number.isFinite(completionElapsedMs)) {
     completion = { status: completionStatus, elapsedMs: Math.max(0, completionElapsedMs) };
     if (typeof completionValue.verb === 'string' && completionValue.verb) completion.verb = completionValue.verb;
-    if (typeof completionValue.autoEffort === 'string' && completionValue.autoEffort) {
-      completion.autoEffort = completionValue.autoEffort;
-    }
   }
   return {
     ...(Number.isFinite(Number(value.at)) ? { at: Number(value.at) } : {}),
     ...transcriptRouteMetadataFields(value),
     ...(typeof value.sender === 'string' && value.sender ? { sender: value.sender } : {}),
+    ...(typeof value.device === 'string' && value.device ? { device: value.device } : {}),
     ...(completion ? { completion } : {}),
   };
 }
@@ -133,6 +132,7 @@ function attachRestoredToolResult(message, pendingByCallId) {
   const text = (typeof message?.content === 'string' ? message.content : toolResultText(message?.content)) || '';
   target.result = text;
   assignUiDiffFromMessage(target, message);
+  assignToolMetaFromMessage(target, message);
   // Cancel/crash control bodies are not red failures — show Cancelled tone.
   if (toolResultTerminalStatus(text) === 'cancelled') {
     target.isError = false;

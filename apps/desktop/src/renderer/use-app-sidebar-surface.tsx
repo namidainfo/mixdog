@@ -1,12 +1,14 @@
 import { Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { DesktopProjectSummary } from '../shared/contract';
 import { SidebarPanelBoundary } from './sidebar-panel-surface';
+import { isRemoteHostRenderer } from './remote-ui-projection';
 import type { SidebarPanelKey } from './app-shell-components';
 import type { ExtensionsSection } from './extension-sections';
 import type { useAppShellPanels } from './use-app-shell-panels';
 import { useStableEvent } from './use-stable-event';
 import type { SidebarViewGroup } from './sidebar-view-layout';
 import { InitialSurface } from './InitialSurface';
+import { ProjectEditorDialog, type ProjectEditorDialogHandle } from './ProjectEditorDialog';
 
 type ShellPanels = ReturnType<typeof useAppShellPanels>;
 
@@ -150,6 +152,7 @@ export function useAppSidebarSurface({
     sidebarOpen,
     sidebarTreeMounted,
   ]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: sidebarGroupFor is a pure lookup; re-runs only on the listed surface/mount state
   useLayoutEffect(() => {
     if (!sidebarTreeMounted) {
       // The panel trees died with their host: nothing may claim to be warm.
@@ -212,7 +215,11 @@ export function useAppSidebarSurface({
   // and edits projects; NEW TASK is minted from its own entries only.
   const projectsRename = useStableEvent((path: string, alias: string) => void renameProject(path, alias));
   const projectsRemove = useStableEvent((path: string) => void removeProject(path));
-  const projectsChooseFolder = useCallback(async () => (await window.mixdogDesktop?.chooseProject()) ?? null, []);
+  const projectsChooseFolder = useCallback(
+    // Remote surfaces browse the host in-app (ProjectListSection), never the OS chooser.
+    async () => (isRemoteHostRenderer() ? null : ((await window.mixdogDesktop?.chooseProject()) ?? null)),
+    []
+  );
   const projectsMemoryControl = useCallback<NonNullable<React.ComponentProps<typeof ProjectsPane>['onMemoryControl']>>(
     async (input) =>
       (
@@ -222,6 +229,19 @@ export function useAppSidebarSurface({
         })
       ).value,
     []
+  );
+  // One editor host outside the sidebar panels: opened by "Project settings"
+  // over the current screen, and never closed by panel activation changes.
+  const projectEditorRef = useRef<ProjectEditorDialogHandle>(null);
+  const openProjectSettings = useStableEvent((path: string) => projectEditorRef.current?.open(path));
+  const projectEditorHost = (
+    <ProjectEditorDialog
+      ref={projectEditorRef}
+      projects={projects}
+      onRename={projectsRename}
+      onRemove={projectsRemove}
+      onMemoryControl={projectsMemoryControl}
+    />
   );
   const renderSidebarPanel = (panel: SidebarPanelKey, active: boolean): React.ReactNode => {
     if (!mountedSidebarPanels.has(panel)) return null;
@@ -284,5 +304,7 @@ export function useAppSidebarSurface({
     sidebarResumeSession,
     sidebarTreeMounted,
     renderSidebarPanel,
+    openProjectSettings,
+    projectEditorHost,
   };
 }

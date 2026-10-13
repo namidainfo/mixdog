@@ -13,7 +13,6 @@ import {
   liveAgentRows,
 } from './AgentActivityPane.tsx';
 import { createDesktopCancellationLedger, desktopAgentActivityState } from '../shared/agent-activity.ts';
-import { SessionStatusIsland } from './SessionStatusIsland.tsx';
 import {
   formatGoalDuration,
   goalCompletedTimeLabel,
@@ -21,7 +20,7 @@ import {
   goalTimeLabel,
   SessionGoalIsland,
 } from './SessionGoalIsland.tsx';
-import { CompletionStatus } from './transcript-status.tsx';
+import { CompletionStatus, ContextUsageIndicator } from './transcript-status.tsx';
 import { PaneContextIndicator } from './app-snapshot-views.tsx';
 import { agentActivitySessionIds } from './desktop-types.ts';
 import { defaultSessionLaneStore } from './session-lane-store.ts';
@@ -53,10 +52,7 @@ test('background shell jobs never change an agent state or count as waiting', ()
     ['cancelled', 'cancelled'],
     ['cancel-unconfirmed', 'cancel-unconfirmed'],
   ]) {
-    assert.equal(
-      desktopAgentActivityState({ status, stage: status, shellJobCount: 1 }, { unread: true }),
-      expected
-    );
+    assert.equal(desktopAgentActivityState({ status, stage: status, shellJobCount: 1 }, { unread: true }), expected);
   }
   assert.equal(desktopAgentActivityState({ status: 'idle', shellJobCount: 1 }, { unread: true }), 'done');
   assert.equal(desktopAgentActivityState({ status: 'idle', shellJobCount: 1 }), 'idle');
@@ -174,62 +170,6 @@ test('shell status equality includes detail fields that arrive after the task id
   );
 });
 
-test('the status island carries the context gauge', async () => {
-  const dom = installDom();
-  try {
-    await act(async () => {
-      dom.root.render(
-        React.createElement(SessionStatusIsland, {
-          snapshot: {
-            sessionId: 'lead-a',
-            stats: { currentContextTokens: 50 },
-            displayContextWindow: 100,
-          },
-        })
-      );
-    });
-    const contextButton = document.querySelector('.session-context-indicator > button');
-    await act(async () => contextButton.dispatchEvent(new window.MouseEvent('click', { bubbles: true })));
-    assert.equal(document.querySelector('.session-context-indicator')?.dataset.open, 'true');
-  } finally {
-    await act(async () => dom.root.unmount());
-    dom.close();
-  }
-});
-
-test('the status island places the pane dock toggle last and reports its state', async () => {
-  const dom = installDom();
-  let toggles = 0;
-  try {
-    await act(async () => {
-      dom.root.render(
-        React.createElement(SessionStatusIsland, {
-          snapshot: {
-            sessionId: 'lead-a',
-            stats: { currentContextTokens: 50 },
-            displayContextWindow: 100,
-          },
-          dockOpen: true,
-          onToggleDock: () => {
-            toggles += 1;
-          },
-        })
-      );
-    });
-    const island = document.querySelector('.session-status-island');
-    const dockToggle = document.querySelector('.session-status-dock-toggle');
-    assert.equal(island?.lastElementChild, dockToggle);
-    assert.equal(dockToggle?.getAttribute('aria-pressed'), 'true');
-    await act(async () => {
-      dockToggle?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-    });
-    assert.equal(toggles, 1);
-  } finally {
-    await act(async () => dom.root.unmount());
-    dom.close();
-  }
-});
-
 test('the context card offers inheritance only after the selected model changes', async () => {
   const changed = {
     sessionId: 'lead-inherit',
@@ -260,7 +200,7 @@ test('the context card offers inheritance only after the selected model changes'
   try {
     await act(async () => {
       dom.root.render(
-        React.createElement(SessionStatusIsland, {
+        React.createElement(ContextUsageIndicator, {
           snapshot: changed,
           onInherit: async (sourceSessionId, route) => {
             inherited.push({ sourceSessionId, route });
@@ -272,8 +212,7 @@ test('the context card offers inheritance only after the selected model changes'
     await act(async () => {
       document.querySelector('.context-inherit').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
     });
-    // No dialog stands between the button and the handover (user: 팝업 안 뜨고
-    // 바로 진행되게): one click carries the source session on its own route.
+    // No dialog stands between the button and the handover: one click carries the source session on its own route.
     assert.deepEqual(inherited, [
       {
         sourceSessionId: 'lead-inherit',
@@ -311,7 +250,7 @@ test('the context card offers inheritance only after the selected model changes'
     };
     await act(async () => {
       dom.root.render(
-        React.createElement(SessionStatusIsland, {
+        React.createElement(ContextUsageIndicator, {
           snapshot: {
             ...changed,
             sessionId: 'same-claude',
@@ -345,12 +284,12 @@ test('the context card offers inheritance only after the selected model changes'
   }
 });
 
-test('the context island retains its authoritative reading across incomplete stats frames', async () => {
+test('the live context indicator retains its authoritative reading across incomplete stats frames', async () => {
   const dom = installDom();
   try {
     await act(async () => {
       dom.root.render(
-        React.createElement(SessionStatusIsland, {
+        React.createElement(ContextUsageIndicator, {
           snapshot: {
             sessionId: 'context-sticky',
             stats: { currentContextTokens: 50, currentContextSource: 'last_api_request' },
@@ -363,7 +302,7 @@ test('the context island retains its authoritative reading across incomplete sta
 
     await act(async () => {
       dom.root.render(
-        React.createElement(SessionStatusIsland, {
+        React.createElement(ContextUsageIndicator, {
           snapshot: {
             sessionId: 'context-sticky',
             stats: { costUsd: 1 },
@@ -449,14 +388,18 @@ test('Goal island keeps its summary compact and toggles from the capsule', async
       );
     });
     assert.equal(document.querySelector('.session-goal-objective')?.textContent, 'Short Goal Title');
-    assert.ok(document.querySelector('.session-goal-glyph .mx-icon.lucide-crosshair'));
-    assert.equal(document.querySelector('.session-goal-glyph .lucide-target'), null);
-    assert.equal(document.querySelector('.session-goal-glyph .lucide-flag'), null);
-    assert.equal(document.querySelector('.session-goal-glyph .lucide-flag-triangle-right'), null);
-    assert.equal(document.querySelector('.session-goal-progress')?.textContent, '1/3');
-    assert.match(document.querySelector('.session-goal-time')?.textContent || '', /^\d+:\d{2}$/);
-    assert.match(document.querySelector('.session-goal-meta')?.textContent || '', /^1\/3·\d+:\d{2}$/);
     const trigger = document.querySelector('.session-goal-trigger');
+    assert.equal(trigger.firstElementChild?.dataset.state, 'active', 'the state icon leads the segment');
+    const pips = [...trigger.querySelectorAll('.session-goal-pips > i')].map((pip) => pip.dataset.status);
+    assert.deepEqual(pips, ['completed', 'in_progress', 'pending'], 'one pip per task');
+    // The segment reads n/m plus elapsed time, as the island mockup does.
+    assert.equal(trigger.querySelector('.session-goal-meta')?.textContent, '1/35m');
+    assert.equal(trigger.querySelector('.session-goal-trigger-time')?.textContent, '5m');
+    assert.match(document.querySelector('.session-goal-panel .session-goal-time')?.textContent || '', /^\d+:\d{2}$/);
+    assert.match(
+      document.querySelector('.session-goal-panel .session-goal-meta')?.textContent || '',
+      /^1\/3·\d+:\d{2}$/
+    );
     assert.equal(document.querySelector('.session-goal-toggle'), null);
     assert.equal(trigger?.getAttribute('aria-expanded'), 'false');
     assert.equal(document.querySelector('.session-goal-drawer')?.getAttribute('aria-hidden'), 'true');
@@ -1071,11 +1014,7 @@ test('Korean Agents pane shows unread completion and idle after reading, regardl
     stage: 'idle',
     shellJobCount,
   });
-  let pool = [
-    agent('lead-shell', null),
-    agent('worker-shell', 'lead-shell', 1),
-    agent('unrelated', null),
-  ];
+  let pool = [agent('lead-shell', null), agent('worker-shell', 'lead-shell', 1), agent('unrelated', null)];
   let push;
   window.mixdogDesktop = {
     async listAgentPool() {
@@ -1087,12 +1026,22 @@ test('Korean Agents pane shows unread completion and idle after reading, regardl
     },
   };
   const sessions = ['lead-shell', 'unrelated'].map((id) => ({
-    id, title: id, preview: '', updatedAt: 1, messageCount: 1,
+    id,
+    title: id,
+    preview: '',
+    updatedAt: 1,
+    messageCount: 1,
   }));
   const renderPane = async (unreadSessionIds) => {
-    await act(async () => dom.root.render(React.createElement(AgentActivityPane, {
-      active: false, sessions, unreadSessionIds,
-    })));
+    await act(async () =>
+      dom.root.render(
+        React.createElement(AgentActivityPane, {
+          active: false,
+          sessions,
+          unreadSessionIds,
+        })
+      )
+    );
   };
   const assertStatus = (id, state, text) => {
     const status = document.querySelector(`[data-agent-session-id="${id}"] .agent-activity-elapsed`);
@@ -1100,10 +1049,12 @@ test('Korean Agents pane shows unread completion and idle after reading, regardl
     assert.equal(status.textContent, text);
   };
   const setShellCounts = async (lead, worker) => {
-    pool = pool.map((entry) => ({
-      ...entry,
-      shellJobCount: entry.sessionId === 'lead-shell' ? lead : entry.sessionId === 'worker-shell' ? worker : 0,
-    }));
+    const shellJobCount = (sessionId) => {
+      if (sessionId === 'lead-shell') return lead;
+      if (sessionId === 'worker-shell') return worker;
+      return 0;
+    };
+    pool = pool.map((entry) => ({ ...entry, shellJobCount: shellJobCount(entry.sessionId) }));
     await act(async () => push(pool));
   };
   try {
@@ -1400,6 +1351,38 @@ test('cancellation is its own lifecycle state, never queued, running, done or id
   assert.equal(desktopAgentActivityState({ status: 'idle' }), 'idle');
 });
 
+test('a live turn blocked on a user approval needs the user, never running', () => {
+  // The row shape the runtime status producer publishes while a PreToolUse
+  // `ask` waits for the user (agent-list / job-views awaitingUser).
+  const blocked = {
+    tag: 'review',
+    agent: 'reviewer',
+    status: 'running',
+    stage: 'tool_running',
+    awaitingUser: 'approval',
+  };
+  assert.equal(desktopAgentActivityState(blocked), 'needs-user');
+  assert.equal(desktopAgentActivityState(blocked, { waitingForTasks: true }), 'needs-user');
+  // Only a live turn can be blocked; a cancel still outranks it.
+  assert.equal(desktopAgentActivityState({ status: 'idle', awaitingUser: 'approval' }), 'idle');
+  assert.equal(desktopAgentActivityState({ ...blocked, status: 'cancelled' }), 'cancelled');
+  assert.equal(desktopAgentActivityState({ ...blocked, awaitingUser: undefined }), 'running');
+  // The live summary carries it whichever twin row reports it.
+  assert.deepEqual(
+    liveAgentRows({ agentWorkers: [blocked] }).map((row) => [row.tag, row.state]),
+    [['review', 'needs-user']]
+  );
+  assert.deepEqual(
+    liveAgentRows({
+      agentJobs: [
+        { task_id: 'task-1', tag: 'review', status: 'running', stage: 'running' },
+        { task_id: 'task-1', tag: 'review', status: 'running', stage: 'tool_running', awaitingUser: 'approval' },
+      ],
+    }).map((row) => [row.tag, row.state]),
+    [['review', 'needs-user']]
+  );
+});
+
 test("waiting for descendants overrides completion, not the parent's own work or cancellation", () => {
   const options = { unread: true, waitingForTasks: true };
   assert.equal(desktopAgentActivityState({ status: 'idle' }, options), 'waiting');
@@ -1569,6 +1552,50 @@ test('an unconfirmed cancel stays on the live surfaces; only a confirmed one dro
   );
   // A confirmed cancel still drops, exactly like `completed`.
   assert.deepEqual(liveAgentRows({ agentWorkers: [{ tag: 'build', agent: 'builder', status: 'cancelled' }] }), []);
+});
+
+test('the Agents pane paints a pooled agent blocked on approval as waiting for it, with no timer', async () => {
+  const dom = installDom();
+  let push = () => {};
+  window.mixdogDesktop = {
+    async listAgentPool() {
+      return [];
+    },
+    subscribeAgentPool(listener) {
+      push = listener;
+      return () => {};
+    },
+  };
+  const sessions = [{ id: 'lead-a', title: 'Lead A', preview: '', updatedAt: 1, messageCount: 1 }];
+  const elapsedOf = (sessionId) =>
+    document.querySelector(`[data-agent-session-id="${sessionId}"] .agent-activity-elapsed`);
+  try {
+    await act(async () => dom.root.render(React.createElement(AgentActivityPane, { active: false, sessions })));
+    // The pool row as the stored worker index projects it while the turn waits.
+    const row = (sessionId, extra = {}) => ({
+      tag: sessionId,
+      agent: 'reviewer',
+      stage: 'running',
+      status: 'running',
+      sessionId,
+      ownerSessionId: 'lead-a',
+      turnStartedAt: Date.now() - 65_000,
+      ...extra,
+    });
+    await act(async () => push([row('worker-asking', { awaitingUser: 'approval' }), row('worker-busy')]));
+    await expandAllAgentGroups();
+    const asking = elapsedOf('worker-asking');
+    assert.equal(asking.dataset.state, 'needs-user');
+    assert.equal(asking.textContent, i18n.t('Waiting for approval'));
+    assert.equal(elapsedOf('worker-busy').dataset.state, 'running');
+    assert.match(elapsedOf('worker-busy').textContent, /\d/);
+    // The released wait returns the row to its working timer.
+    await act(async () => push([row('worker-asking'), row('worker-busy')]));
+    assert.equal(elapsedOf('worker-asking').dataset.state, 'running');
+  } finally {
+    await act(async () => dom.root.unmount());
+    dom.close();
+  }
 });
 
 test('the Agents pane paints a cancelled agent as cancelled, never completed or idle', async () => {

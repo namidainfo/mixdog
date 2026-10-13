@@ -112,6 +112,8 @@ export function applyWorkerRowUpsert(byKey, normalized) {
       merged[field] = prev[field];
     }
   }
+  // `awaitingUser` is not decided here: the worker row store keeps the current
+  // row's flag across every whole-row write and drops it once the row settles.
   byKey.set(key, {
     ...merged,
     createdAt: normalized.createdAt || prev.createdAt || new Date().toISOString(),
@@ -131,6 +133,7 @@ export function workerRowToSession(row = {}) {
     presetName: row.preset || null,
     effort: row.effort || null,
     fast: row.fast === true,
+    ...(row.autoEffort === false ? { autoEffort: false } : {}),
     status: row.status || 'idle',
     stage: row.stage || row.status || 'idle',
     createdAt: row.createdAt || null,

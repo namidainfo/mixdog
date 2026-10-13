@@ -8,22 +8,22 @@ import {
   setBuiltinInstalledInConfig,
 } from '../runtime/agent/orchestrator/runtime-core/builtin-features.mjs';
 import { LOCAL_PROVIDER_ID } from '../runtime/local-provider/managed-runtime.mjs';
-import { getEmbeddingInfo } from '../runtime/memory/lib/embedding-provider.mjs';
 import {
+  INSTRUCTION_FILES_MODES,
+  normalizeInstructionFilesMode,
+} from '../runtime/shared/instruction-files-mode.mjs';
+import { getEmbeddingInfo } from '../runtime/memory/lib/embedding-provider.mjs';
+import { onnxRuntimeSupported } from '../runtime/shared/onnx-runtime-support.mjs';
+import {
+  EFFORT_JUDGE_UNSUPPORTED,
   effortJudgeAvailable,
   effortJudgeInfo,
+  effortJudgeInstalling,
   effortJudgeReady,
   shutdownEffortJudge,
-  warmEffortJudge,
 } from '../runtime/effort-judge/judge-client.mjs';
 
 const TOGGLEABLE_BUILTINS = ['git', 'office', 'tidy', 'localProvider', 'autoEffort'];
-
-// The judge stays resident only while the feature is on.
-async function syncEffortJudge(active) {
-  if (active) warmEffortJudge();
-  else await shutdownEffortJudge();
-}
 
 function setLocalProviderEnabledInConfig(configLike, enabled) {
   const next = { ...(configLike || {}) };
@@ -83,11 +83,13 @@ export function createBuiltinToolSettings(
       const localProvider = getLocalProviderStatus?.() || {};
       const localProviderRuntimeInstalled = localProvider?.runtime?.installed === true;
       return {
+        instructionFiles: normalizeInstructionFilesMode(config?.instructionFiles),
         webSearch: { enabled: webSearchEnabled() },
         memory: {
           enabled: memoryToolsEnabledFn(),
           installed: builtinInstalled(config, 'memory'),
           info: getEmbeddingInfo(),
+          semanticSearchSupported: onnxRuntimeSupported(),
         },
         git: { enabled: gitToolsEnabledFn(), installed: builtinInstalled(config, 'git') },
         office: { enabled: officeToolsEnabledFn(), installed: builtinInstalled(config, 'office') },
@@ -102,8 +104,12 @@ export function createBuiltinToolSettings(
           installed: builtinInstalled(config, 'localProvider') && localProviderRuntimeInstalled,
         },
         autoEffort: {
+          supported: onnxRuntimeSupported(),
           enabled: builtinFeatureActive(config, 'autoEffort'),
-          installed: builtinInstalled(config, 'autoEffort') && effortJudgeAvailable(),
+          // On by default: "installed" means the judge model is on disk;
+          // "installing" covers the boot download the settings did not start.
+          installed: effortJudgeAvailable(),
+          installing: effortJudgeInstalling(),
           ready: effortJudgeReady(),
           info: effortJudgeInfo(),
         },
@@ -114,6 +120,16 @@ export function createBuiltinToolSettings(
       saveConfigAndAdopt(setModuleEnabledInConfig({ ...config }, 'webSearch', enabled !== false));
       // Empty/reserved sessions rebuild now so session entry does not still
       // advertise web_search. A conversation keeps its frozen schema.
+      await refreshEmptySessionToolPolicy?.();
+      return this.getToolModuleSettings();
+    },
+    /** Which user instruction files (AGENTS.md / CLAUDE.md) new sessions load:
+     *  'all' | 'agents' | 'claude' | 'off'. The empty session rebuilds now. */
+    async setInstructionFiles(mode) {
+      if (!INSTRUCTION_FILES_MODES.includes(mode)) {
+        throw new TypeError(`Instruction files must be one of ${INSTRUCTION_FILES_MODES.join(', ')}.`);
+      }
+      saveConfigAndAdopt({ ...getConfig(), instructionFiles: mode });
       await refreshEmptySessionToolPolicy?.();
       return this.getToolModuleSettings();
     },
@@ -138,6 +154,9 @@ export function createBuiltinToolSettings(
       if (!TOGGLEABLE_BUILTINS.includes(name)) {
         throw new TypeError('Built-in tool must be git, office, tidy, localProvider, or autoEffort.');
       }
+      if (name === 'autoEffort' && enabled !== false && !onnxRuntimeSupported()) {
+        throw new Error(EFFORT_JUDGE_UNSUPPORTED);
+      }
       if (name === 'localProvider' && enabled !== false && getLocalProviderStatus?.()?.runtime?.installed !== true) {
         await prepareBuiltinFeature?.(name);
       }
@@ -156,7 +175,8 @@ export function createBuiltinToolSettings(
       if (name === 'localProvider') {
         await syncLocalProviderRegistry?.(enabled !== false);
       }
-      if (name === 'autoEffort') await syncEffortJudge(enabled !== false);
+      // Turning Auto on loads nothing: the judge starts on its first turn.
+      if (name === 'autoEffort' && enabled === false) await shutdownEffortJudge();
       await refreshEmptySessionToolPolicy?.();
       return this.getToolModuleSettings();
     },
@@ -167,6 +187,7 @@ export function createBuiltinToolSettings(
       if (!INSTALLABLE_BUILTIN_IDS.includes(name)) {
         throw new TypeError('Built-in feature must be git, memory, office, tidy, localProvider, or autoEffort.');
       }
+      if (name === 'autoEffort' && !onnxRuntimeSupported()) throw new Error(EFFORT_JUDGE_UNSUPPORTED);
       await prepareBuiltinFeature?.(name);
       const config = getConfig();
       let nextConfig = setBuiltinInstalledInConfig({ ...config }, name, true);
@@ -181,7 +202,6 @@ export function createBuiltinToolSettings(
       if (name === 'localProvider') {
         await syncLocalProviderRegistry?.(true);
       }
-      if (name === 'autoEffort') await syncEffortJudge(true);
       if (name === 'memory') invalidateContextStatusCache();
       await refreshEmptySessionToolPolicy?.();
       return this.getToolModuleSettings();

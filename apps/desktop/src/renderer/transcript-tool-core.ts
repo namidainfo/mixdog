@@ -116,6 +116,7 @@ function localizedToolActivityCategory(category: string): string {
   if (category === 'Setup') return t('Setup');
   if (category === 'Browser') return t('Browser Use');
   if (category === 'Computer') return t('Computer Use');
+  if (category === 'Terminal') return t('Terminal');
   if (category === 'Office') return t('Document work');
   if (category === 'Media') return t('Media generation');
   if (category === 'Tidy') return t('Code Tidy');
@@ -173,6 +174,10 @@ function localizedToolActivityUnit(category: string, done: string, noun: string)
       return t('Memory lookup');
     case 'Memory|Wrote|memory item':
       return t('Memory saving');
+    case 'Memory|Deleted|memory item':
+      return t('Memory deletion');
+    case 'Memory|Listed|memory item':
+      return t('Memory listing');
     case 'Shell|Ran|command':
       return t('Command execution');
     case 'Git|Ran|Git command':
@@ -181,6 +186,8 @@ function localizedToolActivityUnit(category: string, done: string, noun: string)
       return t('Git staging');
     case 'Agent|Called|agent':
       return t('Agent calls');
+    case 'Agent|Checked|agent':
+      return t('Agent status');
     case 'Agent|Completed|agent':
       return t('Agent responses');
     case 'Agent|Failed|agent':
@@ -195,8 +202,30 @@ function localizedToolActivityUnit(category: string, done: string, noun: string)
       return t('Task listing');
     case 'Task|Cancelled|task':
       return t('Task cancellation');
-    case 'Setup|Set|working directory':
+    case 'Setup|Selected|project':
       return t('Project selection');
+    case 'Setup|Listed|project':
+      return t('Project listing');
+    case 'Terminal|Listed|terminal tab':
+      return t('Terminal tabs');
+    case 'Terminal|Read|terminal output':
+      return t('Terminal output');
+    case 'Media|Generated|image':
+      return t('Image generation');
+    case 'Media|Generated|video':
+      return t('Video generation');
+    case 'Media|Checked|media job':
+      return t('Media status');
+    case 'Media|Cancelled|media job':
+      return t('Media cancellation');
+    case 'Media|Listed|media catalog':
+      return t('Media catalog');
+    case 'Office|Read|document action':
+      return t('Document reading');
+    case 'Tidy|Previewed|cleanup pass':
+      return t('Tidy preview');
+    case 'Tidy|Installed|cleanup engine':
+      return t('Tidy install');
     case 'Setup|Checked|working directory':
       return t('Project check');
     case 'Setup|Asked|user':
@@ -233,15 +262,11 @@ function namedToolActivityUnit(
     const skill = skills.join(', ');
     if (skill) return { unitKey: `Skill|${skill}`, label: `${t('Skill')} ${skill}` };
   }
-  if (
-    category === 'Media' ||
-    category === 'Browser' ||
-    category === 'Computer' ||
-    category === 'Office' ||
-    category === 'Tidy'
-  ) {
+  if (category === 'Browser' || category === 'Computer') {
     return { unitKey: category, label: localizedToolActivityCategory(category) };
   }
+  // Repository, PR and issue calls are one unit, named apart from local Git.
+  if (surface.normalizedName === 'github') return { unitKey: 'GitHub', label: 'GitHub' };
   if (category === 'Other') {
     const label = String(surface.label || modeledName || t('Tool'));
     return { unitKey: `Other|${surface.normalizedName}`, label };
@@ -301,10 +326,16 @@ export function desktopToolActivityCategory(name: unknown, args: unknown): strin
   const surface = formatToolSurface(modeledName, args);
   if (surface.normalizedName === 'browser' || surface.normalizedName === 'browser_devtools') return 'Browser';
   if (surface.normalizedName === 'computer') return 'Computer';
-  if (surface.normalizedName === 'office') return 'Office';
-  if (surface.normalizedName === 'media') return 'Media';
-  if (surface.normalizedName === 'tidy') return 'Tidy';
   return String(classifyToolCategory(modeledName, surface.args) || 'Other');
+}
+
+/** `generate_image` / `generate_video` name a generation like `generate` with a
+ *  kind; the shared unit table would count them as a media status check. */
+function mediaGenerateArgs(surface: { normalizedName: string; args: unknown }): unknown {
+  if (surface.normalizedName !== 'media') return surface.args;
+  const args = asRecord(surface.args) ?? {};
+  const match = /^generate[_-]?(image|video)$/i.exec(String(args.action || ''));
+  return match ? { ...args, action: 'generate', kind: match[1].toLowerCase() } : args;
 }
 
 function desktopToolActivityUnit(
@@ -316,18 +347,28 @@ function desktopToolActivityUnit(
   noun: string;
   unitKey: string;
   label: string;
+  /** How many of the unit one call covers (3 files in one read). */
+  count: number;
 } {
   const modeledName = desktopToolActivityModeledName(name, args);
   const surface = formatToolSurface(modeledName, args);
   const category = desktopToolActivityCategory(modeledName, surface.args);
-  const entry = aggregateToolCategoryEntry(modeledName, surface.args, category) as {
+  const entry = aggregateToolCategoryEntry(modeledName, mediaGenerateArgs(surface), category) as {
     done?: string;
     noun?: string;
+    count?: number;
   } | null;
   const done = String(entry?.done || '');
   const noun = String(entry?.noun || '');
   const named = namedToolActivityUnit(name, args, category, done, noun);
-  return { category, done, noun, unitKey: named.unitKey, label: named.label };
+  return {
+    category,
+    done,
+    noun,
+    unitKey: named.unitKey,
+    label: named.label,
+    count: Math.max(1, Math.round(Number(entry?.count || 1))),
+  };
 }
 
 /** The one-word verb a call's own row opens with ("Read a.ts", "Run npm
@@ -349,6 +390,10 @@ function toolActivityRowVerb(category: string, done: string, noun: string): stri
       return t('Find');
     case 'Search|Listed|directory':
       return t('List');
+    case 'Terminal|Listed|terminal tab':
+      return t('List tabs');
+    case 'Terminal|Read|terminal output':
+      return t('Read output');
     case 'Patch|Created|file':
       return t('Write');
     case 'Patch|Edited|file':
@@ -431,12 +476,105 @@ export function desktopToolActivityBrowserPage(items: readonly TranscriptItem[])
   return page;
 }
 
+const COMPUTER_REFUSAL_CODE = 'computer_capability_unavailable';
+/** Computer actions that read or drive a window (the host's window-bound set). */
+const COMPUTER_WINDOW_ACTIONS = new Set([
+  'list_windows',
+  'window_snapshot',
+  'related_windows',
+  'window_bounds',
+  'window_capture',
+  'window_predicates',
+  'window_integrity',
+  'list_apps',
+  'verify',
+  'focus_window',
+  'move_window',
+  'window_state',
+  'close_window',
+]);
+
+export interface ComputerReadinessNotice {
+  /** The refused call the notice belongs to. */
+  refusalId: string;
+  /** When that refused call finished. */
+  refusalAt: number;
+  /** A later call in the group that needed a window has since succeeded. */
+  ready: boolean;
+}
+
+/** True when a Computer Use result is Linux's refusal for a missing window
+ *  helper: the stable code, with `windows` among the capabilities it names. */
+function refusedForWindowHelper(item: TranscriptItem): boolean {
+  const meta = item.toolMeta;
+  return meta?.code === COMPUTER_REFUSAL_CODE && meta.missing.includes('windows');
+}
+function computerCallNeedsWindow(item: TranscriptItem): boolean {
+  const surface = desktopToolActivitySurface(item.name, item.args);
+  let root = asRecord(item.args);
+  if (!root && typeof item.args === 'string') {
+    try {
+      root = asRecord(JSON.parse(item.args));
+    } catch {
+      root = null;
+    }
+  }
+  const named = (source: Record<string, unknown> | null | undefined) =>
+    Boolean(source && (source.window_id || source.app || source.window));
+  return (
+    COMPUTER_WINDOW_ACTIONS.has(String(root?.action ?? surface.args.action ?? '')) ||
+    named(root) ||
+    named(asRecord(root?.input)) ||
+    named(surface.args)
+  );
+}
+
+function computerWindowCallSucceeded(item: TranscriptItem): boolean {
+  return (
+    desktopToolActivitySurface(item.name, item.args).normalizedName === 'computer' &&
+    toolItemDone(item) &&
+    !item.isError &&
+    item.toolMeta?.code !== COMPUTER_REFUSAL_CODE &&
+    computerCallNeedsWindow(item)
+  );
+}
+
+/** The window-helper notice for a group of tool calls: set by the first
+ *  Computer Use call refused for a missing window helper, and ready once a
+ *  later call that needed a window succeeded in the group. */
+export function desktopToolComputerReadinessNotice(items: readonly TranscriptItem[]): ComputerReadinessNotice | null {
+  let notice: ComputerReadinessNotice | null = null;
+  for (const [index, item] of flattenedToolActivityItems(items).entries()) {
+    if (desktopToolActivitySurface(item.name, item.args).normalizedName !== 'computer') continue;
+    if (!notice) {
+      if (refusedForWindowHelper(item)) {
+        notice = {
+          refusalId: String(item.id ?? `computer:${index}`),
+          refusalAt: Number(item.completedAt) || 0,
+          ready: false,
+        };
+      }
+      continue;
+    }
+    if (computerWindowCallSucceeded(item)) notice.ready = true;
+  }
+  return notice;
+}
+
+/** When the latest window-needing Computer Use call that worked in this group
+ *  finished (0 = none). The chat card compares it across the groups of a turn. */
+export function desktopToolComputerWindowSuccessAt(items: readonly TranscriptItem[]): number {
+  let at = 0;
+  for (const item of flattenedToolActivityItems(items)) {
+    if (computerWindowCallSucceeded(item)) at = Math.max(at, Number(item.completedAt) || 0);
+  }
+  return at;
+}
 function toolActivitySummaryPhrase(unit: { unitKey: string; label: string }, count: number): string {
   switch (unit.unitKey) {
     case 'Read|Read|file':
     case 'Read|Read|image':
     case 'Read|Read|resource':
-    case 'Read|Read|code map':
       return count === 1 ? t('Read file') : t('Read {{count}} files', { count });
     case 'Search|Searched|pattern':
       return count === 1 ? t('Search code') : t('Search {{count}} patterns', { count });
@@ -474,20 +612,23 @@ function toolActivitySummaryPhrase(unit: { unitKey: string; label: string }, cou
       return count === 1 ? t('Computer action') : t('Computer {{count}} actions', { count });
     case 'Office|Edited|document action':
       return count === 1 ? t('Office action') : t('Office {{count}} actions', { count });
-    case 'Media|Generated|media action':
+    case 'Media|Generated|image':
+    case 'Media|Generated|video':
       return count === 1 ? t('Generate media') : t('Generate {{count}} media', { count });
     case 'Tidy|Tidied|cleanup pass':
       return count === 1 ? t('Tidy code') : t('Tidy code {{count}} times', { count });
     case 'Agent|Called|agent':
-    case 'Agent|Completed|agent':
-    case 'Agent|Failed|agent':
-    case 'Agent|Cancelled|agent':
       return count === 1 ? t('Call agent') : t('Call {{count}} agents', { count });
+    case 'Agent|Completed|agent':
+      return count === 1 ? t('Agent response') : `${unit.label} ${count}`;
     case 'Task|Checked|task':
-    case 'Task|Waited for|task':
-    case 'Task|Listed|task':
-    case 'Task|Cancelled|task':
       return count === 1 ? t('Check task') : t('Check {{count}} tasks', { count });
+    case 'Task|Waited for|task':
+      return count === 1 ? t('Wait for task') : t('Wait for {{count}} tasks', { count });
+    case 'Task|Listed|task':
+      return t('List tasks');
+    case 'Task|Cancelled|task':
+      return count === 1 ? t('Cancel task') : t('Cancel {{count}} tasks', { count });
     default:
       return count > 1 ? `${unit.label} ${count}` : unit.label;
   }
@@ -500,7 +641,7 @@ export function desktopToolActivitySummary(items: readonly TranscriptItem[]): st
   for (const item of flattenedToolActivityItems(items)) {
     const unit = desktopToolActivityUnit(item.name, item.args);
     const prev = groups.get(unit.unitKey);
-    const added = Math.max(1, Math.round(Number(item.count || 1)));
+    const added = Math.max(1, Math.round(Number(item.count || 1))) * unit.count;
     if (prev) {
       prev.count += added;
     } else {
@@ -532,7 +673,7 @@ export function desktopToolActivityCategoryGroups(items: readonly TranscriptItem
   let previousUnitKey = '';
   for (const item of flattenedToolActivityItems(items)) {
     const unit = desktopToolActivityUnit(item.name, item.args);
-    const count = Math.max(1, Math.round(Number(item.count || 1)));
+    const count = Math.max(1, Math.round(Number(item.count || 1))) * unit.count;
     if (previous && previousUnitKey === unit.unitKey) {
       previous.count += count;
       previous.items.push(item);

@@ -11,8 +11,9 @@ import {
   mergePastedTexts,
 } from '../../queue-helpers.mjs';
 import { hydratePastedAttachments, hydrateRestorableFileParts } from '../../../../runtime/attachments/store.mjs';
+import { dropTuiSteeringPersist } from '../../tui-steering-persist.mjs';
 
-export function createTakeEntriesOps({ pending, pendingNotificationKeys, removeQueuedEntries }) {
+export function createTakeEntriesOps({ pending, pendingNotificationKeys, removeQueuedEntries, leadSessionId }) {
   function dequeueQueueBatch(maxPriority = 'later', options = {}) {
     if (pending.length === 0) return [];
     const max = queuePriorityValue(maxPriority);
@@ -68,15 +69,19 @@ export function createTakeEntriesOps({ pending, pendingNotificationKeys, removeQ
       if (taken.has(pending[i])) pending.splice(i, 1);
     }
     removeQueuedEntries(queued);
+    // A reclaimed prompt goes back to the draft, so its durable steering
+    // mirror goes with it; otherwise the next runtime restore re-queues a
+    // prompt the user already took back.
+    const mirrored = queued.filter((entry) => entry.steeringPersistId && !entry.steeringPersistRestored);
+    if (mirrored.length > 0) void dropTuiSteeringPersist(leadSessionId(), mirrored);
     const queuedText = queued
       .map((item) => item.text)
       .filter((text) => String(text || '').trim())
       .join('\n');
     const combinedText = [queuedText, String(currentText || '')].filter((text) => text.trim()).join('\n');
+    const verb = unreadable === 1 ? ' was' : 's were';
     return {
-      ...(unreadable
-        ? { notice: `${unreadable} attachment${unreadable === 1 ? ' was' : 's were'} no longer available and dropped.` }
-        : {}),
+      ...(unreadable ? { notice: `${unreadable} attachment${verb} no longer available and dropped.` } : {}),
       count: queued.length,
       ids: queued.map((item) => String(item.id || '')).filter(Boolean),
       text: combinedText,

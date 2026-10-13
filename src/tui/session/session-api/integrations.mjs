@@ -49,7 +49,8 @@ export function createSessionIntegrationsApi(bag, { oauthFlows }) {
     },
     requestConnectedAccountQuotaWindows: async () =>
       await requireRuntimeMethod('requestConnectedAccountQuotaWindows', 'Connected-account quota requests are unavailable')(),
-    getTurnReviewDiff: (options = {}) => turnReviewReply((reviewOptions) => runtime.getTurnReviewDiff?.(reviewOptions), options),
+    getTurnReviewDiff: (options = {}) =>
+      turnReviewReply((reviewOptions) => runtime.getTurnReviewDiff?.(reviewOptions), options),
     getSessionReviewDiff: async () => {
       return (await runtime.getSessionReviewDiff?.()) ?? { supported: false, files: [], patch: '' };
     },
@@ -69,6 +70,7 @@ export function createSessionIntegrationsApi(bag, { oauthFlows }) {
       // Completed-marking only; no route/agent/provider writes.
       return runtime.skipOnboarding?.() || null;
     },
+    saveStarterGuideState: (state) => runtime.saveStarterGuideState?.(state) || null,
     completeOnboarding: withCommandLock(async (payload = {}) => {
       const result = await runtime.completeOnboarding?.(payload);
       refreshRouteStats();
@@ -99,8 +101,8 @@ export function createSessionIntegrationsApi(bag, { oauthFlows }) {
     getOAuthProviderLoginStatus: (flowId) => oauthFlows.status(flowId),
     completeOAuthProviderLogin: async (flowId, code) => oauthFlows.complete(flowId, code),
     cancelOAuthProviderLogin: async (flowId) => oauthFlows.cancel(flowId),
-    saveProviderApiKey: (provider, secret) => {
-      const result = runtime.saveProviderApiKey(provider, secret);
+    saveProviderApiKey: async (provider, secret) => {
+      const result = await runtime.saveProviderApiKey(provider, secret);
       pushNotice(`provider api key saved: ${result.provider}`, 'info');
       return true;
     },
@@ -108,6 +110,7 @@ export function createSessionIntegrationsApi(bag, { oauthFlows }) {
       (input) => runtime.saveCustomProvider(input),
       (result) => `custom provider saved: ${result.id}`
     ),
+    updateCustomProviderModel: (id, modelId, patch) => runtime.updateCustomProviderModel(id, modelId, patch),
     removeCustomProvider: async (id) => {
       const result = await runtime.removeCustomProvider(id);
       refreshRouteStats();
@@ -116,13 +119,13 @@ export function createSessionIntegrationsApi(bag, { oauthFlows }) {
     },
     testCustomProvider: (input) => runtime.testCustomProvider(input),
     discoverCustomProviderModels: (input) => runtime.discoverCustomProviderModels(input),
-    saveOpenCodeGoUsageAuth: (opts) => {
-      runtime.saveOpenCodeGoUsageAuth(opts);
+    saveOpenCodeGoUsageAuth: async (opts) => {
+      await runtime.saveOpenCodeGoUsageAuth(opts);
       pushNotice('OpenCode Go usage auth saved', 'info');
       return true;
     },
-    saveOpenAIUsageSessionKey: (secret) => {
-      runtime.saveOpenAIUsageSessionKey(secret);
+    saveOpenAIUsageSessionKey: async (secret) => {
+      await runtime.saveOpenAIUsageSessionKey(secret);
       pushNotice('OpenAI usage auth saved', 'info');
       return true;
     },
@@ -134,8 +137,8 @@ export function createSessionIntegrationsApi(bag, { oauthFlows }) {
       },
       { busyResult: false }
     ),
-    forgetProviderAuth: (provider, accountId) => {
-      const result = runtime.forgetProviderAuth(provider, accountId);
+    forgetProviderAuth: async (provider, accountId) => {
+      const result = await runtime.forgetProviderAuth(provider, accountId);
       pushNotice(`provider auth forgotten: ${result.provider}`, 'info');
       return true;
     },
@@ -175,5 +178,7 @@ export function createSessionIntegrationsApi(bag, { oauthFlows }) {
       (name, enabled) => runtime.setWebhookEnabled(name, enabled),
       (_result, name, enabled) => `webhook ${enabled ? 'enabled' : 'disabled'}: ${name}`
     ),
+    // Signed test request only; nothing changes, so no announcement.
+    testWebhook: (name) => runtime.testWebhook(name),
   };
 }

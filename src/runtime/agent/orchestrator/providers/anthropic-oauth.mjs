@@ -62,6 +62,8 @@ import {
 } from './lib/anthropic-request-utils.mjs';
 import {
   EFFORT_CONFIGURATION_BETA,
+  isEffortConfigurationRejection,
+  markEffortConfigurationUnsupported,
   projectEffortConfiguration,
   lowerAnthropicEffortHistory,
   markAnthropicEffortBody,
@@ -293,7 +295,9 @@ export class AnthropicOAuthProvider {
       this.credentials = loadCredentials();
     }
     if (!this.credentials) {
-      throw new Error('Anthropic OAuth credentials not found. Open /providers in mixdog to sign in.');
+      throw Object.assign(new Error('Anthropic OAuth credentials not found. Open /providers in mixdog to sign in.'), {
+        reauthRequired: true,
+      });
     }
 
     // Pick up Mixdog-updated tokens the moment the credentials file is
@@ -359,12 +363,20 @@ export class AnthropicOAuthProvider {
         return latest;
       }
 
-      if (!latest?.refreshToken) {
+      if (!latest?.refreshToken || latest.reauthRequired) {
         if (!force && latest?.accessToken && (!latest.expiresAt || latest.expiresAt > Date.now())) {
-          logQuiet('WARNING: token expiring but no refresh token; using current token until expiry');
+          logQuiet('WARNING: token expiring but no usable refresh token; using current token until expiry');
           return latest;
         }
-        throw new Error('Anthropic OAuth refresh token not available. Open /providers in mixdog to sign in again.');
+        if (latest?.reauthRequired) {
+          throw Object.assign(new Error('Anthropic sign-in expired. Sign in again from Providers.'), {
+            reauthRequired: true,
+          });
+        }
+        throw Object.assign(
+          new Error('Anthropic OAuth refresh token not available. Open /providers in mixdog to sign in again.'),
+          { reauthRequired: true }
+        );
       }
 
       try {
@@ -606,6 +618,19 @@ export class AnthropicOAuthProvider {
 
     if (response.status === 429) {
       throw anthropicQuotaError(response.status, response.headers, safeText);
+    }
+
+    // A newer model that rejects the mid-conversation effort update: switch
+    // the updates off for it in this process and replay the turn once
+    // without them (the request keeps its turn effort).
+    if (isEffortConfigurationRejection(response.status, scrubbedText) && !opts._effortConfigurationRetry) {
+      markEffortConfigurationUnsupported('anthropic-oauth', useModel);
+      process.stderr.write(`[anthropic-oauth] ${useModel} rejected the mid-conversation effort update; retrying once without it\n`);
+      return this.send(messages, useModel, tools, {
+        ...opts,
+        effortConfigurationEnabled: false,
+        _effortConfigurationRetry: true,
+      });
     }
 
     // Anthropic can gate a newly launched model on a newer Claude

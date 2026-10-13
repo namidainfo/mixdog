@@ -37,6 +37,7 @@ export function buildAgentLoopOptions({
   checkpoint,
   turnEffort,
   effortConfiguration,
+  stepAutoEffort,
   codexTurnId,
   startedAtMs,
   signal,
@@ -48,6 +49,8 @@ export function buildAgentLoopOptions({
   return {
     effort: turnEffort,
     effortConfiguration,
+    // { request, base } when each tool-result step is judged (step-auto-effort.mjs).
+    stepAutoEffort: stepAutoEffort || null,
     fast: session.fast === true,
     modelParameters: session.modelParameters || {},
     selectedContextWindow: session.selectedContextWindow || session.contextWindow || null,
@@ -111,7 +114,6 @@ export function buildAgentLoopOptions({
           session,
           outgoing,
           {
-            mainUsageAvailable: d.contextUsageAvailable,
             inputTokens: d.contextInputTokens ?? d.deltaInput,
             outputTokens: d.contextOutputTokens ?? d.deltaOutput,
             promptTokens: d.contextPromptTokens ?? d.deltaPrompt,

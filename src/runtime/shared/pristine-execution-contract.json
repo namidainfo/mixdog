@@ -8,6 +8,7 @@
     "MIXDOG_DISABLE_MCP": "1",
     "MIXDOG_DISABLE_SKILLS": "1",
     "MIXDOG_BOOT_CORE_MEMORY": "0",
+    "MIXDOG_BOOT_INSTRUCTION_FILES": "0",
     "MIXDOG_DAEMON_SKIP_MEMORY": "1",
     "MIXDOG_DISABLE_MEMORY_INGEST": "1",
     "MIXDOG_DISABLE_CHANNEL_START": "1",
@@ -36,11 +37,16 @@
     "MIXDOG_STALL_FIRST_BYTE_ABORT_S",
     "MIXDOG_CACHE_MESSAGES_TTL",
     "MIXDOG_OAI_TRANSPORT",
-    "MIXDOG_OPENAI_OAUTH_WS_WARMUP",
     "MIXDOG_OAI_WS_DUMP_DIR",
     "MIXDOG_SESSION_TRANSCRIPT_LOG",
     "MIXDOG_SEARCH_SERVER_BIN",
-    "MIXDOG_USAGE_LOG"
+    "MIXDOG_USAGE_LOG",
+    "MIXDOG_AUTO_EFFORT",
+    "MIXDOG_AUTO_EFFORT_STEPS",
+    "MIXDOG_EFFORT_JUDGE_DIR",
+    "MIXDOG_EFFORT_DECISIONS_LOG",
+    "MIXDOG_EFFORT_JUDGE_COLD_WAIT_MS",
+    "MIXDOG_EFFORT_JUDGE_TIMEOUT_MS"
   ],
   "oauthProviders": {
     "anthropic-oauth": {
@@ -57,6 +63,14 @@
       "credentialFile": "grok-oauth.json",
       "credentialPathEnv": "GROK_OAUTH_CREDENTIALS_PATH",
       "modelCatalogFile": "grok-oauth-models.json"
+    },
+    "muse-code-oauth": {
+      "credentialFile": "muse-code-oauth.json",
+      "credentialPathEnv": "MUSE_CODE_OAUTH_CREDENTIALS_PATH"
+    },
+    "mimo-oauth": {
+      "credentialFile": "mimo-oauth.json",
+      "credentialPathEnv": "MIMO_OAUTH_CREDENTIALS_PATH"
     },
     "cursor-oauth": {
       "credentialFile": "cursor-oauth.json",

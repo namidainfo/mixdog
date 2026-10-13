@@ -88,7 +88,7 @@ const HARNESS = `
         </div>
         <button className="jump-to-latest">Latest</button>
       </div>
-      <ComposerDock dockRef={dock} goalSubmissionId="" showProjectSelector={false}
+      <ComposerDock dockRef={dock} sessionId="" goalSubmissionId="" showProjectSelector={false}
         goalIsland={state.goal ? <SessionGoalIsland snapshot={{
           sessionId: session, goal: {
             id: 'goal', title: 'Keep the reading position', objective: 'Stable layout', status: 'paused',
@@ -123,9 +123,7 @@ async function geometry(page, key) {
       const box = row.getBoundingClientRect();
       return box.top >= view.top && box.bottom < dockBox.top;
     });
-    const row = key
-      ? document.querySelector('[data-timeline-key="' + key + '"]')
-      : visible;
+    const row = key ? document.querySelector(`[data-timeline-key="${key}"]`) : visible;
     const last = document.querySelector('[data-timeline-key="message-39"]');
     return {
       viewportHeight: view.height,
@@ -148,26 +146,36 @@ test('dock changes and delayed rich rows preserve real browser geometry', async 
     build({
       stdin: { resolveDir, loader: 'tsx', contents: HARNESS },
       outfile: 'transcript-dock-layout.js',
-      bundle: true, write: false, format: 'iife', jsx: 'automatic',
+      bundle: true,
+      write: false,
+      format: 'iife',
+      jsx: 'automatic',
       define: { 'process.env.NODE_ENV': '"production"' },
       loader: { '.woff': 'dataurl', '.woff2': 'dataurl', '.ttf': 'dataurl', '.svg': 'dataurl' },
-      plugins: [{
-        name: 'unopened-lazy-surfaces',
-        setup(builder) {
-          // Exercise the actual review chunk, but retain Vite's lazy boundary
-          // for unopened editors/dialogs. Unexpected use remains a page error.
-          builder.onResolve({ filter: /.*/ }, (args) =>
-            args.kind === 'dynamic-import' && args.path !== './TurnReview'
-              ? { path: args.path, external: true }
-              : null
-          );
+      plugins: [
+        {
+          name: 'unopened-lazy-surfaces',
+          setup(builder) {
+            // Exercise the actual review chunk, but retain Vite's lazy boundary
+            // for unopened editors/dialogs. Unexpected use remains a page error.
+            builder.onResolve({ filter: /.*/ }, (args) =>
+              args.kind === 'dynamic-import' && args.path !== './TurnReview'
+                ? { path: args.path, external: true }
+                : null
+            );
+          },
         },
-      }],
+      ],
     }),
     build({
-      stdin: { resolveDir, loader: 'css', contents: '@import "./ui/tokens.css"; @import "./styles.css"; @import "./desktop.css";' },
+      stdin: {
+        resolveDir,
+        loader: 'css',
+        contents: '@import "./ui/tokens.css"; @import "./styles.css"; @import "./desktop.css";',
+      },
       outfile: 'transcript-dock-layout.css',
-      bundle: true, write: false,
+      bundle: true,
+      write: false,
       loader: { '.woff': 'dataurl', '.woff2': 'dataurl', '.ttf': 'dataurl', '.svg': 'dataurl' },
     }),
   ]);
@@ -184,20 +192,29 @@ test('dock changes and delayed rich rows preserve real browser geometry', async 
   for (const file of bundle.outputFiles.filter((file) => file.path.endsWith('.css'))) {
     await page.addStyleTag({ content: file.text });
   }
-  await page.addStyleTag({ content: `
+  await page.addStyleTag({
+    content: `
     #root { position: fixed; inset: 0; display: flex; container-type: size; }
     article { padding: 12px 20px; } article h3, article p, article pre { margin: 8px 0; }
     article table { border-spacing: 0; } article td { padding: 4px; }
     .composer textarea { height: 100%; }
-  ` });
+  `,
+  });
   await page.addScriptTag({ content: bundle.outputFiles.find((file) => file.path.endsWith('.js')).text });
 
-  for (const [width, height] of [[1280, 800], [640, 500], [390, 844]]) {
+  for (const [width, height] of [
+    [1280, 800],
+    [640, 500],
+    [390, 844],
+  ]) {
     await page.setViewport({ width, height });
-    await page.evaluate(({ width, height }) => {
-      document.documentElement.toggleAttribute('data-mixdog-mobile-tabs', width < 500);
-      window.mountFixture('dock-' + width + '-' + height);
-    }, { width, height });
+    await page.evaluate(
+      ({ width, height }) => {
+        document.documentElement.toggleAttribute('data-mixdog-mobile-tabs', width < 500);
+        window.mountFixture(`dock-${width}-${height}`);
+      },
+      { width, height }
+    );
     await settle(page);
     let before = await geometry(page);
     assert.equal(before.viewportHeight, height, 'the dock never reduces the scroll viewport');
@@ -216,16 +233,20 @@ test('dock changes and delayed rich rows preserve real browser geometry', async 
         assert.ok(Math.abs(after.rowTop - before.rowTop) <= 1, 'the same message stays at the same screen position');
       }
     };
-    await page.evaluate(() => window.fixture.change({ goal: true, review: true, composer: 156 }));
-    await page.waitForSelector('.turn-review-bar');
+    const empty = await geometry(page, before.key);
+    await page.evaluate(() => window.fixture.change({ goal: true, review: true }));
+    await page.waitForSelector('.turn-review-segment');
+    // The slot opens over 180ms; measure the settled height.
+    await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished)));
     await stable();
     const collapsed = await geometry(page, before.key);
-    await page.click('.turn-review-summary');
-    await stable();
-    assert.equal((await geometry(page)).dockHeight, collapsed.dockHeight, 'review disclosure overlays the reader');
+    assert.equal(empty.dockHeight < collapsed.dockHeight, true, 'an empty island reserves no space; content opens its slot');
     await page.click('.session-goal-trigger');
     await stable();
-    assert.equal((await geometry(page)).dockHeight, collapsed.dockHeight, 'Goal disclosure overlays the reader');
+    assert.equal((await geometry(page)).dockHeight, collapsed.dockHeight, 'the Goal tab overlays the reader');
+    await page.keyboard.press('Escape');
+    await page.evaluate(() => window.fixture.change({ composer: 156 }));
+    await stable();
 
     await page.evaluate((key) => window.fixture.suspend(key), before.key);
     await page.waitForSelector('[data-transcript-pending]');
@@ -238,11 +259,97 @@ test('dock changes and delayed rich rows preserve real browser geometry', async 
 
     await page.evaluate(() => window.fixture.change({ goal: false, review: false, composer: 84 }));
     await stable();
+    // Grace period: the last item left, yet the slot stays open (so a job that
+    // starts right after does not flicker the dock) …
+    assert.equal((await geometry(page)).dockHeight, collapsed.dockHeight, 'the slot outlives its last item');
+    // … a new item inside the window cancels the collapse …
+    await page.evaluate(() => window.fixture.change({ goal: true, review: true }));
+    await page.waitForSelector('.turn-review-segment');
+    await new Promise((resolve) => setTimeout(resolve, 1_800));
+    await settle(page);
+    assert.equal((await geometry(page)).dockHeight, collapsed.dockHeight, 'returning content keeps the slot open');
+    // … and only an empty slot past the grace period collapses.
+    await page.evaluate(() => window.fixture.change({ goal: false, review: false }));
+    await page.waitForFunction(
+      (height) => document.querySelector('.composer-region').getBoundingClientRect().height === height,
+      { timeout: 5_000 },
+      empty.dockHeight
+    );
+    await stable();
+    assert.equal((await geometry(page)).dockHeight, empty.dockHeight, 'the empty slot collapses after the grace');
     await page.evaluate(() => window.fixture.follow());
     await settle(page);
     const tail = await geometry(page);
     assert.ok(Math.abs(tail.lastBottom - (tail.dockTop - 24)) <= 1, 'following returns above the measured dock');
     assert.ok(tail.jumpBottom <= tail.dockTop, 'the jump control stays outside the composer');
+
+    // Following the tail: the slot opening and closing must keep the last row
+    // pinned above the dock on every frame, not only once settled.
+    const pinned = async (label) => {
+      for (let frame = 0; frame < 4; frame++) {
+        await settle(page);
+        const now = await geometry(page);
+        assert.ok(Math.abs(now.lastBottom - (now.dockTop - 24)) <= 1, `${label}: the tail stays pinned`);
+      }
+    };
+    // The opening animation is sampled where a user can see it: once per
+    // painted frame, after the dock's own resize observer has pinned the tail
+    // and before paint. A sample taken from a Node round trip is not that
+    // frame: Blink advances the animation clock per task, so a task between
+    // frames reads the next animation value before the frame's observers have
+    // run (up to the full last step on a slow runner).
+    await page.evaluate(() => {
+      const dock = document.querySelector('.composer-region');
+      const misses = [];
+      // Created after the dock hook's observer, so it is notified after that
+      // observer's callback and the pin microtask it schedules.
+      const observer = new ResizeObserver(() => {
+        const last = document.querySelector('[data-timeline-key="message-39"]');
+        misses.push(last.getBoundingClientRect().bottom - (dock.getBoundingClientRect().top - 24));
+      });
+      observer.observe(dock);
+      window.openingPins = { misses, stop: () => observer.disconnect() };
+    });
+    await page.evaluate(() => window.fixture.change({ goal: true, review: true }));
+    await page.waitForSelector('.turn-review-segment');
+    await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished)));
+    await settle(page);
+    const opening = await page.evaluate(() => {
+      window.openingPins.stop();
+      return window.openingPins.misses;
+    });
+    assert.ok(opening.length >= 3, 'the slot opening is observed frame by frame');
+    for (const miss of opening) {
+      // The clearance is the dock height rounded to a whole pixel (up to 0.5
+      // off while it animates) and the end sits on a device pixel (under 1px
+      // off fractional content). A frame behind misses by several pixels.
+      assert.ok(Math.abs(miss) <= 1.5, `slot opening: the tail stays pinned on every frame (missed by ${miss.toFixed(2)}px)`);
+    }
+    await pinned('slot open');
+    await page.evaluate(() => window.fixture.change({ goal: false, review: false }));
+    await page.waitForFunction(
+      (height) => document.querySelector('.composer-region').getBoundingClientRect().height === height,
+      { timeout: 5_000 },
+      tail.dockHeight
+    );
+    await pinned('slot closed');
+
+    // Reduced motion: no height animation, but the grace period still holds.
+    await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }]);
+    await page.evaluate(() => window.fixture.change({ goal: true, review: true }));
+    await page.waitForSelector('.turn-review-segment');
+    await settle(page);
+    const reducedOpen = (await geometry(page)).dockHeight;
+    await page.evaluate(() => window.fixture.change({ goal: false, review: false }));
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    assert.equal((await geometry(page)).dockHeight, reducedOpen, 'reduced motion keeps the grace period');
+    await page.waitForFunction(
+      (height) => document.querySelector('.composer-region').getBoundingClientRect().height === height,
+      { timeout: 5_000 },
+      tail.dockHeight
+    );
+    await pinned('reduced motion');
+    await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'no-preference' }]);
   }
   assert.deepEqual(errors, []);
 });

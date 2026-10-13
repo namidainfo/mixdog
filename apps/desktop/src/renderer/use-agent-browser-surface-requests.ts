@@ -118,12 +118,13 @@ export function useAgentBrowserSurfaceRequests(options: BrowserSurfaceRequests) 
   // they closed earlier opens again and the layout change is theirs to keep.
   useEffect(
     () =>
-      onBrowserPageRevealRequested((sessionId) => {
+      onBrowserPageRevealRequested(({ sessionId }) => {
         surfaces.browserAutoRevealSuppressed.current.delete(sessionId);
         requestRef.current({ sessionId });
       }),
     [surfaces.browserAutoRevealSuppressed]
   );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-runs on owner/focus/select changes; reveal is derived from select, and the ref sets are read at run time
   useEffect(() => {
     for (const sessionId of pendingBrowserAutoReveal.current) {
       if (surfaces.browserAutoRevealSuppressed.current.has(sessionId)) {

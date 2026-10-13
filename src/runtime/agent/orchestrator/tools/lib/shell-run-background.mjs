@@ -11,7 +11,7 @@
 // exclusive with settle() via the autoBackgrounded flag set synchronously at
 // the top before any await.
 //
-//   shell-run-background/promote-job.mjs       — registry promotion, lease hand-over, kill fallback
+//   shell-run-background/promote-job.mjs       — registry promotion, lease release, kill fallback
 //   shell-run-background/promotion-results.mjs — the ExecResult of each promotion outcome
 import { clearForegroundRecord, clearForegroundTimers, elapsedSinceStart } from './shell-run-state.mjs';
 import { readCapturedOutput } from './shell-run-settle.mjs';
@@ -108,7 +108,7 @@ export function createAutoBackground({
     }
     const jobId = job.jobId;
     run.autoBackgroundJobId = jobId;
-    await handOverLease(run, jobId);
+    await handOverLease(run);
     // Snapshot the partial output captured so far for the immediate result.
     const { stdout, stderr } = await readCapturedOutput(taskOutput);
     const capture = { stdout, stderr, spill: { ...promotedSpillPaths(taskOutput), stdoutPath } };
@@ -127,7 +127,10 @@ export function createAutoBackground({
     // well — when 'close' fired before the once('close') wiring, nothing
     // else would ever flip the promoted job detail off 'running'.
     if (run.child.exitCode != null || run.child.signalCode != null) {
-      resolveCompletedDuringPromotion(run, capture);
+      // The run is over: the mid-run snapshot held back an incomplete tail
+      // and left the encoding open. A completed result carries the final read.
+      const final = await readCapturedOutput(taskOutput, true);
+      resolveCompletedDuringPromotion(run, { ...capture, stdout: final.stdout, stderr: final.stderr });
       return;
     }
     resolveBackgrounded(run, { jobId, reason, remainingBackgroundTimeoutMs }, capture);

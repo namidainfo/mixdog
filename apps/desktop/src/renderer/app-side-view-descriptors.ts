@@ -6,6 +6,7 @@ import {
   Github,
   Globe,
   Layers3,
+  ListChecks,
   MessageSquare,
   Package,
   PanelsTopLeft,
@@ -26,10 +27,7 @@ export function createAppSideViewDescriptors(
       'projects',
       { id: 'projects', label: t('Projects'), icon: PanelsTopLeft, onPrefetch: () => onPrefetch('projects') },
     ],
-    [
-      'workflows',
-      { id: 'workflows', label: t('Workflow'), icon: Layers3, onPrefetch: () => onPrefetch('workflows') },
-    ],
+    ['workflows', { id: 'workflows', label: t('Workflow'), icon: Layers3, onPrefetch: () => onPrefetch('workflows') }],
     [
       'extensions',
       { id: 'extensions', label: t('Extensions'), icon: Package, onPrefetch: () => onPrefetch('extensions') },
@@ -58,6 +56,16 @@ export function createAppSideViewDescriptors(
         tooltip: t('Changes'),
         icon: FileDiff,
         onPrefetch: () => onPrefetch('session-diff'),
+      },
+    ],
+    [
+      'background-jobs',
+      {
+        id: 'background-jobs',
+        label: t('Background tasks'),
+        tooltip: t('Background tasks'),
+        icon: ListChecks,
+        onPrefetch: () => onPrefetch('background-jobs'),
       },
     ],
     ['agents', { id: 'agents', label: t('Agents'), icon: Bot, onPrefetch: () => onPrefetch('agents') }],

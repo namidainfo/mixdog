@@ -313,6 +313,7 @@ export function WorkbenchQuickAccess({
     symbolQuery,
   ]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: commandMode and query are the triggers that reset the selection
   useEffect(() => {
     setSelectedIndex(0);
   }, [commandMode, query]);
@@ -364,6 +365,7 @@ export function WorkbenchQuickAccess({
   const listMessage = loading ? t('Searching…') : error || emptyListMessage();
 
   return createPortal(
+    // biome-ignore lint/a11y/noStaticElementInteractions: backdrop click-away layer; the dialog inside carries the semantics
     <div
       ref={surfaceRef}
       className="workbench-quick-access-layer"
@@ -408,7 +410,7 @@ export function WorkbenchQuickAccess({
               } else if (event.key === 'PageUp') {
                 event.preventDefault();
                 setSelectedIndex((current) => Math.max(0, current - 10));
-              } else if (event.key === 'Enter') {
+              } else if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
                 event.preventDefault();
                 runRow(selected);
               }
@@ -546,6 +548,7 @@ export function UnsavedChangesDialog({
   }, []);
 
   return createPortal(
+    // biome-ignore lint/a11y/noStaticElementInteractions: backdrop click-away layer; the dialog inside carries the semantics
     <div
       ref={surfaceRef}
       className="settings-confirm-layer"

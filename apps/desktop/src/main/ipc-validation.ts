@@ -5,6 +5,7 @@ import {
   DESKTOP_GIT_GLOBAL_CONFIG_KEYS,
   DESKTOP_LSP_REQUEST_METHODS,
   DESKTOP_READ_CAPABILITIES,
+  NOTIFICATION_VOLUME_MAX,
   type DesktopAbortOptions,
   type DesktopCapability,
   type DesktopCapabilityReadRequest,
@@ -63,6 +64,7 @@ const SUBMIT_OPTION_KEYS = new Set([
   'submittedAt',
   'displayText',
   'goalCommand',
+  'retryFailedTurn',
   'priority',
   'pastedImages',
   'pastedTexts',
@@ -70,9 +72,9 @@ const SUBMIT_OPTION_KEYS = new Set([
 const ABORT_OPTION_KEYS = new Set(['restorePrompt', 'submissionId']);
 const NEW_TASK_DRAFT_KEYS = new Set(['projectPath', 'route', 'workflowId', 'orchestrationMode']);
 const CAPABILITY_REQUEST_KEYS = new Set(['capability', 'args', 'sessionId']);
-const MODEL_SELECTION_KEYS = new Set(['provider', 'model', 'effort', 'fast', 'modelParameters', 'contextPercent']);
+const MODEL_SELECTION_KEYS = new Set(['provider', 'model', 'effort', 'fast', 'autoEffort', 'modelParameters', 'contextPercent']);
 const MODEL_CATALOG_OPTION_KEYS = new Set(['force', 'refresh', 'quick']);
-const PROVIDER_SETUP_OPTION_KEYS = new Set(['force', 'refresh']);
+const PROVIDER_SETUP_OPTION_KEYS = new Set(['force', 'refresh', 'unlockKeychain', 'recheckKeychain']);
 const TOOL_APPROVAL_KEYS = new Set(['approved', 'reason']);
 const TOGGLEABLE_BUILTIN_TOOLS = new Set(['git', 'office', 'localProvider', 'tidy', 'autoEffort']);
 const INSTALLABLE_BUILTIN_FEATURES = new Set(['git', 'memory', 'office', 'localProvider', 'tidy', 'autoEffort']);
@@ -98,6 +100,7 @@ const CAPABILITY_ARITY = {
   setRecapEnabled: [1, 1],
   getToolModuleSettings: [0, 0],
   setWebSearchEnabled: [1, 1],
+  setInstructionFiles: [1, 1],
   setMemoryToolsEnabled: [1, 1],
   getDeveloperSettings: [0, 0],
   setDeveloperOption: [2, 2],
@@ -108,6 +111,7 @@ const CAPABILITY_ARITY = {
   installLocalProviderModel: [1, 1],
   startLocalProviderInstallation: [1, 2],
   cancelLocalProviderInstallation: [1, 1],
+  discardLocalProviderInstallation: [1, 2],
   setLocalProviderIdleTtl: [1, 1],
   setLocalProviderContext: [2, 2],
   getLocalProviderModelDetails: [1, 1],
@@ -195,6 +199,7 @@ const CAPABILITY_ARITY = {
   getOnboardingStatus: [0, 0],
   skipOnboarding: [0, 0],
   completeOnboarding: [0, 1],
+  saveStarterGuideState: [1, 1],
   loginOAuthProvider: [1, 1],
   beginOAuthProviderLogin: [1, 2],
   getOAuthProviderLoginStatus: [1, 1],
@@ -203,6 +208,7 @@ const CAPABILITY_ARITY = {
   saveProviderApiKey: [2, 2],
   saveCustomProvider: [1, 1],
   removeCustomProvider: [1, 1],
+  updateCustomProviderModel: [3, 3],
   testCustomProvider: [1, 1],
   discoverCustomProviderModels: [1, 1],
   saveOpenCodeGoUsageAuth: [1, 1],
@@ -215,6 +221,7 @@ const CAPABILITY_ARITY = {
   deleteSchedule: [1, 1],
   setScheduleEnabled: [2, 2],
   runScheduleNow: [1, 1],
+  testWebhook: [1, 1],
   saveWebhook: [1, 1],
   deleteWebhook: [1, 1],
   setWebhookEnabled: [2, 2],
@@ -238,6 +245,17 @@ const CAPABILITY_ARITY = {
   openMediaFolder: [0, 1],
 } as const satisfies Record<DesktopCapability, readonly [number, number]>;
 
+/** Optional `{ openBrowser?: boolean }` for GitHub CLI sign-in. */
+export function optionalGithubLoginOptions(value: unknown): { openBrowser?: boolean } {
+  if (value === undefined || value === null) return {};
+  if (typeof value !== 'object' || Array.isArray(value)) throw new TypeError('options must be an object.');
+  const { openBrowser } = value as { openBrowser?: unknown };
+  if (openBrowser !== undefined && typeof openBrowser !== 'boolean') {
+    throw new TypeError('openBrowser must be a boolean.');
+  }
+  return openBrowser === undefined ? {} : { openBrowser };
+}
+
 export function requiredString(value: unknown, name: string, maximum = 32_768): string {
   if (typeof value !== 'string') throw new TypeError(`${name} must be a string.`);
   const text = value.trim();
@@ -245,9 +263,67 @@ export function requiredString(value: unknown, name: string, maximum = 32_768): 
   return text;
 }
 
-const CUSTOM_PROVIDER_KEYS = new Set(['id', 'name', 'protocol', 'baseURL', 'apiKey', 'models']);
+/** A paired device's local nickname: a string, where only an explicit '' clears
+ *  it. Anything else is refused rather than read as a clear. */
+export function requiredDeviceAlias(value: unknown): string {
+  if (typeof value !== 'string') throw new TypeError('alias must be a string.');
+  if (value.length > 1_024) throw new TypeError('alias is invalid.');
+  return value;
+}
+
+export function requiredSessionContentQuery(value: unknown): string {
+  return requiredString(value, 'session search query', 1_024);
+}
+
+const CUSTOM_PROVIDER_KEYS = new Set([
+  'id',
+  'name',
+  'protocol',
+  'baseURL',
+  'apiKey',
+  'models',
+  'schemaVersion',
+  'enabled',
+  'auth',
+  'discovery',
+  'modelOverrides',
+  'type',
+]);
 const CUSTOM_MODEL_KEYS = new Set(['id', 'name', 'contextWindow', 'maxOutputTokens']);
 const CUSTOM_PROTOCOLS = new Set(['openai-chat', 'openai-responses', 'anthropic']);
+const CUSTOM_DISCOVERY_KEYS = new Set(['newModelsHidden']);
+const CUSTOM_OVERRIDE_KEYS = new Set(['manual', 'hidden', 'name', 'contextWindow', 'maxOutputTokens', 'reasoning']);
+const CUSTOM_REASONING_KEYS = new Set(['levels', 'wireFormat', 'wireValues', 'replay']);
+// Mirror the runtime normalizer (custom-provider-config.mjs): the same level
+// list (CUSTOM_REASONING_LEVELS, kept identical by custom-provider-validation
+// test) and limits no looser than its own.
+export const CUSTOM_REASONING_LEVELS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+const CUSTOM_WIRE_FORMATS = new Set(['standard', 'deepseek']);
+export const CUSTOM_MAX_OVERRIDES = 500;
+export const CUSTOM_MAX_MODEL_ID = 256;
+export const CUSTOM_MAX_NAME = 200;
+export const CUSTOM_MAX_WIRE_VALUE = 64;
+// Same transport rules as provider-admin.mjs (validateCustomTransportFields).
+export const CUSTOM_MAX_API_KEY = 65_536;
+const CUSTOM_PROVIDER_ID = /^custom-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const CUSTOM_LEVEL_ALIASES: Readonly<Record<string, string>> = { ultra: 'max' };
+// biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting control characters is the point.
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+
+/** Canonical level like the runtime (trimmed, case-folded, `ultra` → `max`), or null. */
+function canonicalLevel(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const text = value.trim().toLowerCase();
+  const level = CUSTOM_LEVEL_ALIASES[text] ?? text;
+  return (CUSTOM_REASONING_LEVELS as readonly string[]).includes(level) ? level : null;
+}
+
+function boundedCustomText(value: unknown, name: string, maximum: number): string {
+  const text = requiredString(value, name, maximum);
+  if (CONTROL_CHARS.test(text)) throw new TypeError(`${name} is invalid.`);
+  return text;
+}
 
 function plainRecord(value: unknown, name: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError(`${name} is invalid.`);
@@ -258,22 +334,62 @@ function plainRecord(value: unknown, name: string): Record<string, unknown> {
 export function requiredCustomProviderInput(value: unknown, modelsOptional = false): Record<string, unknown> {
   const input = plainRecord(value, 'custom provider');
   requireAllowedKeys(input, CUSTOM_PROVIDER_KEYS, 'custom provider');
-  if (input.id !== undefined) requiredString(input.id, 'custom provider id', 128);
-  requiredString(input.name, 'custom provider name', 200);
+  if (input.id !== undefined && (typeof input.id !== 'string' || !CUSTOM_PROVIDER_ID.test(input.id))) {
+    throw new TypeError('custom provider id is invalid.');
+  }
+  boundedCustomText(input.name, 'custom provider name', CUSTOM_MAX_NAME);
   if (typeof input.protocol !== 'string' || !CUSTOM_PROTOCOLS.has(input.protocol)) {
     throw new TypeError('custom provider protocol is invalid.');
   }
   requiredString(input.baseURL, 'custom provider baseURL', 2048);
-  if (input.apiKey !== undefined && (typeof input.apiKey !== 'string' || input.apiKey.length > 65_536)) {
+  if (input.apiKey !== undefined && (typeof input.apiKey !== 'string' || input.apiKey.length > CUSTOM_MAX_API_KEY)) {
     throw new TypeError('custom provider apiKey is invalid.');
   }
-  if (input.models === undefined && modelsOptional) return input;
-  if (!Array.isArray(input.models) || input.models.length > 500) throw new TypeError('custom provider models are invalid.');
+  if (input.schemaVersion !== undefined && input.schemaVersion !== 2) {
+    throw new TypeError('custom provider schemaVersion is invalid.');
+  }
+  if (input.enabled !== undefined && typeof input.enabled !== 'boolean') {
+    throw new TypeError('custom provider enabled is invalid.');
+  }
+  if (input.auth !== undefined && input.auth !== 'key' && input.auth !== 'none') {
+    throw new TypeError('custom provider auth is invalid.');
+  }
+  if (input.type !== undefined && input.type !== 'custom') {
+    throw new TypeError('custom provider type is invalid.');
+  }
+  if ((input.discovery !== undefined || input.modelOverrides !== undefined) && input.schemaVersion !== 2) {
+    throw new TypeError('custom provider schemaVersion is invalid.');
+  }
+  // v2 states models as modelOverrides; a legacy `models` list is unversioned only.
+  if (input.schemaVersion === 2 && input.models !== undefined) {
+    throw new TypeError('custom provider models are invalid.');
+  }
+  if (input.discovery !== undefined) {
+    const discovery = plainRecord(input.discovery, 'custom provider discovery');
+    requireAllowedKeys(discovery, CUSTOM_DISCOVERY_KEYS, 'custom provider discovery');
+    if (discovery.newModelsHidden !== undefined && typeof discovery.newModelsHidden !== 'boolean') {
+      throw new TypeError('custom provider discovery is invalid.');
+    }
+  }
+  if (input.modelOverrides !== undefined) {
+    const overrides = plainRecord(input.modelOverrides, 'custom provider modelOverrides');
+    const ids = Object.keys(overrides);
+    if (ids.length > CUSTOM_MAX_OVERRIDES) throw new TypeError('custom provider modelOverrides are too large.');
+    for (const modelId of ids) {
+      requireSafeModelId(modelId);
+      validateCustomModelOverride(overrides[modelId], false, input.protocol);
+    }
+  }
+  if (input.models === undefined && (modelsOptional || input.schemaVersion === 2)) {
+    return input;
+  }
+  if (!Array.isArray(input.models) || input.models.length > CUSTOM_MAX_OVERRIDES)
+    throw new TypeError('custom provider models are invalid.');
   for (const model of input.models) {
     const row = plainRecord(model, 'custom provider model');
     requireAllowedKeys(row, CUSTOM_MODEL_KEYS, 'custom provider model');
-    requiredString(row.id, 'custom provider model id', 512);
-    if (row.name !== undefined) requiredString(row.name, 'custom provider model name', 512);
+    requiredString(row.id, 'custom provider model id', CUSTOM_MAX_MODEL_ID);
+    if (row.name !== undefined) requiredString(row.name, 'custom provider model name', CUSTOM_MAX_NAME);
     for (const key of ['contextWindow', 'maxOutputTokens']) {
       if (row[key] !== undefined && (!Number.isSafeInteger(row[key]) || Number(row[key]) <= 0)) {
         throw new TypeError(`custom provider model ${key} is invalid.`);
@@ -281,6 +397,97 @@ export function requiredCustomProviderInput(value: unknown, modelsOptional = fal
     }
   }
   return input;
+}
+
+function requireSafeModelId(modelId: string): void {
+  if (
+    !modelId.trim() ||
+    modelId !== modelId.trim() ||
+    modelId.length > CUSTOM_MAX_MODEL_ID ||
+    CONTROL_CHARS.test(modelId) ||
+    UNSAFE_KEYS.has(modelId)
+  ) {
+    throw new TypeError('custom provider model id is invalid.');
+  }
+}
+
+/**
+ * Check one model override with the runtime normalizer's accept set
+ * (custom-provider-config.mjs; parity is table-tested). `patch` additionally
+ * allows null to delete a property; its wire values are not tied to levels
+ * because the service prunes them against the merged levels.
+ */
+function validateCustomModelOverride(value: unknown, patch: boolean, protocol?: unknown): void {
+  const row = plainRecord(value, 'custom provider model override');
+  requireAllowedKeys(row, CUSTOM_OVERRIDE_KEYS, 'custom provider model override');
+  const nullable = (v: unknown) => patch && v === null;
+  for (const key of ['manual', 'hidden']) {
+    if (row[key] !== undefined && !nullable(row[key]) && typeof row[key] !== 'boolean') {
+      throw new TypeError(`custom provider model ${key} is invalid.`);
+    }
+  }
+  if (row.name !== undefined && !nullable(row.name))
+    boundedCustomText(row.name, 'custom provider model name', CUSTOM_MAX_NAME);
+  for (const key of ['contextWindow', 'maxOutputTokens']) {
+    const v = row[key];
+    if (v !== undefined && !nullable(v) && (!Number.isSafeInteger(v) || Number(v) <= 0)) {
+      throw new TypeError(`custom provider model ${key} is invalid.`);
+    }
+  }
+  if (row.reasoning === undefined || nullable(row.reasoning)) return;
+  const reasoning = plainRecord(row.reasoning, 'custom provider reasoning');
+  requireAllowedKeys(reasoning, CUSTOM_REASONING_KEYS, 'custom provider reasoning');
+  const { levels, wireFormat, wireValues, replay } = reasoning;
+  let declared: Set<string> | null = null;
+  if (levels !== undefined && !nullable(levels)) {
+    if (!Array.isArray(levels) || levels.length > CUSTOM_REASONING_LEVELS.length) {
+      throw new TypeError('custom provider reasoning levels are invalid.');
+    }
+    declared = new Set();
+    for (const entry of levels) {
+      const level = canonicalLevel(entry);
+      if (!level || declared.has(level)) throw new TypeError('custom provider reasoning levels are invalid.');
+      declared.add(level);
+    }
+  }
+  if (wireFormat !== undefined && !nullable(wireFormat)) {
+    const format = typeof wireFormat === 'string' ? wireFormat.trim() : '';
+    if (
+      !CUSTOM_WIRE_FORMATS.has(format) ||
+      (format === 'deepseek' && protocol !== undefined && protocol !== 'openai-chat')
+    ) {
+      throw new TypeError('custom provider reasoning wireFormat is invalid.');
+    }
+  }
+  if (replay !== undefined && !nullable(replay) && typeof replay !== 'boolean') {
+    throw new TypeError('custom provider reasoning replay is invalid.');
+  }
+  if (wireValues !== undefined && !nullable(wireValues)) {
+    const values = plainRecord(wireValues, 'custom provider reasoning wireValues');
+    const seen = new Set<string>();
+    for (const [key, wire] of Object.entries(values)) {
+      const level = canonicalLevel(key);
+      if (
+        !level ||
+        seen.has(level) ||
+        (!patch && declared && !declared.has(level)) ||
+        typeof wire !== 'string' ||
+        !wire.trim() ||
+        wire.trim().length > CUSTOM_MAX_WIRE_VALUE ||
+        CONTROL_CHARS.test(wire.trim())
+      ) {
+        throw new TypeError('custom provider reasoning wireValues are invalid.');
+      }
+      seen.add(level);
+    }
+  }
+}
+
+/** Shape check for updateCustomProviderModel(id, modelId, patch); patch null deletes the override. */
+export function requiredCustomModelPatch(id: unknown, modelId: unknown, patch: unknown): void {
+  requiredString(id, 'custom provider id', 128);
+  requireSafeModelId(requiredString(modelId, 'custom provider model id', CUSTOM_MAX_MODEL_ID));
+  if (patch !== null) validateCustomModelOverride(patch, true);
 }
 
 export function requiredGitGlobalConfigKey(value: unknown): DesktopGitGlobalConfigKey {
@@ -472,6 +679,9 @@ export function requiredSubmitOptions(value: unknown): DesktopSubmitOptions {
   ) {
     throw new TypeError('submit timestamp is invalid.');
   }
+  if (input.retryFailedTurn !== undefined && typeof input.retryFailedTurn !== 'boolean') {
+    throw new TypeError('submit retryFailedTurn is invalid.');
+  }
   const priority = input.priority;
   if (priority !== undefined && priority !== 'now' && priority !== 'next' && priority !== 'later') {
     throw new TypeError('submit priority is invalid.');
@@ -530,6 +740,27 @@ export function requiredNewTaskDraft(value: unknown): DesktopNewTaskDraft {
   };
 }
 
+// Mirrors the runtime schema (src/session-runtime/starter-guide-state.mjs).
+const STARTER_GUIDE_STEPS = new Set(['provider', 'project', 'workflow', 'extensions', 'remote']);
+
+function requiredStarterGuideState(value: unknown): void {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError('starter guide state must be an object.');
+  }
+  const state = value as Record<string, unknown>;
+  requireAllowedKeys(state, new Set(['closed', 'welcomed', 'visited']), 'starter guide state');
+  if (typeof state.closed !== 'boolean' || typeof state.welcomed !== 'boolean') {
+    throw new TypeError('starter guide closed and welcomed must be booleans.');
+  }
+  if (
+    !Array.isArray(state.visited) ||
+    state.visited.length > STARTER_GUIDE_STEPS.size * 2 ||
+    state.visited.some((step) => typeof step !== 'string' || !STARTER_GUIDE_STEPS.has(step))
+  ) {
+    throw new TypeError('starter guide visited must list known steps.');
+  }
+}
+
 export function requiredDesktopCapabilityRequest(value: unknown): DesktopCapabilityRequest {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new TypeError('capability request is invalid.');
@@ -565,6 +796,9 @@ export function requiredDesktopCapabilityRequest(value: unknown): DesktopCapabil
   if (BOOLEAN_FIRST_CAPABILITIES.has(capability) && typeof args[0] !== 'boolean') {
     throw new TypeError(`${capability} requires a boolean value.`);
   }
+  if (capability === 'setInstructionFiles' && !['all', 'agents', 'claude', 'off'].includes(args[0] as string)) {
+    throw new TypeError('setInstructionFiles requires all, agents, claude, or off.');
+  }
   if (BOOLEAN_SECOND_CAPABILITIES.has(capability) && typeof args[1] !== 'boolean') {
     throw new TypeError(`${capability} requires a boolean value.`);
   }
@@ -582,10 +816,16 @@ export function requiredDesktopCapabilityRequest(value: unknown): DesktopCapabil
     else if (args[1] !== undefined) throw new TypeError('runtime installation does not accept modelId.');
   }
   if (capability === 'cancelLocalProviderInstallation') requiredString(args[0], 'jobId', 128);
+  if (capability === 'discardLocalProviderInstallation') {
+    if (!['runtime', 'model', 'verify', 'repair'].includes(args[0] as string))
+      throw new TypeError('phase must be runtime, model, verify or repair.');
+    if (args[0] !== 'runtime') requiredString(args[1], 'modelId', 512);
+    else if (args[1] !== undefined) throw new TypeError('runtime installation does not accept modelId.');
+  }
   if (capability === 'setLocalProviderContext') {
     requiredString(args[0], 'modelId', 512);
-    if (args[1] !== null && (!Number.isSafeInteger(args[1]) || Number(args[1]) < 512)) {
-      throw new TypeError('Context size must be null (automatic) or an integer of at least 512 tokens.');
+    if (args[1] !== null && (!Number.isSafeInteger(args[1]) || Number(args[1]) < 16384)) {
+      throw new TypeError('Context size must be null (automatic) or an integer of at least 16384 tokens.');
     }
   }
   if (capability === 'getLocalProviderModelDetails' || capability === 'startLocalProviderModelMaintenance')
@@ -615,6 +855,8 @@ export function requiredDesktopCapabilityRequest(value: unknown): DesktopCapabil
   ) {
     requiredCustomProviderInput(args[0], capability === 'discoverCustomProviderModels');
   }
+  if (capability === 'saveStarterGuideState') requiredStarterGuideState(args[0]);
+  if (capability === 'updateCustomProviderModel') requiredCustomModelPatch(args[0], args[1], args[2]);
   if (capability === 'removeCustomProvider') requiredString(args[0], 'custom provider id', 128);
   if (capability === 'saveOpenAIUsageSessionKey') {
     validateSecret(args[0], 'secret');
@@ -626,19 +868,20 @@ export function requiredDesktopCapabilityRequest(value: unknown): DesktopCapabil
     validateSecret(options.apiKey, 'OpenCode console API key');
   }
   if (capability === 'getTurnReviewDiff' && args[0] !== undefined) {
-    // The turn review bar asks for `{ refresh, known, summary }`: whether to
-    // re-read the worktree before diffing, the tag of the review it already
-    // shows, and whether a collapsed bar can go without the patch text.
+    // The turn review bar asks for `{ refresh, known, summary, poll }`: whether
+    // to re-read the worktree before diffing, the tag of the review it already
+    // shows, whether a collapsed bar can go without the patch text, and
+    // whether its interval timer (`poll: 'background'`) sent the read.
     // Anything else is not a review option.
     const options =
       args[0] && typeof args[0] === 'object' && !Array.isArray(args[0]) ? (args[0] as Record<string, unknown>) : null;
     if (
       !options ||
-      Object.entries(options).some(([key, option]) =>
-        key === 'refresh' || key === 'summary'
-          ? typeof option !== 'boolean'
-          : key !== 'known' || typeof option !== 'string' || !/^[a-f0-9]{32}$/.test(option)
-      )
+      Object.entries(options).some(([key, option]) => {
+        if (key === 'refresh' || key === 'summary') return typeof option !== 'boolean';
+        if (key === 'poll') return option !== 'background';
+        return key !== 'known' || typeof option !== 'string' || !/^[a-f0-9]{32}$/.test(option);
+      })
     ) {
       throw new TypeError('turn review options are invalid.');
     }
@@ -683,6 +926,7 @@ export function requiredModelSelection(value: unknown): DesktopModelSelection {
   requireAllowedKeys(selection, MODEL_SELECTION_KEYS, 'model selection');
   const effort = selection.effort;
   const fast = selection.fast;
+  const autoEffort = selection.autoEffort;
   const modelParameters = selection.modelParameters;
   const contextPercent = selection.contextPercent;
   if (effort !== undefined && typeof effort !== 'string') {
@@ -690,6 +934,9 @@ export function requiredModelSelection(value: unknown): DesktopModelSelection {
   }
   if (fast !== undefined && typeof fast !== 'boolean') {
     throw new TypeError('selection.fast must be a boolean.');
+  }
+  if (autoEffort !== undefined && typeof autoEffort !== 'boolean') {
+    throw new TypeError('selection.autoEffort must be a boolean.');
   }
   if (
     modelParameters !== undefined &&
@@ -715,6 +962,7 @@ export function requiredModelSelection(value: unknown): DesktopModelSelection {
     model: requiredString(selection.model, 'selection.model', 512),
     ...(effort === undefined ? {} : { effort: requiredString(effort, 'selection.effort', 64) }),
     ...(fast === undefined ? {} : { fast }),
+    ...(autoEffort === undefined ? {} : { autoEffort }),
     ...(modelParameters === undefined ? {} : { modelParameters: { ...(modelParameters as Record<string, string>) } }),
     ...(contextPercent === undefined ? {} : { contextPercent }),
   };
@@ -887,11 +1135,112 @@ export function attachmentImageBaseName(value: unknown): string {
   return label || 'image';
 }
 
+const MAX_DATA_URL_BYTES = 256 * 1024 * 1024;
+const MIME_EXTENSIONS = new Map<string, string>([
+  ['application/pdf', 'pdf'],
+  ['application/json', 'json'],
+  ['text/plain', 'txt'],
+  ['text/markdown', 'md'],
+  ['text/csv', 'csv'],
+  ['image/png', 'png'],
+  ['image/jpeg', 'jpg'],
+  ['image/webp', 'webp'],
+  ['image/gif', 'gif'],
+  ['image/bmp', 'bmp'],
+  ['audio/mpeg', 'mp3'],
+  ['video/mp4', 'mp4'],
+]);
+// Allowlist of inert document, media and plain-text types. Anything else
+// (scripts, installers, control-panel items, markup a browser would run) is
+// never handed to the OS from a file this process just wrote.
+const OPENABLE_ATTACHMENT_EXTENSIONS = new Set([
+  ...['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'avif', 'tif', 'tiff', 'heic', 'ico'],
+  ...['pdf', 'doc', 'docx', 'dot', 'dotx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'odp', 'rtf'],
+  ...['txt', 'md', 'csv', 'tsv', 'json', 'log', 'yaml', 'yml', 'toml', 'ini'],
+  ...['mp3', 'wav', 'ogg', 'flac', 'm4a', 'mp4', 'webm', 'mov', 'mkv'],
+]);
+
+/** Decodes a base64 or percent-encoded `data:` URL. */
+export function decodeDataUrl(value: unknown): { mime: string; bytes: Buffer } {
+  if (typeof value !== 'string') throw new TypeError('data URL must be a string.');
+  const match = /^data:([^,]*),([\s\S]*)$/i.exec(value.trim());
+  if (!match) throw new TypeError('data URL is invalid.');
+  const params = match[1].split(';').map((part) => part.trim());
+  const mime = (params[0] || 'text/plain').toLowerCase();
+  const base64 = params.slice(1).some((part) => part.toLowerCase() === 'base64');
+  let bytes: Buffer;
+  if (base64) {
+    if (!/^[A-Za-z0-9+/\s]*={0,2}\s*$/.test(match[2])) throw new TypeError('data URL is invalid.');
+    bytes = Buffer.from(match[2], 'base64');
+  } else {
+    try {
+      bytes = Buffer.from(decodeURIComponent(match[2]), 'utf8');
+    } catch {
+      throw new TypeError('data URL is invalid.');
+    }
+  }
+  if (bytes.length > MAX_DATA_URL_BYTES) throw new TypeError('data URL is too large.');
+  return { mime, bytes };
+}
+
+/** Source of "Save link as": an http(s) URL or a data URL. */
+export function requiredSaveSource(
+  value: unknown
+): { kind: 'data'; mime: string; bytes: Buffer } | { kind: 'http'; url: string } {
+  const text = requiredString(value, 'source', 64 * 1024 * 1024).trim();
+  if (/^data:/i.test(text)) return { kind: 'data', ...decodeDataUrl(text) };
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    throw new TypeError('source is invalid.');
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new TypeError('source protocol is unsupported.');
+  return { kind: 'http', url: url.toString() };
+}
+
+/** A file name safe to offer as a dialog default: no separators or reserved characters. */
+export function sanitizedFileName(value: unknown, fallback = 'download'): string {
+  const name =
+    typeof value === 'string'
+      ? value
+          // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what is stripped.
+          .replace(/[\u0000-\u001f<>:"/\\|?*]+/g, '-')
+          .replace(/^[\s.-]+|[\s.]+$/g, '')
+          .slice(0, 120)
+      : '';
+  return name || fallback;
+}
+
+/** Any attachment → OS app: bytes plus a stem and an extension that cannot launch code. */
+export function requiredAttachmentFile(
+  dataUrl: unknown,
+  name: unknown
+): { bytes: Buffer; baseName: string; extension: string } {
+  const { mime, bytes } = decodeDataUrl(dataUrl);
+  if (bytes.length === 0) throw new TypeError('attachment data URL is empty.');
+  const named = typeof name === 'string' ? /\.([A-Za-z0-9]{1,10})$/.exec(name.trim())?.[1].toLowerCase() : undefined;
+  const textKind = mime.startsWith('text/') || /^application\/(?:json|xml|x-yaml)$|\+(?:json|xml)$/.test(mime);
+  const derived = MIME_EXTENSIONS.get(mime);
+  const extension =
+    [named, derived].find((candidate) => candidate && OPENABLE_ATTACHMENT_EXTENSIONS.has(candidate)) ||
+    (textKind ? 'txt' : undefined);
+  if (!extension) throw new TypeError('attachment type cannot be opened.');
+  return { bytes, baseName: attachmentImageBaseName(name), extension };
+}
+
 export function requiredZoomFactor(value: unknown): number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0.2 || value > 10) {
     throw new TypeError('zoom factor is invalid.');
   }
   return Math.round(value * 100) / 100;
+}
+
+export function requiredNotificationVolume(value: unknown): number {
+  if (!Number.isInteger(value) || (value as number) < 0 || (value as number) > NOTIFICATION_VOLUME_MAX) {
+    throw new TypeError('notification volume is invalid.');
+  }
+  return value as number;
 }
 
 export function requiredDesktopSettingKey(value: unknown): DesktopSettingKey {

@@ -1,6 +1,7 @@
 import { Info, Plus } from 'lucide-react';
 import { RailPinIcon } from './RailPinIcon';
 import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type KeyboardEvent } from 'react';
+import { invalidateSidebarReferenceForMutation } from './sidebar-reference-cache';
 
 import { PaneSurfaceGate } from './PaneSurfaceGate';
 import { InitialSurface } from './InitialSurface';
@@ -45,25 +46,30 @@ function timestamp(value: unknown): number | null {
   return parsed < 1_000_000_000_000 ? parsed * 1_000 : parsed;
 }
 
+/** Subscriptions matched by row id or label whatever the row's group. */
+const ROW_MATCHERS: Record<string, (id: string, label: string) => boolean> = {
+  'opencode-go': (id, label) => id === 'opencode-go' || label.includes('opencode go'),
+  cursor: (id, label) => id === 'cursor-oauth' || label.includes('cursor oauth'),
+  antigravity: (id, label) => id === 'antigravity-oauth' || label.includes('antigravity'),
+};
+
+/** Subscriptions matched inside the `oauth` group by id/label text. */
+const OAUTH_ROW_PATTERNS: Record<string, RegExp> = {
+  codex: /openai|codex/,
+  claude: /anthropic|claude/,
+  grok: /grok|xai/,
+};
+
 function subscriptionRow(dashboard: unknown, subscription: Subscription): UsageRecord {
   return (
     rows(dashboard).find((row) => {
       const id = String(row.id || '').toLowerCase();
       const label = String(row.label || '').toLowerCase();
-      const group = String(row.group || '').toLowerCase();
-      if (subscription.key === 'opencode-go') {
-        return id === 'opencode-go' || label.includes('opencode go');
-      }
-      if (subscription.key === 'cursor') {
-        return id === 'cursor-oauth' || label.includes('cursor oauth');
-      }
-      if (subscription.key === 'antigravity') {
-        return id === 'antigravity-oauth' || label.includes('antigravity');
-      }
-      if (group !== 'oauth') return false;
-      if (subscription.key === 'codex') return /openai|codex/.test(`${id} ${label}`);
-      if (subscription.key === 'claude') return /anthropic|claude/.test(`${id} ${label}`);
-      return /grok|xai/.test(`${id} ${label}`);
+      const matcher = ROW_MATCHERS[subscription.key];
+      if (matcher) return matcher(id, label);
+      if (String(row.group || '').toLowerCase() !== 'oauth') return false;
+      const pattern = OAUTH_ROW_PATTERNS[subscription.key];
+      return pattern ? pattern.test(`${id} ${label}`) : id === subscription.provider;
     }) || {}
   );
 }
@@ -135,10 +141,6 @@ function usedPercent(window: UsageRecord): number | null {
   return value === null ? null : Math.max(0, Math.min(100, value));
 }
 
-/** Rail pin mode (user: 핀모드): one entry per brand that has quota data —
- *  its icon plus the final quota window's usage, picked by longest period:
- *  monthly (M) → weekly (7D/W) → daily/hourly. Unknown windows fall back to
- *  the provider's final entry. */
 interface UsagePinEntry {
   key: string;
   label: string;
@@ -170,6 +172,10 @@ function pinPercent(windows: UsageRecord[], provider: string): number | null {
   return candidates[candidates.length - 1].percent;
 }
 
+/** Rail pin mode: one entry per brand that has quota data —
+ *  its icon plus the final quota window's usage, picked by longest period:
+ *  monthly (M) → weekly (7D/W) → daily/hourly. Unknown windows fall back to
+ *  the provider's final entry. */
 export function usagePinEntries(dashboard: unknown): UsagePinEntry[] {
   if (rows(dashboard).some((row) => Array.isArray(row.accounts))) {
     return connectedUsageAccounts(dashboard).flatMap((account) => {
@@ -196,8 +202,8 @@ export function usagePinEntries(dashboard: unknown): UsagePinEntry[] {
   });
 }
 
-// Tidied schedule copy (user: 리셋시간 문구 정리): lowercase duration units
-// read as time, not as quota-window labels (5H/W/M stay uppercase).
+// Lowercase duration units read as time, not as quota-window labels
+// (5H/W/M stay uppercase).
 function resetSchedule(value: unknown): { state: 'due' | 'soon' | 'in' | ''; time: string } {
   const resetAt = timestamp(value);
   if (resetAt === null) return { state: '', time: '' };
@@ -221,9 +227,9 @@ function resetExpiryText(value: unknown): string {
   return schedule.state === 'soon' ? t('Expires soon') : '';
 }
 
-/** Every quota window carries its OWN schedule (user: 각각 항목마다 초기화시간
- *  개별로 하나씩): a compact duration that closes the meter row after the
- *  percentage, with the full sentence kept in the row tooltip.
+/** Every quota window carries its OWN schedule: a compact duration that closes
+ *  the meter row after the percentage, with the full sentence kept in the row
+ *  tooltip.
  *  The duration units are notation, not prose, so they stay untranslated like
  *  the 5d/13h reading itself. */
 function resetShortText(value: unknown): string {
@@ -237,8 +243,12 @@ function resetCredits(row: UsageRecord): UsageRecord {
   return record(row.resetCredits);
 }
 
+function availableResetCount(value: UsageRecord): number {
+  return Math.max(0, Math.floor(number(value.availableCount) || 0));
+}
+
 function availableResetCredits(value: UsageRecord): UsageRecord[] {
-  const availableCount = Math.max(0, Math.floor(number(value.availableCount) || 0));
+  const availableCount = availableResetCount(value);
   const credits = (Array.isArray(value.availableCredits) ? value.availableCredits : [])
     .map(record)
     .sort(
@@ -308,6 +318,57 @@ function clearCodexResetAttempt(offerRevision: string): void {
   }
 }
 
+function creditsOf(row: UsageRecord): UsageRecord | null {
+  return row.credits && typeof row.credits === 'object' ? record(row.credits) : null;
+}
+
+const MONEY = { minimumFractionDigits: 2, maximumFractionDigits: 2 };
+
+function CreditLine({
+  credits,
+  on,
+  exhausted,
+  onToggle,
+}: {
+  credits: UsageRecord;
+  on: boolean;
+  exhausted: boolean;
+  onToggle(next: boolean): void;
+}) {
+  const usd = credits.unit === 'usd';
+  const balance = number(credits.balance);
+  const limit = number(credits.monthlyLimit);
+  let value: string;
+  if (credits.unlimited === true) value = t('Unlimited');
+  else if (balance === null) value = '—';
+  else if (usd) value = `$${balance.toLocaleString('en-US', MONEY)}`;
+  else value = Math.round(balance).toLocaleString('en-US');
+  const inUse = on && exhausted;
+  return (
+    <div className="sidebar-usage-credit">
+      <small>{t('Credits')}</small>
+      <span className="sidebar-usage-credit-value">
+        <b className={inUse ? 'is-in-use' : undefined}>{value}</b>
+        {usd && limit !== null && (
+          <small className="sidebar-usage-credit-limit">
+            {' · '}
+            {t('Monthly limit')} ${limit.toLocaleString('en-US', { maximumFractionDigits: 2 })}
+          </small>
+        )}
+        {inUse && <em className="sidebar-usage-credit-badge">{t('In use')}</em>}
+      </span>
+      <button
+        type="button"
+        role="switch"
+        className="sidebar-usage-credit-switch"
+        aria-checked={on}
+        aria-label={t('Use credits')}
+        onClick={() => onToggle(!on)}
+      />
+    </div>
+  );
+}
+
 export function SidebarUsage({
   api = window.mixdogDesktop,
   sidebarOpen = true,
@@ -319,7 +380,7 @@ export function SidebarUsage({
   api?: UsageApi;
   sidebarOpen?: boolean;
   /** Rail pin mode: the header toggle swaps the rail's pie glyph for the
-   *  per-brand icon + % stack (user: 핀모드). */
+   *  per-brand icon + % stack. */
   pinned?: boolean;
   onTogglePin?(): void;
   /** Opens the usage surface: this panel answers what is LEFT, that one how
@@ -429,16 +490,58 @@ export function SidebarUsage({
   // concrete row remains afterward.
   const codexRow = subscriptionRow(dashboard, SUBSCRIPTIONS[0]);
   const codexResetCredits = resetCredits(codexRow);
-  const codexResetCount = Math.max(0, Math.floor(number(codexResetCredits.availableCount) || 0));
+  const codexResetCount = availableResetCount(codexResetCredits);
   const codexResetRows = availableResetCredits(codexResetCredits);
   const codexResetKeys = codexResetRows.map(resetCreditKey);
   const codexResetKeySignature = codexResetKeys.join('\u0000');
   const codexResetOffer = String(codexResetCredits.offerRevision || '');
+  // biome-ignore lint/correctness/useExhaustiveDependencies: codexResetKeySignature is the stable string form of codexResetKeys, so the effect re-runs only when the key set changes
   useEffect(() => {
     if (resetConfirming && !codexResetKeys.includes(resetConfirming)) {
       setResetConfirming(null);
     }
   }, [codexResetKeySignature, resetConfirming]);
+  const [resetInfoOpen, setResetInfoOpen] = useState(false);
+  const resetRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!sidebarOpen) setResetInfoOpen(false);
+  }, [sidebarOpen]);
+  useEffect(() => {
+    if (!resetInfoOpen) return undefined;
+    const onPointer = (event: PointerEvent) => {
+      if (!resetRef.current?.contains(event.target as Node)) setResetInfoOpen(false);
+    };
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') setResetInfoOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointer, true);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onPointer, true);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [resetInfoOpen]);
+  const [creditSwitch, setCreditSwitch] = useState<Record<string, boolean>>({});
+  const toggleCredits = async (provider: string, next: boolean) => {
+    if (typeof api?.invokeCapability !== 'function') return;
+    setCreditSwitch((current) => ({ ...current, [provider]: next }));
+    const settle = () =>
+      setCreditSwitch((current) => {
+        const { [provider]: _settled, ...rest } = current;
+        return rest;
+      });
+    try {
+      await api.invokeCapability({
+        capability: 'updateProviderAccounts',
+        args: [provider, { useCredits: next }],
+      });
+      invalidateSidebarReferenceForMutation('updateProviderAccounts');
+      await refreshUsageDashboard(api, { force: true });
+    } catch (cause) {
+      console.error('Provider credits toggle failed:', cause);
+    }
+    settle();
+  };
   const consumeCodexReset = async () => {
     if (!codexResetOffer || codexResetCount < 1 || resetting || typeof api?.invokeCapability !== 'function') return;
     const idempotencyKey = codexResetAttempt(codexResetOffer);
@@ -576,6 +679,7 @@ export function SidebarUsage({
             {connectedAccounts.map((row) => {
               const provider = String(row.provider);
               const windows = quotaWindows(row);
+              const credits = creditsOf(row);
               const checking = row.status === 'checking';
               const accountNote = usageAccountNote(row);
               // Only connected providers are listed, so a row here always
@@ -651,71 +755,83 @@ export function SidebarUsage({
                       </span>
                     )}
                   </span>
+                  {credits && (
+                    <CreditLine
+                      credits={credits}
+                      on={creditSwitch[provider] ?? row.useCredits === true}
+                      exhausted={windows.some((window) => (usedPercent(window) ?? 0) >= 100)}
+                      onToggle={(next) => void toggleCredits(provider, next)}
+                    />
+                  )}
+                  {row.providerKey === 'codex' && (row.selected === true || !row.accountId) && codexResetOffer && codexResetCount > 0 && (
+                    <div className="sidebar-usage-reset-credit" ref={resetRef}>
+                      <div className="sidebar-usage-reset-line">
+                        <small>{t('Reset credits')}</small>
+                        <span className="sidebar-usage-credit-value">
+                          <b>{t('{{count}} left', { count: codexResetCount })}</b>
+                          <button
+                            type="button"
+                            className="sidebar-usage-reset-info"
+                            aria-label={t('Reset credit details')}
+                            aria-expanded={resetInfoOpen}
+                            onClick={() => setResetInfoOpen((open) => !open)}
+                          >
+                            <Info size={14} aria-hidden="true" />
+                          </button>
+                        </span>
+                        <button
+                          type="button"
+                          className="sidebar-usage-reset-use"
+                          disabled={resetting}
+                          onClick={() => setResetConfirming(codexResetKeys[0] ?? null)}
+                        >
+                          {t('Use')}
+                        </button>
+                      </div>
+                      {timestamp(codexResetCredits.nextExpiresAt) !== null && (
+                        <p className="sidebar-usage-account-note">
+                          {t('Next reset credit expiry: {{expiry}}', { expiry: resetExpiryText(codexResetCredits.nextExpiresAt) })}
+                        </p>
+                      )}
+                      {resetInfoOpen && (
+                        <ul className="sidebar-usage-reset-popover" role="dialog" aria-label={t('Reset credits')}>
+                          {codexResetRows.map((credit, index) => {
+                            const expiresAt = timestamp(credit.expiresAt);
+                            const soon = expiresAt !== null && expiresAt - Date.now() <= 7 * 24 * 3_600_000;
+                            return (
+                              <li key={codexResetKeys[index]}>
+                                <span>{t('Reset credit {{index}}', { index: index + 1 })}</span>
+                                <small className={soon ? 'is-soon' : undefined}>
+                                  {resetExpiryText(credit.expiresAt) || t('Expiry unavailable')}
+                                </small>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      )}
+                      {resetConfirming !== null && (
+                        <div className="sidebar-usage-reset-confirmation">
+                          <p>
+                            {t(
+                              'This uses one available reset credit and immediately resets eligible Codex rate-limit windows.'
+                            )}
+                          </p>
+                          <div className="sidebar-usage-reset-actions">
+                            <button type="button" disabled={resetting} onClick={() => setResetConfirming(null)}>
+                              {t('Cancel')}
+                            </button>
+                            <button type="button" disabled={resetting} onClick={() => void consumeCodexReset()}>
+                              {resetting ? t('Using…') : t('Confirm')}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               );
             })}
           </div>
-          {/* Hide the reset-ticket surface when the account has none available. */}
-          {codexResetOffer && codexResetCount > 0 && (
-            <section className="sidebar-usage-reset-credit">
-              <header className="sidebar-usage-reset-heading">
-                <b>{t('Codex reset credits')}</b>
-                <small>{t('{{count}} available', { count: codexResetCount })}</small>
-              </header>
-              {timestamp(codexResetCredits.nextExpiresAt) !== null && (
-                <p className="sidebar-usage-account-note">
-                  {t('Next reset credit expiry: {{expiry}}', { expiry: resetExpiryText(codexResetCredits.nextExpiresAt) })}
-                </p>
-              )}
-              {codexResetRows.length > 0 && (
-                <div className="sidebar-usage-reset-list">
-                  {codexResetRows.map((credit, index) => {
-                    const creditKey = codexResetKeys[index];
-                    const confirmLabel = resetting ? t('Using…') : t('Confirm');
-                    return (
-                      <div className="sidebar-usage-reset-row" key={creditKey}>
-                        <div className="sidebar-usage-reset-summary">
-                          <b>{t('Reset credit {{index}}', { index: index + 1 })}</b>
-                          <small>{resetExpiryText(credit.expiresAt) || t('Expiry unavailable')}</small>
-                        </div>
-                        {resetConfirming !== creditKey ? (
-                          <button
-                            type="button"
-                            disabled={resetting}
-                            aria-label={t('Use Codex reset credit {{index}}', { index: index + 1 })}
-                            onClick={() => setResetConfirming(creditKey)}
-                          >
-                            {t('Use')}
-                          </button>
-                        ) : (
-                          <div className="sidebar-usage-reset-confirmation">
-                            <p>
-                              {t(
-                                'This uses one available credit and immediately resets eligible Codex rate-limit windows.'
-                              )}
-                            </p>
-                            <div className="sidebar-usage-reset-actions">
-                              <button type="button" disabled={resetting} onClick={() => setResetConfirming(null)}>
-                                {t('Cancel')}
-                              </button>
-                              <button
-                                type="button"
-                                aria-label={t('Confirm using Codex reset credit {{index}}', { index: index + 1 })}
-                                disabled={resetting}
-                                onClick={() => void consumeCodexReset()}
-                              >
-                                {confirmLabel}
-                              </button>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </section>
-          )}
           {resetNotice && (
             <p className="sidebar-usage-reset-notice" role="status">
               {resetNotice}

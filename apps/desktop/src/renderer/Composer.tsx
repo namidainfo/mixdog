@@ -1,6 +1,7 @@
 import React, {
   memo,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -11,6 +12,7 @@ import React, {
   type ReactNode,
   type SetStateAction,
 } from 'react';
+import { createPortal } from 'react-dom';
 import type {
   DesktopAbortOptions,
   DesktopModelSelection,
@@ -23,11 +25,13 @@ import { shouldStopComposerGeneration } from './renderer-logic.mjs';
 import type { CommandSurface as CommandSurfaceName, SettingsSection } from './slash-commands';
 import { touchPrimaryPointer } from './surface-input-focus';
 // @ts-expect-error The shared TUI module is plain ESM and has no declaration file.
-import { pastedTextLineCount, shouldFoldPastedText } from '../../../../src/tui/paste-text-policy.mjs';
+import { shouldFoldPastedText } from '../../../../src/tui/paste-text-policy.mjs';
 
 // Project-context pill, attachment budget, prompt history and the queued
 // follow-up list live in composer-support.tsx.
-import { ATTACHMENT_ACCEPT, COMPOSER_PLACEHOLDERS, QueueList } from './composer-support';
+import { ATTACHMENT_ACCEPT, COMPOSER_PLACEHOLDERS, QueueList, pastedTextFields } from './composer-support';
+import { ComposerPastedTextDialog } from './ComposerPastedTextDialog';
+import { ComposerQueueTrayContext } from './composer-island-state';
 import {
   composerDraftAfterScopeChange,
   composerScopeOpensFreshDraft,
@@ -39,6 +43,7 @@ import { useComposerAttachments } from './use-composer-attachments';
 import { useComposerCapability } from './use-composer-capability';
 import { useComposerExternalDraft } from './use-composer-external-draft';
 import { useComposerQueue } from './use-composer-queue';
+import { useComposerPromptRestore } from './use-composer-prompt-restore';
 import { useComposerSubmission } from './use-composer-submission';
 import { useComposerKeyboard } from './use-composer-keyboard';
 import { useComposerFocus } from './use-composer-focus';
@@ -48,6 +53,8 @@ import { useComposerMessageSelector } from './use-composer-message-selector';
 import { useComposerNotice } from './use-composer-notice';
 import { useComposerPalettes } from './use-composer-palettes';
 import { createSlashExecutor } from './composer-slash-executor';
+import { readCachedModelCatalog } from './model-catalog-cache';
+import { modelOffersUltrafast } from './model-route-utils';
 import {
   AttachmentChips,
   DictationOverlay,
@@ -109,14 +116,11 @@ function handleComposerPaste(
   const text = event.clipboardData.getData('text/plain').replace(/\r\n?/g, '\n');
   if (!shouldFoldPastedText(text)) return;
   const id = attachmentSequence.current++;
-  const lines = pastedTextLineCount(text);
   const inserted = insertAttachment({
     id,
-    name: `Pasted text · ${lines} lines`,
+    ...pastedTextFields(id, text),
     kind: 'text',
     mimeType: 'text/plain',
-    data: text,
-    token: `[Pasted text #${id} +${lines} lines]`,
     source: 'paste',
     chipOnly: true,
   });
@@ -200,6 +204,8 @@ function switchComposerIdentity({
 }
 
 export type ComposerProps = {
+  /** Opens a staged attachment in the editor pane (the transcript's file opener). */
+  onOpenFile?: (project: string, rel: string, line?: number, accessToken?: string) => void;
   turnBusy: boolean;
   commandBusy: boolean;
   transitioning: boolean;
@@ -222,11 +228,13 @@ export type ComposerProps = {
   effort: string;
   fast: boolean;
   fastCapable: boolean;
+  /** The route's own Auto reasoning flag; absent means on. */
+  autoEffort?: boolean;
   modelParameters?: Record<string, string>;
   contextPercent?: number;
   draftMode?: boolean;
   onDraftModelSelection?: (selection: DesktopModelSelection) => void;
-  onRoutePreferenceApplied?: (selection: DesktopModelSelection) => void;
+  onRoutePreferenceApplied?: (selection: DesktopModelSelection, options?: { modelChoice?: boolean }) => void;
   /** Session readout seated right after the model trigger — the context
    *  gauge (user: 컨텍스트는 모델 선택기 옆). */
   modelAside?: ReactNode;
@@ -234,6 +242,8 @@ export type ComposerProps = {
   hiddenQueueIds?: Array<string | number>;
   pendingSubmissionIds?: Array<string | number>;
   onQueuedRestored?: (ids: string[]) => void;
+  /** A prompt another device cancelled, handed back to the device that sent it. */
+  promptRestore?: { id: string; ids: string[]; text: string; device: string; at: number } | null;
   /** Rewindable user prompts (oldest → newest) for the Esc-Esc selector. */
   userMessages?: Array<{ id: string; text: string }>;
   submit: (content: DesktopPromptContent, options?: DesktopSubmitOptions) => Promise<unknown>;
@@ -259,6 +269,7 @@ export type ComposerProps = {
 
 export const Composer = memo(function Composer(props: ComposerProps) {
   const {
+    onOpenFile,
     turnBusy,
     commandBusy,
     transitioning,
@@ -275,6 +286,7 @@ export const Composer = memo(function Composer(props: ComposerProps) {
     effort,
     fast,
     fastCapable,
+    autoEffort,
     modelParameters,
     contextPercent,
     draftMode,
@@ -285,6 +297,7 @@ export const Composer = memo(function Composer(props: ComposerProps) {
     hiddenQueueIds,
     pendingSubmissionIds,
     onQueuedRestored,
+    promptRestore,
     userMessages,
     submit,
     abort,
@@ -317,9 +330,6 @@ export const Composer = memo(function Composer(props: ComposerProps) {
   const paletteAnchor = useRef<HTMLFormElement>(null);
   const composingRef = useRef(false);
   const suppressImeLineBreakRef = useRef(false);
-  // True while the current Shift hold has already produced a character ('?' is
-  // Shift+/), so the Enter that follows is a send, not a newline chord.
-  const shiftLatchRef = useRef(false);
   const draftRef = useRef(draft);
   draftRef.current = draft;
   const escapeClearAtRef = useRef(0);
@@ -355,6 +365,7 @@ export const Composer = memo(function Composer(props: ComposerProps) {
     clearAttachments,
     removeAttachments,
     removeAttachment,
+    updatePastedText,
     replaceAttachments,
     attachFiles,
     restoredAttachments,
@@ -391,6 +402,7 @@ export const Composer = memo(function Composer(props: ComposerProps) {
     applySnapshot,
     sessionId,
   });
+  const queueTray = useContext(ComposerQueueTrayContext);
   const queue = useComposerQueue({
     queued,
     hiddenQueueIds,
@@ -410,6 +422,7 @@ export const Composer = memo(function Composer(props: ComposerProps) {
     onQueuedRestored,
     scope: historyScope,
   });
+  useComposerPromptRestore({ promptRestore, setDraft, draftRef, textarea, onQueuedRestored });
   const selector = useComposerMessageSelector({
     userMessages,
     restoring: queue.restoring,
@@ -430,6 +443,7 @@ export const Composer = memo(function Composer(props: ComposerProps) {
   });
   const { setCaretOffset, slash, mention } = palettes;
   useComposerIme({ textarea, composingRef, suppressImeLineBreakRef, draftRef, setDraft, setCaretOffset });
+  // biome-ignore lint/correctness/useExhaustiveDependencies: must switch only when identityScope changes; the other captures are read at that moment and a re-run on their identity would reset the composer
   useLayoutEffect(() => {
     if (activeIdentityScope.current === identityScope) return;
     const previousScope = activeIdentityScope.current;
@@ -461,13 +475,20 @@ export const Composer = memo(function Composer(props: ComposerProps) {
   // path forced TWO whole-document synchronous reflows per keystroke
   // (height:auto → scrollHeight read) — the measured source of typing lag on
   // long transcripts.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: setDraggingFiles identity is not guaranteed stable here; the effect must run only when transitioning changes
   useEffect(() => {
     if (!transitioning) return;
     setDraggingFiles(false);
   }, [transitioning]);
   useComposerFocus({ textarea, transitioning, focusRequest, paneActive });
   const [goalDialogOpen, setGoalDialogOpen] = useState(false);
+  const [addMenuRequest, setAddMenuRequest] = useState(0);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: identityScope and paneActive are reset triggers; the effect body does not read them
   useEffect(() => setGoalDialogOpen(false), [identityScope, paneActive]);
+  const [editingPasteId, setEditingPasteId] = useState<number | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: identityScope and paneActive are reset triggers; the effect body does not read them
+  useEffect(() => setEditingPasteId(null), [identityScope, paneActive]);
+  const editingPaste = attachments.find((attachment) => attachment.id === editingPasteId);
   const executeSlash = createSlashExecutor({
     draftMode,
     sessionId,
@@ -477,7 +498,12 @@ export const Composer = memo(function Composer(props: ComposerProps) {
     effort,
     fast,
     fastCapable,
+    autoEffort,
     modelParameters,
+    ultrafastCapable: () =>
+      modelOffersUltrafast(
+        readCachedModelCatalog().models.find((entry) => entry.provider === provider && entry.model === model)
+      ),
     onDraftModelSelection,
     onRoutePreferenceApplied,
     invokeResult,
@@ -488,6 +514,7 @@ export const Composer = memo(function Composer(props: ComposerProps) {
     clearNotice,
     showNotice: showComposerNotice,
     openGoalDialog: () => setGoalDialogOpen(true),
+    openSkillMenu: () => setAddMenuRequest((request) => request + 1),
     onNewTask: props.onNewTask,
     onClearToNewTask: props.onClearToNewTask,
     onResumeSession: props.onResumeSession,
@@ -533,7 +560,7 @@ export const Composer = memo(function Composer(props: ComposerProps) {
     event.preventDefault();
     void send('', 'form-submit');
   };
-  const { selectMention, onKeyDown, onKeyUp } = useComposerKeyboard({
+  const { selectMention, onKeyDown } = useComposerKeyboard({
     draft: {
       value: draft,
       set: setDraft,
@@ -568,7 +595,6 @@ export const Composer = memo(function Composer(props: ComposerProps) {
     ime: {
       composing: composingRef,
       suppressLineBreak: suppressImeLineBreakRef,
-      shiftLatch: shiftLatchRef,
     },
     actions: {
       send,
@@ -576,14 +602,18 @@ export const Composer = memo(function Composer(props: ComposerProps) {
       clearAttachments,
     },
   });
-  const stopOnly = shouldStopComposerGeneration({
-    turnBusy,
-    text: draft,
-    attachments,
-  });
-  // A live take turns the send disc into "finish and send"; a running turn
-  // still claims that disc for Stop.
-  const voiceSend = !stopOnly && dictation.dictationState === 'recording';
+  // A dictation in flight owns the send disc even during a running turn, so
+  // the take is queued/steered instead of the press interrupting the turn.
+  const stopOnly =
+    dictation.dictationState === 'idle' &&
+    shouldStopComposerGeneration({
+      turnBusy,
+      text: draft,
+      attachments,
+    });
+  // A live take turns the send disc into "finish and send".
+  const voiceSend = dictation.dictationState === 'recording';
+  // biome-ignore lint/correctness/useExhaustiveDependencies: draft is a re-check trigger for the pending voice submit even though the body does not read it
   useEffect(() => {
     if (!voiceSubmitPending.current || dictation.dictationState !== 'idle') return;
     voiceSubmitPending.current = false;
@@ -605,7 +635,6 @@ export const Composer = memo(function Composer(props: ComposerProps) {
   const onTextareaBlur = () => {
     composingRef.current = false;
     suppressImeLineBreakRef.current = false;
-    shiftLatchRef.current = false;
     setComposerFocused(false);
   };
   const onTextareaKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -637,18 +666,21 @@ export const Composer = memo(function Composer(props: ComposerProps) {
   const goalDisabled = turnBusy || commandBusy || submitting;
   return (
     <>
-      <QueueList
-        queued={queue.visibleQueued}
-        restoring={queue.restoring}
-        onEdit={(id) => void queue.restoreQueue(id, 'queue-row')}
-        onSteer={(id) => void queue.steerQueuedNow(id)}
-        onRemove={(id) => void queue.discardQueued(id)}
-      />
-      <ComposerBanners
-        draggingFiles={draggingFiles}
-        transitioning={transitioning}
-        dropTarget={dropTargetRef.current}
-      />
+      {/* The queue's actions need this composer's draft, but the tray itself
+          belongs to the dock: attached to the input's top edge, under the
+          island. */}
+      {queueTray &&
+        createPortal(
+          <QueueList
+            queued={queue.visibleQueued}
+            restoring={queue.restoring}
+            onEdit={(id) => void queue.restoreQueue(id, 'queue-row')}
+            onSteer={(id) => void queue.steerQueuedNow(id)}
+            onRemove={(id) => void queue.discardQueued(id)}
+          />,
+          queueTray
+        )}
+      <ComposerBanners draggingFiles={draggingFiles} transitioning={transitioning} dropTarget={dropTargetRef.current} />
       <form
         ref={paletteAnchor}
         className="composer"
@@ -689,7 +721,22 @@ export const Composer = memo(function Composer(props: ComposerProps) {
           />
         )}
         {attachments.length > 0 && (
-          <AttachmentChips attachments={attachments} onRemove={removeAttachment} onError={setAttachmentError} />
+          <AttachmentChips
+            attachments={attachments}
+            onRemove={removeAttachment}
+            onEdit={(attachment) => setEditingPasteId(attachment.id)}
+            onError={setAttachmentError}
+            onOpenFile={onOpenFile}
+          />
+        )}
+        {editingPaste && (
+          <ComposerPastedTextDialog
+            anchor={textarea}
+            text={editingPaste.data}
+            onSave={(text) => updatePastedText(editingPaste, text)}
+            onClose={() => setEditingPasteId(null)}
+            returnFocus={() => textarea.current?.focus()}
+          />
         )}
         {dictation.dictationState !== 'idle' && (
           <DictationOverlay
@@ -708,6 +755,7 @@ export const Composer = memo(function Composer(props: ComposerProps) {
               </button>
             </span>
           )}
+          {/* biome-ignore lint/a11y/useAriaPropsSupportedByRole: the textarea drives the slash/mention popup and reports whether it is open */}
           <textarea
             ref={textarea}
             value={draft}
@@ -719,7 +767,6 @@ export const Composer = memo(function Composer(props: ComposerProps) {
             }}
             onSelect={(event) => setCaretOffset(event.currentTarget.selectionStart)}
             onKeyDown={onTextareaKeyDown}
-            onKeyUp={onKeyUp}
             onPaste={onTextareaPaste}
             rows={1}
             placeholder={placeholder}
@@ -739,6 +786,7 @@ export const Composer = memo(function Composer(props: ComposerProps) {
           recoveryScope={recoveryScope}
           goalDialogOpen={goalDialogOpen}
           setGoalDialogOpen={setGoalDialogOpen}
+          addMenuRequest={addMenuRequest}
           goalDisabled={goalDisabled}
           executeSlash={executeSlash}
           transitioning={transitioning}
@@ -761,6 +809,7 @@ export const Composer = memo(function Composer(props: ComposerProps) {
           effort={effort}
           fast={fast}
           fastCapable={fastCapable}
+          autoEffort={autoEffort}
           modelParameters={modelParameters}
           contextPercent={contextPercent}
           sessionId={sessionId}

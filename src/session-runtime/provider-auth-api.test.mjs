@@ -25,6 +25,8 @@ const admin = {
   saveProviderApiKey: (_cfg, providerId, secret) => calls.push(['saveKey', providerId, secret]) && 'saved-key',
   saveCustomProvider: async (_cfg, input) => calls.push(['saveCustom', input]) && { id: 'custom-1' },
   removeCustomProvider: (_cfg, id) => calls.push(['removeCustom', id]) && { provider: id },
+  updateCustomProviderModel: async (_cfg, id, modelId, patch) =>
+    calls.push(['updateCustomModel', id, modelId, patch]) && { id },
   testCustomProvider: async (_cfg, input) => calls.push(['testCustom', input]) && { ok: true },
   discoverCustomProviderModels: async (_cfg, input) => calls.push(['discoverCustom', input]) && { models: [] },
   listProviderAccounts: (providerId) => ({
@@ -37,7 +39,7 @@ const admin = {
     return { selectedId: change.selectedId ?? 'a1' };
   },
 };
-mock.module('./services/provider-admin.mjs', { namedExports: admin });
+mock.module('./services/provider-admin.mjs', { namedExports: { keychainIssueFor: () => null, ...admin } });
 mock.module('../runtime/agent/orchestrator/providers/admission-scheduler.mjs', {
   namedExports: { resetProviderAdmissionCooldowns: () => calls.push(['resetCooldowns']) },
 });
@@ -97,7 +99,7 @@ const AFTER_CATALOGS = [['invalidate'], ['warm']];
 
 test('saving an API key reloads config, releases cooldowns and refreshes catalogs then caches', async () => {
   const api = fixture();
-  assert.equal(api.saveProviderApiKey('oauth', 'sk-1'), 'saved-key');
+  assert.equal(await api.saveProviderApiKey('oauth', 'sk-1'), 'saved-key');
   await setImmediate();
   assert.deepEqual(calls, [['saveKey', 'oauth', 'sk-1'], ...CREDENTIAL_CHANGE, ...AFTER_CATALOGS]);
 });
@@ -124,15 +126,21 @@ test('custom provider save/remove refresh like credential changes; removal drops
   assert.deepEqual(calls.slice(0, 2), [['keychain'], ['removeCustom', 'custom-1']]);
   assert.ok(calls.some(([name]) => name === 'invalidate'));
   calls.length = 0;
+  assert.deepEqual(await api.updateCustomProviderModel('custom-1', 'm', { hidden: null }), { id: 'custom-1' });
+  assert.deepEqual(calls[0], ['updateCustomModel', 'custom-1', 'm', { hidden: null }]);
+  calls.length = 0;
   assert.deepEqual(await api.testCustomProvider({ a: 1 }), { ok: true });
   assert.deepEqual(await api.discoverCustomProviderModels({ b: 2 }), { models: [] });
-  assert.equal(calls.some(([name]) => name === 'reload'), false);
+  assert.equal(
+    calls.some(([name]) => name === 'reload'),
+    false
+  );
 });
 
 test('usage-only credentials reload and invalidate without touching admission cooldowns', async () => {
   const api = fixture();
-  assert.equal(api.saveOpenAIUsageSessionKey('usage-1'), 'saved-usage');
-  assert.equal(api.saveOpenCodeGoUsageAuth({ apiKey: 'oc_sk_test' }), 'saved-go');
+  assert.equal(await api.saveOpenAIUsageSessionKey('usage-1'), 'saved-usage');
+  assert.equal(await api.saveOpenCodeGoUsageAuth({ apiKey: 'oc_sk_test' }), 'saved-go');
   assert.deepEqual(calls, [
     ['saveUsageKey', 'usage-1'],
     ['reload'],

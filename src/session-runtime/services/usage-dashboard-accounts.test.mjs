@@ -219,3 +219,62 @@ test('Anthropic retains additional reported windows alongside legacy windows wit
   assert.equal(snapshot.quotaWindows[2].remainingUsd, 7);
   assert.equal(snapshot.quotaWindows[3].remainingUsd, undefined);
 });
+
+test('Anthropic cents become dollars while missing spend remains unknown', () => {
+  const known = normalizeAnthropicUsage({
+    extra_usage: { is_enabled: true, monthly_limit: 5000, used_credits: 1200 },
+  });
+  const extra = known.quotaWindows.find((window) => window.label === 'EXTRA');
+  assert.equal(extra.limitUsd, 50);
+  assert.equal(extra.usedUsd, 12);
+  assert.equal(extra.remainingUsd, 38);
+  assert.equal(known.balance.remainingUsd, 38);
+  const unknown = normalizeAnthropicUsage({
+    extra_usage: { is_enabled: true, monthly_limit: 5000 },
+  });
+  assert.equal(unknown.quotaWindows[0].limitUsd, 50);
+  assert.equal(unknown.quotaWindows[0].usedUsd, undefined);
+  assert.equal(unknown.quotaWindows[0].remainingUsd, undefined);
+  assert.equal(unknown.balance.spentUsd, null);
+  assert.equal(unknown.balance.remainingUsd, null);
+});
+
+test('each connected account retains its own credit balance and the provider credit setting', async (t) => {
+  const probes = [];
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    assert.equal(String(url), 'https://api.anthropic.com/api/oauth/usage');
+    const authorization = new Headers(options.headers).get('authorization');
+    probes.push(authorization);
+    return new Response(JSON.stringify({
+      five_hour: { utilization: 25 },
+      extra_usage: {
+        is_enabled: true,
+        monthly_limit: 5000,
+        used_credits: authorization === 'Bearer credit-a' ? 1200 : 2300,
+      },
+    }), { headers: { 'content-type': 'application/json' } });
+  });
+  const dashboard = await createUsageDashboard({}, {
+    refresh: true,
+    setup: { oauth: [{ id: 'anthropic-oauth', authenticated: true }] },
+    listAccounts: (provider) => provider === 'anthropic-oauth' ? {
+      useCredits: true,
+      selectedId: 'credit-a',
+      accounts: [
+        { id: 'credit-a', authenticated: true },
+        { id: 'credit-b', authenticated: true },
+      ],
+    } : { accounts: [] },
+    getProvider: () => ({
+      forAccount: (id) => ({ ensureAuth: async () => ({ access_token: id }) }),
+    }),
+  });
+  const row = dashboard.rows[0];
+  assert.deepEqual(probes.sort(), ['Bearer credit-a', 'Bearer credit-b']);
+  assert.deepEqual(row.accounts.map((account) => [account.accountId, account.credits.balance, account.useCredits]), [
+    ['credit-a', 38, true],
+    ['credit-b', 27, true],
+  ]);
+  assert.equal(row.credits.balance, 38);
+  assert.equal(row.useCredits, true);
+});
