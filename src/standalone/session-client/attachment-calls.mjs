@@ -16,7 +16,7 @@ const URGENT_CALLS = new Set([
 export function createAttachmentCalls({ request, port, serverToken, clientToken, stopStream, log }) {
   let closed = false;
 
-  async function call(name, args = {}, { timeoutMs = 300_000, callId = null } = {}) {
+  async function call(name, args = {}, { timeoutMs = 300_000, callId = null, signal } = {}) {
     let out;
     try {
       out = await request({
@@ -27,11 +27,12 @@ export function createAttachmentCalls({ request, port, serverToken, clientToken,
         body: { token: clientToken, name, args: args || {}, ...(callId ? { callId } : {}) },
         timeoutMs,
         urgent: URGENT_CALLS.has(name),
+        signal,
       });
     } catch (err) {
       // Transport death (daemon restarted/unreachable) is recoverable by
       // re-attaching; a session error comes back as a 200 {error} envelope.
-      err.daemonTransportError = true;
+      if (!signal?.aborted) err.daemonTransportError = true;
       throw err;
     }
     if (out?.error) {

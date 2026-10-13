@@ -35,6 +35,7 @@ import { ensureCodexWireSessionId, mintSessionId } from './session-id.mjs';
 import { providerCacheKey } from './provider-cache-key.mjs';
 import { buildSessionRecord, normalizeDesktopSessionMetadata, sessionOriginFields } from './session-record.mjs';
 import { refreshSessionBp3Environment } from './prompt-utils.mjs';
+import { reserveSessionTitle } from '../store/title-sequence.mjs';
 
 // Owner liveness (attach-on-resume guard) and the durable turn-checkpoint
 // recovery it gates; re-exported so prior importers of this module stay
@@ -200,6 +201,11 @@ export function createSession(opts) {
     origin: sessionOriginFields(opts, { profile, presetObj, providerCacheOpts, surface }),
   });
   refreshSessionBp3Environment(session, opts.cwd);
+  const titleReservation = opts.titleReservation || reserveSessionTitle(session);
+  if (titleReservation) {
+    session.createdAt = titleReservation.createdAt;
+    session.generatedTitlePrefix = titleReservation.prefix;
+  }
   // In-process registry + async debounced save: same-process create → load
   // reads live memory; disk flush is for cross-process / restart durability.
   setLiveSession(session);

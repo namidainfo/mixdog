@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { sanitizeForWire } from './session-wire-values.mjs';
 
@@ -37,6 +38,7 @@ function desktopEventKey(desktopId, message) {
     let terminalId = '';
     if (name === 'terminal-data') terminalId = String(message?.value?.id || '');
     else if (name === 'session-runtime-released') terminalId = String(message?.value?.sessionId || '');
+    else if (name === 'session-open-request') terminalId = String(message?.value?.requestId || '');
     return `desktop-event:${desktopId}:${kind}:${name}${terminalId ? `:${terminalId}` : ''}`;
   }
   return `desktop-event:${desktopId}:${kind}`;
@@ -54,6 +56,8 @@ export class DesktopServiceRegistry {
   #pendingIds = new Map();
   #closed = false;
   #disposePromise = null;
+  #sessionOpenRequests = new Map();
+  #sessionOpenTimeoutMs;
 
   constructor({
     runtime = null,
@@ -61,15 +65,17 @@ export class DesktopServiceRegistry {
     log = () => {},
     onExternalClientsChanged = () => {},
     onReady = () => {},
+    sessionOpenTimeoutMs = 30_000,
   } = {}) {
     this.#runtime = runtime;
     this.#onFrame = onFrame;
     this.#log = log;
     this.#onExternalClientsChanged = onExternalClientsChanged;
     this.#onReady = onReady;
+    this.#sessionOpenTimeoutMs = sessionOpenTimeoutMs;
   }
 
-  #publish(desktopId, message) {
+  #publish(desktopId, message, recipients = null) {
     const wire = sanitizeForWire(message);
     const service = this.#servicesById.get(desktopId);
     if (!wire || !service) return;
@@ -80,7 +86,7 @@ export class DesktopServiceRegistry {
         desktopId,
         message: wire,
       },
-      service.subscribers
+      recipients ?? service.subscribers
     );
   }
 
@@ -162,6 +168,7 @@ export class DesktopServiceRegistry {
         moduleUrl: requestedModule,
         instance,
         subscribers: new Set(),
+        receivers: new Set(),
       };
       this.#servicesById.set(requestedId, record);
       this.#servicesByModule.set(requestedModule, record);
@@ -197,6 +204,9 @@ export class DesktopServiceRegistry {
   }
 
   async invoke({ desktopId, method, args = [] } = {}, ctx = null) {
+    if (method === 'invokeDesktopOperation' && args?.[0] === 'sessionOpenHandled') {
+      return this.#acknowledgeSessionOpen(desktopId, subscriberToken(ctx), args[1]?.[0]);
+    }
     const { service } = this.#requireSubscribed(desktopId, ctx);
     const name = String(method || '');
     if (!name) throw new TypeError('desktop service method is required');
@@ -211,6 +221,7 @@ export class DesktopServiceRegistry {
 
   ready({ desktopId } = {}, ctx = null) {
     const { service, token } = this.#requireSubscribed(desktopId, ctx);
+    if (token) service.receivers.add(token);
     this.#onReady({ desktopId: service.desktopId, clientToken: token || null });
     return { ok: true };
   }
@@ -218,6 +229,8 @@ export class DesktopServiceRegistry {
   async unsubscribe({ desktopId } = {}, ctx = null) {
     const service = this.#require(desktopId);
     const token = subscriberToken(ctx);
+    this.#disconnectSessionOpens(service.desktopId, token);
+    service.receivers.delete(token);
     if (token) service.subscribers.delete(token);
     return { ok: true, unsubscribed: true };
   }
@@ -226,6 +239,8 @@ export class DesktopServiceRegistry {
     const token = String(clientToken || '');
     if (!token) return;
     for (const service of this.#servicesById.values()) {
+      this.#disconnectSessionOpens(service.desktopId, token);
+      service.receivers.delete(token);
       service.subscribers.delete(token);
     }
   }
@@ -242,9 +257,76 @@ export class DesktopServiceRegistry {
     }
   }
 
+  async requestSessionOpen(sessionId, cwd, { signal } = {}) {
+    signal?.throwIfAborted();
+    for (const [desktopId, service] of this.#servicesById) {
+      const token = [...service.receivers].find((value) => service.subscribers.has(value));
+      if (!token) continue;
+      const requestId = randomUUID();
+      const delivery = { requestId, sessionId, cwd, expiresAt: Date.now() + this.#sessionOpenTimeoutMs };
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => this.#finishSessionOpen(requestId, new Error('Desktop session navigation timed out.')), this.#sessionOpenTimeoutMs);
+        const abort = () => this.#finishSessionOpen(requestId, new Error('Desktop session navigation cancelled by caller.'));
+        this.#sessionOpenRequests.set(requestId, { desktopId, token, delivery, timer, resolve, reject, signal, abort });
+        signal?.addEventListener('abort', abort, { once: true });
+        try {
+          if (signal?.aborted) { abort(); return; }
+          this.#publish(desktopId, { kind: 'desktop-event', name: 'session-open-request', value: delivery }, new Set([token]));
+        } catch (error) {
+          this.#finishSessionOpen(requestId, error);
+        }
+      });
+    }
+    throw new Error('Mixdog desktop is not connected. Open Mixdog Personal before handing off this session.');
+  }
+
+  #acknowledgeSessionOpen(desktopId, token, result) {
+    const request = this.#sessionOpenRequests.get(result?.requestId);
+    if (!request || request.desktopId !== desktopId || request.token !== token ||
+        result.sessionId !== request.delivery.sessionId || typeof result.opened !== 'boolean') return false;
+    if (request.signal?.aborted) {
+      request.abort();
+      return false;
+    }
+    if (Date.now() >= request.delivery.expiresAt) {
+      this.#finishSessionOpen(result.requestId, new Error('Desktop session navigation timed out.'));
+      return false;
+    }
+    this.#finishSessionOpen(result.requestId, result.opened ? null : new Error(
+      typeof result.error === 'string' ? result.error : 'Desktop session navigation failed.'));
+    return true;
+  }
+
+  #finishSessionOpen(requestId, error = null) {
+    const request = this.#sessionOpenRequests.get(requestId);
+    if (!request) return;
+    this.#sessionOpenRequests.delete(requestId);
+    clearTimeout(request.timer);
+    request.signal?.removeEventListener('abort', request.abort);
+    if (error) {
+      try {
+        this.#publish(request.desktopId, {
+          kind: 'desktop-event', name: 'session-open-request', value: { ...request.delivery, cancelled: true },
+        }, new Set([request.token]));
+      } catch (deliveryError) {
+        this.#log(`session open cancellation delivery failed: ${deliveryError.message}`);
+      }
+      request.reject(error);
+    } else request.resolve({ sessionId: request.delivery.sessionId, cwd: request.delivery.cwd });
+  }
+
+  #disconnectSessionOpens(desktopId, token) {
+    for (const [requestId, request] of this.#sessionOpenRequests) {
+      if (request.desktopId === desktopId && request.token === token)
+        this.#finishSessionOpen(requestId, new Error('Desktop disconnected during session navigation.'));
+    }
+  }
+
   async dispose(reason = 'service stop') {
     if (this.#disposePromise) return this.#disposePromise;
     this.#closed = true;
+    for (const requestId of this.#sessionOpenRequests.keys())
+      this.#finishSessionOpen(requestId, new Error('Session service stopped during desktop navigation.'));
     const services = [...new Set(this.#servicesById.values())];
     this.#servicesById.clear();
     this.#servicesByModule.clear();

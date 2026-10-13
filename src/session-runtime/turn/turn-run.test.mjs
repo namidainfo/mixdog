@@ -6,6 +6,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createTurnRunner } from './turn-run.mjs';
+import { createInternalToolExecutor } from '../internal-tool-executor.mjs';
+import { createUserQuestions } from '../../tui/session/user-questions.mjs';
 
 function makeHarness(overrides = {}) {
   const calls = [];
@@ -126,6 +128,86 @@ function makeHarness(overrides = {}) {
   });
   return h;
 }
+
+test('interactive turns wait for session-bound question answers across the askSession bridge', async (t) => {
+  const input = {
+    questions: [
+      { id: 'route', question: 'Which route?', options: [{ label: 'Small' }, { label: 'Full' }] },
+      { id: 'note', question: 'Anything else?' },
+    ],
+  };
+  for (const [name, response, expected] of [
+    ['option and text', { answers: { route: { option: 1 }, note: { text: '  keep logs  ' } } },
+      { cancelled: false, answers: { route: { answers: ['Full'] }, note: { answers: ['keep logs'] } } }],
+    ['custom choice', { answers: { route: { text: 'another route' }, note: { text: 'no changes' } } },
+      { cancelled: false, answers: { route: { answers: ['another route'] }, note: { answers: ['no changes'] } } }],
+    ['cancel', { cancelled: true }, { cancelled: true, answers: {}, reason: 'cancelled by user' }],
+  ]) {
+    await t.test(name, { timeout: 5_000 }, async (t) => {
+      const h = makeHarness();
+      const shown = Promise.withResolvers();
+      let question = null;
+      let settled = false;
+      let approvalCalls = 0;
+      const queue = createUserQuestions({
+        getState: () => ({ sessionId: h.state.session?.id }),
+        set: (patch) => {
+          question = patch.userQuestion;
+          if (question) shown.resolve(question);
+        },
+        getDisposed: () => false,
+      });
+      t.after(() => queue.cancelAllUserQuestions('test cleanup'));
+      const executor = createInternalToolExecutor({
+        rt: { currentCwd: h.state.cwd },
+        channels: { isChannelTool: () => false },
+      });
+      h.askResult = async (callbacks) => {
+        const result = await executor('request_user_input', input, {
+          callerSessionId: h.state.session.id,
+          toolCallId: 'question-call',
+          signal: callbacks.signal,
+          userQuestionHook: callbacks.onUserQuestion,
+          toolApprovalHook: callbacks.onToolApproval,
+        });
+        return { content: JSON.stringify(result) };
+      };
+      const pending = h.runner.ask('ask first', {
+        onUserQuestion: queue.requestUserQuestion,
+        onToolApproval: () => { approvalCalls += 1; return { approved: true }; },
+      }).then((result) => { settled = true; return result; });
+      const request = await Promise.race([
+        shown.promise,
+        pending.then(() => { throw new Error('turn resumed without presenting a question'); }),
+      ]);
+      await new Promise(setImmediate);
+      assert.equal(settled, false);
+      assert.equal(h.state.activeTurns, 1);
+      assert.equal(request.sessionId, h.state.session.id);
+      assert.equal(request.toolCallId, 'question-call');
+      assert.equal(queue.finishUserQuestion('stale', response), false);
+      assert.throws(() => queue.finishUserQuestion(request.id, { approved: true }), TypeError);
+      assert.throws(() => queue.finishUserQuestion(request.id, { answers: { route: { option: 0 } } }), TypeError);
+      assert.equal(question.id, request.id);
+      assert.equal(settled, false);
+      assert.equal(queue.finishUserQuestion(request.id, response), true);
+      assert.deepEqual(JSON.parse((await pending).result.content), expected);
+      assert.equal(question, null);
+      assert.equal(h.state.activeTurns, 0);
+      assert.equal(approvalCalls, 0, 'question answers do not request or grant tool approval');
+      assert.equal(queue.finishUserQuestion(request.id, response), false);
+
+      // The following turn has no interactive surface. Never reuse a prior
+      // callback or turn an approval callback into a question answer.
+      await assert.rejects(h.runner.ask('headless follow-up', {
+        onToolApproval: () => { approvalCalls += 1; return { approved: true }; },
+      }), /requires an interactive user-question surface/);
+      assert.equal(question, null);
+      assert.equal(approvalCalls, 0);
+      assert.equal(h.state.activeTurns, 0);
+    });
+  }
+});
 
 test('a first turn creates the session, folds MCP once, bridges the callbacks and settles the runtime state', async () => {
   const h = makeHarness();

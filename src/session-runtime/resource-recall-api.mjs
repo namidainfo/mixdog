@@ -38,6 +38,17 @@ export function createRecallResourceApi({ deps }) {
   }
 
   return {
+    // A finite read lane, never recall's ingest/forced-cycle branch. Caller
+    // scope cannot narrow this UI search to only its active project.
+    async searchConversations(query, { limit = 30 } = {}) {
+      if (typeof query !== 'string' || !query.trim()) throw new TypeError('A search query is required.');
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new TypeError('Search limit must be 1–100.');
+      const memoryMod = await memoryModule();
+      return toolResponseText(await memoryMod.handleToolCall('recall', {
+        query: query.trim(), limit, projectScope: 'all', currentSession: false,
+        forceCycleOnEmpty: false, includeRaw: true, includeArchived: true,
+      }));
+    },
     async memoryControl(args = {}) {
       const memoryMod = await memoryModule();
       return toolResponseText(await memoryMod.handleToolCall('memory', args || {}));

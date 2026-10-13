@@ -10,6 +10,7 @@ import { executeTool } from '../../src/runtime/agent/orchestrator/session/loop/t
 import { setInternalToolsProvider } from '../../src/runtime/agent/orchestrator/internal-tools.mjs';
 import { createInternalToolExecutor } from '../../src/session-runtime/internal-tool-executor.mjs';
 import { REQUEST_USER_INPUT_TOOL } from '../../src/runtime/user-questions/tool.mjs';
+import { createAskCallbacks } from '../../src/session-runtime/turn/turn-run/ask-callbacks.mjs';
 
 const input = { questions: [{ id: 'route', question: 'Which route?', options: [{ label: 'Small' }, { label: 'Full' }] }] };
 
@@ -176,7 +177,7 @@ test('proxy answer replies cannot overwrite a newly bound session and transport 
   await assert.rejects(actions.resolveUserQuestion('question-a', { cancelled: true }), /disposed/);
 });
 
-test('policy-cleared internal execution carries the question hook, calling session and turn signal', async (t) => {
+test('askSession bridge and policy-cleared execution carry the question hook, calling session and turn signal', async (t) => {
   const runtime = questionRuntime();
   runtime.reserveSession('sess_question_exec');
   const session = {
@@ -217,13 +218,18 @@ test('policy-cleared internal execution carries the question hook, calling sessi
       return waiting;
     };
     let question;
-    if (fallback) session.userQuestionHook = hook;
+    const { askCallbacks } = createAskCallbacks({ notifyFnForSession: () => null });
+    const callbacks = askCallbacks({ timing: {}, signal: controller.signal }, session, { onUserQuestion: hook });
+    if (fallback) session.userQuestionHook = callbacks.onUserQuestion;
     const pending = executeTool('request_user_input', input, RUNTIME_ROOT, session.id, session, {
-      signal: controller.signal,
+      signal: callbacks.signal,
       toolCallId: 'question-call',
-      ...(fallback ? {} : { userQuestionHook: hook }),
+      ...(fallback ? {} : { userQuestionHook: callbacks.onUserQuestion }),
     });
-    const queue = await started.promise;
+    const queue = await Promise.race([
+      started.promise,
+      pending.then((result) => { throw new Error(`question completed before user input: ${result}`); }),
+    ]);
     assert.equal(question.sessionId, session.id);
     assert.equal(queue.finishUserQuestion(question.id, { answers: { route: { option: 0 } } }), true);
     assert.deepEqual(JSON.parse(await pending), { cancelled: false, answers: { route: { answers: ['Small'] } } });

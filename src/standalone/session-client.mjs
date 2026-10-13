@@ -90,6 +90,7 @@ function request({
   timeoutMs = 120_000,
   control = false,
   urgent = false,
+  signal,
 }) {
   return new Promise((resolve, reject) => {
     const payload = body ? JSON.stringify(body) : null;
@@ -105,6 +106,7 @@ function request({
           ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}),
         },
         timeout: timeoutMs,
+        signal,
       },
       (res) => {
         let data = '';

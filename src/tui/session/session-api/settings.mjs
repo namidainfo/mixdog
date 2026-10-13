@@ -65,14 +65,17 @@ export function createSessionSettingsApi(bag) {
       },
       { onRelease: flushEmitImmediate }
     ),
-    setToolMode: (m) => {
-      void runtime
-        .setToolMode(m)
-        .then(() => {
-          resetStatsAndSyncContext();
-          set({ ...routeState(), toolMode: runtime.toolMode, stats: { ...getState().stats } });
-        })
-        .catch((error) => pushNotice(toolErrorDisplay(error, 'tool'), 'error'));
+    setToolMode: async (m) => {
+      try {
+        const mode = await runtime.setToolMode(m);
+        resetStatsAndSyncContext();
+        set({ ...routeState(), toolMode: runtime.toolMode, stats: { ...getState().stats } });
+        flushEmitImmediate();
+        return mode;
+      } catch (error) {
+        pushNotice(toolErrorDisplay(error, 'tool'), 'error');
+        throw error;
+      }
     },
     getAutoClear: () => autoClearState(),
     setAutoClear: (input = {}) => {

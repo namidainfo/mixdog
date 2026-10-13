@@ -62,6 +62,8 @@ function resolveDeferredSelectMode(session) {
  * tool, an adapter alias for one — is outside the read-only bundle.
  */
 export function isOffReadonlySurface(session, name) {
+  if (session?.deferredSurfaceMode === 'none') return true;
+  if (session?.deferredSurfaceMode === 'questions') return name !== 'request_user_input';
   if (resolveDeferredSelectMode(session) !== 'readonly') return false;
   const key = clean(name);
   if (!key || INACTIVE_INFRA_BYPASS.has(key)) return false;
@@ -82,6 +84,10 @@ function denyDeferredCallThrough(message) {
  */
 export function prepareDeferredToolCallThrough(sessionRef, name) {
   if (!sessionRef) return null;
+  if (sessionRef.deferredSurfaceMode === 'none')
+    return denyDeferredCallThrough(`Error: tool "${name}" is not available in no-tools chat mode; no call was sent.`);
+  if (sessionRef.deferredSurfaceMode === 'questions' && name !== 'request_user_input')
+    return denyDeferredCallThrough(`Error: tool "${name}" is not available in question-only chat mode; no call was sent.`);
   if (!isDeferredToolAvailable(sessionRef, name)) {
     return denyDeferredCallThrough(
       `Error: MCP tool "${name}" is unavailable in the current session catalog; no call was sent.`

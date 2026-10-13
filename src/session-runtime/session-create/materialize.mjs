@@ -45,6 +45,7 @@ export function materializeSession(deps, reason, coreMemoryContext) {
   const { rt, adoptSession, mgr, hooks, hookCommonPayload, statusRoutes } = deps;
   adoptSession(mgr.createSession(sessionOptions(deps, coreMemoryContext)));
   rt.reservedSessionId = null;
+  rt.reservedSessionTitle = null;
   attachSessionHooks(rt.session, { hooks, hookCommonPayload, getCwd: () => rt.currentCwd });
   seedToolSurface(deps, reason);
   writeStatuslineRoute(statusRoutes, rt.session, rt.route);

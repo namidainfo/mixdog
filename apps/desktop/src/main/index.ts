@@ -34,6 +34,7 @@ import { createDesktopTurnNotifier } from './desktop-turn-notifier';
 import { desktopIdentity } from './desktop-identity';
 import { notificationSoundPath, playWindowsNotificationSound } from './notification-sound';
 import { activateDesktopWindow, openDesktopNotificationSession } from './notification-window';
+import { SessionOpenRequests } from './session-open-requests';
 import { createIdleReclaim, purgeRendererMemory, type IdleReclaim } from './idle-reclaim';
 import { watchCrashHandler } from './crash-handler-watch';
 import { createDesktopDiagnostics, type DesktopDiagnostics } from './desktop-diagnostics';
@@ -377,6 +378,7 @@ function adoptLoginShellEnvironment(): Promise<void> {
     });
   });
 }
+let cancelSessionOpenRequests: ((error: string) => void) | null = null;
 const serviceClient = new DesktopServiceClient({
   connect: () => new SessionTransport(desktopServiceModuleUrl(), process.cwd(), null, loginShellEnvironmentReady),
   sessionOptions: () => ({
@@ -390,6 +392,8 @@ const serviceClient = new DesktopServiceClient({
   }),
   initialSnapshot: readDesktopModelBootstrapSnapshot(),
   onDiagnostic: (event, data) => {
+    if (event === 'desktop-transport-exit' || event === 'session-stream-reconnecting')
+      cancelSessionOpenRequests?.('Desktop daemon disconnected during navigation.');
     const entry =
       event === 'desktop-transport-error'
         ? {
@@ -521,6 +525,29 @@ const awakeService = new AgentAwakeService(powerSaveBlocker);
 let turnAttention: TurnAttention | null = null;
 let unsubscribeAwake: (() => void) | null = null;
 let unsubscribeServiceSettings: (() => void) | null = null;
+const sessionOpenRequests = new SessionOpenRequests((event, error) => {
+  writeBootDiagnostic(`session-open-${event}`, { ...(error ? { error } : {}) });
+  if (event === 'invalid' || event === 'failed' || event === 'delivery-failed') {
+    console.error(`[mixdog-session-open] ${event}`, error ?? '');
+  }
+}, (result) => {
+  void serviceClient.invokeDesktopOperation('sessionOpenHandled', [result]).catch((error: unknown) => {
+    console.error('Could not acknowledge existing-session navigation:', error);
+  });
+});
+cancelSessionOpenRequests = (error) => sessionOpenRequests.failAll(error);
+let sessionOpenWindowCreation: Promise<void> | null = null;
+let desktopWindowInitialized = false;
+
+function ensureSessionOpenWindow(): Promise<void> {
+  if (mainWindow && !mainWindow.isDestroyed()) return Promise.resolve();
+  if (!sessionOpenWindowCreation) {
+    sessionOpenWindowCreation = createWindow().finally(() => {
+      sessionOpenWindowCreation = null;
+    });
+  }
+  return sessionOpenWindowCreation;
+}
 // OS notification on final answers: schedules notify even in the foreground,
 // ordinary conversations only while unfocused. Both respect the setting.
 // App-lifetime like keep-awake: a window hidden to the tray still wants it.
@@ -593,6 +620,15 @@ function applyComputerObserveOnlySetting(enabled: boolean): void {
   computerHost?.setObserveOnly(computerObserveOnly);
 }
 unsubscribeServiceSettings = serviceClient.subscribeDesktopEvents(({ name, value }) => {
+  if (name === 'session-open-request') {
+    if (!sessionOpenRequests.request(value)) return;
+    if (!mainWindow && desktopWindowInitialized && !quitApproved) {
+      void ensureSessionOpenWindow().catch((error: unknown) => {
+        sessionOpenRequests.failAll(`Desktop window creation failed: ${String(error)}`);
+      });
+    }
+    return;
+  }
   if (name === 'session-runtime-released') {
     const event = value as { sessionId?: unknown; restore?: unknown } | null;
     if (isSessionId(event?.sessionId)) {
@@ -863,6 +899,7 @@ function disposeDesktopResources(): Promise<void> {
   turnNotifier.dispose();
   unsubscribeServiceSettings?.();
   unsubscribeServiceSettings = null;
+  sessionOpenRequests.failAll('Desktop is stopping.');
   awakeService.dispose();
   computerUseOverlay?.dispose();
   computerUseOverlay = null;
@@ -1286,6 +1323,31 @@ async function createWindow(): Promise<void> {
   if (savedState?.maximized) window.maximize();
   windowState = persistWindowState(window, statePath);
   mainWindow = window;
+  sessionOpenRequests.setTarget({
+    activate: () => {
+      if (!activateDesktopWindow(window)) throw new Error('Desktop window is unavailable.');
+    },
+    send: (request) => {
+      if (window.isDestroyed() || window.webContents.isDestroyed()) throw new Error('Desktop renderer is unavailable.');
+      window.webContents.send(DESKTOP_IPC.sessionOpenRequested, request);
+    },
+  });
+  const onSessionOpenReady = (event: Electron.IpcMainEvent, ready: unknown) => {
+    if (event.sender === window.webContents && event.senderFrame === window.webContents.mainFrame) {
+      sessionOpenRequests.setReady(ready === true);
+    }
+  };
+  const onSessionOpenHandled = (event: Electron.IpcMainEvent, result: unknown) => {
+    if (event.sender === window.webContents && event.senderFrame === window.webContents.mainFrame) {
+      sessionOpenRequests.acknowledge(result);
+    }
+  };
+  ipcMain.on(DESKTOP_IPC.sessionOpenNavigationReady, onSessionOpenReady);
+  ipcMain.on(DESKTOP_IPC.sessionOpenHandled, onSessionOpenHandled);
+  window.webContents.on('render-process-gone', () => sessionOpenRequests.setReady(false));
+  window.webContents.on('did-start-navigation', (_event, _url, isInPlace, isMainFrame) => {
+    if (isMainFrame && !isInPlace) sessionOpenRequests.setReady(false);
+  });
   if (!computerHost) {
     computerHost = createComputerHost({
       bridgeEnabled: false,
@@ -1451,6 +1513,9 @@ async function createWindow(): Promise<void> {
   installNavigationGuards(window, isAllowedNavigation);
   const presentation = createWindowPresentation(window, startupStartedAt);
   window.on('closed', () => {
+    sessionOpenRequests.setTarget(null);
+    ipcMain.removeListener(DESKTOP_IPC.sessionOpenNavigationReady, onSessionOpenReady);
+    ipcMain.removeListener(DESKTOP_IPC.sessionOpenHandled, onSessionOpenHandled);
     presentation.cancelShowDeadline();
     diagnostics?.write('window-closed');
     presentation.detach();
@@ -1657,7 +1722,8 @@ if (!app.requestSingleInstanceLock()) {
         }
         callback(allowed);
       });
-      await createWindow();
+      await ensureSessionOpenWindow();
+      desktopWindowInitialized = true;
       if (pendingPrimaryActivation) activatePrimaryWindow();
       installDesktopMenu();
       // The settings read may have landed before the app was ready to host a tray.
@@ -1669,7 +1735,7 @@ if (!app.requestSingleInstanceLock()) {
           return;
         }
         if (BrowserWindow.getAllWindows().length === 0) {
-          void createWindow().catch((error: unknown) => {
+          void ensureSessionOpenWindow().catch((error: unknown) => {
             console.error('Failed to recreate the Mixdog desktop window:', error);
           });
         }

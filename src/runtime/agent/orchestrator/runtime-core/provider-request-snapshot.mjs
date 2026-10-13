@@ -377,7 +377,13 @@ const requestToolSnapshotMemo = new WeakMap();
 // after this boundary cannot change either provider bytes or their signature.
 export function snapshotProviderRequestTools(options = {}) {
   const { provider, tools, nativeTools, messages, session } = options;
+  if (session?.deferredSurfaceMode === 'none') return finalizeProviderRequestTools([]);
   const normalizedProvider = clean(provider || session?.provider).toLowerCase();
+  if (session?.deferredSurfaceMode === 'questions') {
+    // Ignore native definitions and transcript-discovered tools, including
+    // stale work-mode arrays supplied by a provider adapter.
+    return baseToolSnapshot(normalizedProvider, entriesOf(tools).filter((tool) => tool?.name === 'request_user_input'), NO_ENTRIES, session, null).result;
+  }
   const anthropic = ANTHROPIC_NATIVE_PROVIDERS.has(normalizedProvider);
   const activeTools = entriesOf(tools);
   const nativeList = anthropic ? entriesOf(nativeTools) : NO_ENTRIES;

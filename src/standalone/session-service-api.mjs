@@ -20,6 +20,7 @@ const sessionServiceRoutes = ({ desktop, project, session }) => ({
   'session.abort': session.abort,
   'session.approve': session.approve,
   'session.answer': session.answer,
+  'session.handoff': session.handoff,
   'session.configure': session.configure,
 });
 

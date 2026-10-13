@@ -39,6 +39,7 @@ export function sessionOptions(deps, coreMemoryContext) {
   const workflowContext = agentOwned ? packContext : leadWorkflowContext;
   const sessionOpts = {
     ...(rt.reservedSessionId ? { id: rt.reservedSessionId } : {}),
+    ...(rt.reservedSessionId && rt.reservedSessionTitle ? { titleReservation: rt.reservedSessionTitle } : {}),
     provider: rt.route.provider,
     model: rt.route.model,
     preset: rt.route.preset || undefined,

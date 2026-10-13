@@ -27,6 +27,7 @@ import { isSessionCompactionBlocked, getSessionAbortSignal, _runtimeEntries } fr
 import { mintSessionId } from './session-id.mjs';
 import { compactSessionTitle } from '../../runtime-core/session-title.mjs';
 import { sessionTitleDatePrefix, splitSessionTitleDatePrefix } from '../../../../shared/session-title-format.mjs';
+import { reserveSessionTitle } from '../store/title-sequence.mjs';
 
 /** Force-flush session metrics to disk. Used by watchdog terminal-reap (fix B). */
 export async function flushSessionMetrics(sessionId) {
@@ -79,7 +80,7 @@ export async function updateSessionGeneratedTitle(id, title, stage) {
   if (session.titleLocked === true) return false;
   if (session.generatedTitleStage === 'third') return false;
   if (normalizedStage === 'first' && session.generatedTitleStage === 'first') return false;
-  const normalized = `${sessionTitleDatePrefix(session.createdAt)}${body}`;
+  const normalized = `${session.generatedTitlePrefix || sessionTitleDatePrefix(session.createdAt)}${body}`;
   if (session.title === normalized && session.generatedTitleStage === normalizedStage) return false;
   session.title = normalized;
   session.generatedTitleStage = normalizedStage;
@@ -211,6 +212,13 @@ function forkOutgoingTranscript(session, messages, now) {
       ...clearedTokenAccounting(now),
     };
     delete fork.liveTurnMessages;
+    const titleReservation = reserveSessionTitle(fork);
+    if (titleReservation) {
+      fork.generatedTitlePrefix = titleReservation.prefix;
+      if (fork.title && fork.titleLocked !== true) {
+        fork.title = `${titleReservation.prefix}${splitSessionTitleDatePrefix(fork.title).title}`;
+      }
+    }
     setLiveSession(fork);
     void saveSessionAsync(fork)
       .then(() => {

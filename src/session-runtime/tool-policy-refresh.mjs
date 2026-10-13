@@ -100,14 +100,14 @@ export function createToolPolicyRefresh({
     }
   }
 
-  async function refreshEmptySessionToolPolicy() {
+  async function refreshEmptySessionToolPolicy({ force = false } = {}) {
     invalidatePreSessionToolSurface?.();
     const session = getSession?.();
     if (!session?.id) return { appliedToCurrentSession: true };
-    if (
+    if (!force && (
       sessionHasConversationMessages(session) ||
       sessionHasConversationMessages({ messages: session.liveTurnMessages })
-    ) {
+    )) {
       return { appliedToCurrentSession: false };
     }
 

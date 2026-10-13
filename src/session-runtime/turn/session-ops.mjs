@@ -2,7 +2,7 @@
  * src/session-runtime/turn/session-ops.mjs - between-turn session commands:
  * clear, rewind, manual compact, tool mode, cwd, and live transcript reads.
  */
-import { normalizeToolMode } from '../../runtime/agent/orchestrator/runtime-core/effort.mjs';
+import { normalizeToolMode, toolSpecForMode } from '../../runtime/agent/orchestrator/runtime-core/effort.mjs';
 import { interruptTaskWaitForSession } from '../../runtime/agent/orchestrator/session/task-wait-control.mjs';
 import { markPendingGoalReminder } from '../../runtime/agent/orchestrator/runtime-core/goal-reminder.mjs';
 
@@ -94,9 +94,23 @@ export function createSessionOps(deps) {
 
   async function setToolMode(nextMode) {
     const mode = normalizeToolMode(nextMode);
+    const session = getSession();
+    const restricted = mode === 'none' || mode === 'questions';
+    const wasRestricted = session?.deferredSurfaceMode === 'none' || session?.deferredSurfaceMode === 'questions';
+    const permissionTransition = restricted || wasRestricted;
+    if (permissionTransition && getActiveTurnCount() > 0) throw new Error('Stop the active turn before changing chat/work permissions.');
+    if (permissionTransition && session) {
+      if (restricted) {
+        if (!wasRestricted) session.noToolSpec = session.toolSpec;
+        session.toolSpec = [];
+      } else {
+        session.toolSpec = session.noToolSpec ?? toolSpecForMode(mode);
+        delete session.noToolSpec;
+      }
+    }
     setMode(mode);
     if (typeof refreshEmptySessionToolPolicy === 'function') {
-      await refreshEmptySessionToolPolicy();
+      await refreshEmptySessionToolPolicy({ force: permissionTransition });
     } else {
       invalidatePreSessionToolSurface();
     }

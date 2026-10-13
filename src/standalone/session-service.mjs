@@ -55,6 +55,7 @@ export function createSessionService({
   log = () => {},
   onExternalClientsChanged = () => {},
   onDesktopReady = () => {},
+  sessionOpenTimeoutMs = 30_000,
   idleEvictMs = null,
   evictSweepMs = null,
 } = {}) {
@@ -82,6 +83,7 @@ export function createSessionService({
     log,
     onExternalClientsChanged,
     onReady: onDesktopReady,
+    sessionOpenTimeoutMs,
   });
   let closed = false;
   let stopPromise = null;
@@ -261,6 +263,15 @@ export function createSessionService({
       abort: calls.abortSession,
       approve: calls.approveSession,
       answer: calls.answerSession,
+      handoff: async ({ sessionId } = {}, ctx = null) => {
+        const signal = ctx?.signal;
+        signal?.throwIfAborted();
+        const result = await calls.readSession({ sessionId, baseRevision: null });
+        signal?.throwIfAborted();
+        if (result.sessionId !== sessionId) throw new Error('Session identity changed during handoff.');
+        const snapshot = result.full;
+        return await desktopServices.requestSessionOpen(sessionId, snapshot?.cwd || '', { signal });
+      },
       configure: calls.configureSession,
     },
     methods: {

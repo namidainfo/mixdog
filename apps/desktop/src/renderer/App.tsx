@@ -401,6 +401,8 @@ export function App() {
     tabs,
     finishPendingConversationHandoff,
     activateSelection,
+    existingSessionReady: startupSettled && sessionCatalogReady && snapshotHydrated && !paneWorkspace.restorePending,
+    onSessionOpenError: setError,
   });
   openSessionRef.current = openSession;
   const prefetchSession = useCallback((sessionId: string) => requestSessionRead(sessionId), []);

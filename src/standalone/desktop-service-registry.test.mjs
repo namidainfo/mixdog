@@ -189,3 +189,31 @@ test('the registered adapter keeps publishing its own events and client-count ch
   assert.deepEqual(f.frames[0].message, message);
   assert.equal(f.clientsChanged(), 1);
 });
+
+test('handoff requires a ready desktop receiver, not merely an unrelated subscriber', async (t) => {
+  const f = fixture(t, () => adapter('desktop'));
+  await assert.rejects(f.registry.requestSessionOpen('existing', '/project'), /desktop is not connected/);
+  await f.registry.init({ desktopId: 'desktop', moduleUrl }, { clientToken: 'unrelated-subscriber' });
+  await assert.rejects(f.registry.requestSessionOpen('existing', '/project'), /desktop is not connected/);
+  assert.deepEqual(f.frames, []);
+});
+
+test('handoff disconnect and daemon stop reject outstanding receipts instead of leaving timers or stale success', async (t) => {
+  const f = fixture(t, () => adapter('desktop'));
+  const ctx = { clientToken: 'receiver' };
+  await f.registry.init({ desktopId: 'desktop', moduleUrl }, ctx);
+  f.registry.ready({ desktopId: 'desktop' }, ctx);
+  const pending = f.registry.requestSessionOpen('existing', '/project');
+  const failed = assert.rejects(pending, /disconnected/);
+  const request = f.frames[0].message.value;
+  f.registry.releaseClient(ctx.clientToken);
+  await failed;
+  assert.equal(await f.registry.invoke({
+    desktopId: 'desktop', method: 'invokeDesktopOperation',
+    args: ['sessionOpenHandled', [{ requestId: request.requestId, sessionId: 'existing', opened: true }]],
+  }, ctx), false);
+  f.registry.ready({ desktopId: 'desktop' }, ctx);
+  const stopped = assert.rejects(f.registry.requestSessionOpen('existing', '/project'), /service stopped/);
+  await f.registry.dispose();
+  await stopped;
+});

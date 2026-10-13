@@ -16,6 +16,8 @@ const ROUTE_METHODS = Object.freeze({
   'session.submit': 'submit',
   'session.abort': 'abort',
   'session.approve': 'approve',
+  'session.answer': 'answer',
+  'session.handoff': 'handoff',
   'session.configure': 'configure',
   'project.list': 'projectList',
   'project.inspect': 'projectInspect',
@@ -86,23 +88,27 @@ export function createTransportCalls({ binding, projection, pool, openParams, cw
     }
   }
 
-  async function sendOnce(route, payload, callId) {
+  async function sendOnce(route, payload, callId, options) {
     const method = ROUTE_METHODS[route];
     if (!method) throw new TypeError(`session route ${route} is unavailable`);
     const sourceAttachment = binding.attachment;
-    const result = await sourceAttachment.client[method](payload, { callId });
+    const result = await sourceAttachment.client[method](payload, { ...options, callId });
+    options.signal?.throwIfAborted();
     projection.markResult(result, sourceAttachment);
     return result;
   }
 
-  async function sendCall(route, payload, callId) {
+  async function sendCall(route, payload, callId, options = {}) {
     for (let attempt = 0; ; attempt += 1) {
+      options.signal?.throwIfAborted();
       try {
-        return await sendOnce(route, payload, callId);
+        return await sendOnce(route, payload, callId, options);
       } catch (error) {
+        options.signal?.throwIfAborted();
         if (!isRecoverable(error) || binding.disposed || attempt >= CALL_RECOVERY_BACKOFF_MS.length) throw error;
         const waitMs = CALL_RECOVERY_BACKOFF_MS[attempt];
         if (waitMs > 0) await delay(waitMs);
+        options.signal?.throwIfAborted();
         if (binding.disposed) throw error;
         pool.invalidate(binding.attachment);
         const next = await pool.ensure({ cwd, log });

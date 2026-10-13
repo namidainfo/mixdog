@@ -37,6 +37,75 @@ test('every advertised session action exists on the session surface', () => {
   assert.deepEqual(missing, []);
 });
 
+test('tool mode action awaits application and publishes state before acknowledging the mode', async () => {
+  let state = { toolMode: 'full', stats: {} };
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const events = [];
+  const runtime = {
+    toolMode: 'full',
+    async setToolMode(mode) {
+      await gate;
+      this.toolMode = mode;
+      return mode;
+    },
+  };
+  const api = createSessionApi(stubBag({
+    runtime,
+    getState: () => state,
+    set: (patch) => { state = { ...state, ...patch }; },
+    routeState: () => ({}),
+    resetStatsAndSyncContext: () => events.push('stats'),
+    flushEmitImmediate: () => events.push(`published:${state.toolMode}`),
+  }));
+  let settled = false;
+  const pending = api.setToolMode('none').then((mode) => {
+    settled = true;
+    events.push(`ack:${mode}`);
+    return mode;
+  });
+  await Promise.resolve();
+  assert.equal(settled, false);
+  assert.equal(state.toolMode, 'full');
+  release();
+  assert.equal(await pending, 'none');
+  assert.equal(state.toolMode, 'none');
+  assert.deepEqual(events, ['stats', 'published:none', 'ack:none']);
+  assert.equal(await api.setToolMode('full'), 'full');
+  assert.equal(state.toolMode, 'full');
+});
+
+test('tool mode action propagates rejection without publishing a successful change', async () => {
+  const failure = new Error('Stop the active turn before changing chat/work permissions.');
+  const notices = [];
+  let publications = 0;
+  const api = createSessionApi(stubBag({
+    runtime: { setToolMode: async () => { throw failure; } },
+    pushNotice: (...args) => notices.push(args),
+    set: () => { publications++; },
+    resetStatsAndSyncContext: () => { publications++; },
+    flushEmitImmediate: () => { publications++; },
+  }));
+  await assert.rejects(api.setToolMode('none'), (error) => error === failure);
+  assert.equal(publications, 0);
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0][1], 'error');
+});
+
+test('conversation search forwards the read-only request and result without command side effects', async () => {
+  const calls = [];
+  const api = createSessionApi(stubBag({
+    runtime: {
+      searchConversations: async (...args) => { calls.push(args); return 'matching conversation'; },
+    },
+    getState: () => ({ commandBusy: true }),
+    set: () => assert.fail('read-only search must not change command state'),
+    pushNotice: () => assert.fail('read-only search must not insert transcript notices'),
+  }));
+  assert.equal(await api.searchConversations('test topic', { limit: 3 }), 'matching conversation');
+  assert.deepEqual(calls, [['test topic', { limit: 3 }]]);
+});
+
 test('accepted user input archives completed Goal UI before the next turn', () => {
   const calls = [];
   const api = createSessionApi(

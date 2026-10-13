@@ -26,6 +26,7 @@ import type {
 import type { DesktopSettingKey, DesktopSettings } from './contract-settings';
 import type { ActivityRailPinsState } from './activity-rail-pins';
 import type { ProviderModelsChange } from './provider-models';
+import type { DesktopSessionOpenDelivery, DesktopSessionOpenResult } from './session-open-request';
 import type {
   DesktopBrowserCredentialFillResult,
   DesktopBrowserCredentialSuggestion,
@@ -487,6 +488,10 @@ export interface DesktopApi {
   onZoomFactorChanged(listener: (factor: number) => void): () => void;
   /** Desktop host only: the user clicked a "task finished" OS notification. */
   onNotificationOpenSession?(listener: (sessionId: string) => void): () => void;
+  /** Desktop handoff: open an existing session, even without an open tab. */
+  onSessionOpenRequested?(listener: (request: DesktopSessionOpenDelivery) => void): () => void;
+  sessionOpenNavigationReady?(ready: boolean): void;
+  sessionOpenHandled?(result: DesktopSessionOpenResult): void;
   /** Agent browser bridge (desktop host only): retain the owning session's
    *  Browser surface and optionally reveal its dock for a foreground call. */
   onBrowserOpenRequested?(listener: (request: DesktopBrowserOpenRequest) => void): () => void;

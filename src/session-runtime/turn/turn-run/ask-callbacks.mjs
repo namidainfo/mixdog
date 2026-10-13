@@ -72,6 +72,7 @@ export function createAskCallbacks({ transcript, notifyFnForSession, scheduleSea
       onAssistantToolCallObserved: options.onAssistantToolCallObserved,
       onToolResult: (message) => options.onToolResult?.(message),
       onToolApproval: options.onToolApproval,
+      onUserQuestion: options.onUserQuestion,
       onCompactEvent: options.onCompactEvent,
       onContextPressure: options.onContextPressure,
       onStageChange: options.onStageChange,

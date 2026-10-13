@@ -1,7 +1,7 @@
 // Reasoning-effort catalogs and coercion. Pure helpers.
 import { clean } from './session-text.mjs';
 
-const TOOL_MODES = new Set(['full', 'readonly', 'lead']);
+const TOOL_MODES = new Set(['full', 'readonly', 'lead', 'none', 'questions']);
 const ALL_EFFORT_LEVELS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 const EFFORT_LABELS = {
   none: 'None',
@@ -137,9 +137,11 @@ export function effortItemsFor(provider, model, activeEffort) {
 }
 
 export function toolSpecForMode(mode) {
+  if (mode === 'none' || mode === 'questions') return [];
   return mode === 'readonly' ? ['tools:readonly'] : 'full';
 }
 
 export function deferredSurfaceModeForLead(mode) {
+  if (mode === 'none' || mode === 'questions') return mode;
   return mode === 'readonly' ? 'readonly' : 'lead';
 }

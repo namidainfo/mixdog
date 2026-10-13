@@ -59,3 +59,32 @@ test('desktop metadata reload preserves dated bodies without changing manual tit
   assert.equal(reloaded.titles.sess_title_dated, title);
   assert.equal(reloaded.names.sess_title_manual, 'Custom title');
 });
+
+test('desktop numbered titles preserve their prefix and all 32 body characters', () => {
+  const title = `261012-000 | ${'가'.repeat(32)}`;
+  assert.equal(generatedSessionTitle(title), title);
+  assert.equal(sessionSummaryTitle({ title }), title);
+  const [summary] = desktopSessionSummaries([{ id: 'sess_title_numbered', title }]);
+  assert.equal(summary.title, title);
+  assert.equal(summary.title.length, 45);
+  assert.equal(generatedSessionTitle(`261012-000 | ${'가'.repeat(64)}`), `261012-000 | ${'가'.repeat(31)}…`);
+  assert.equal(generatedSessionTitle('261012-1000 | [260101] Work'), '261012-1000 | Work');
+  assert.equal(generatedSessionTitle('261012-000 |', 'Fallback'), 'Fallback');
+  assert.equal(generatedSessionTitle('261012-000 | [mixdog-runtime] internal row', ''), '');
+});
+
+test('desktop metadata persists numbered titles while keeping manual names unchanged', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'mixdog-desktop-numbered-titles-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const metadata = new DesktopSessionMetadata(() => root);
+  await metadata.load();
+  const title = '261012-001 | Work';
+  assert.equal(metadata.rememberGeneratedTitle('sess_numbered', title), true);
+  await metadata.setName('sess_manual_numbered', 'Custom title');
+  assert.equal(metadata.rememberGeneratedTitle('sess_manual_numbered', title), false);
+  await metadata.flush();
+  const reloaded = new DesktopSessionMetadata(() => root);
+  await reloaded.load();
+  assert.equal(reloaded.titles.sess_numbered, title);
+  assert.equal(reloaded.names.sess_manual_numbered, 'Custom title');
+});

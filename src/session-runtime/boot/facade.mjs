@@ -6,6 +6,7 @@ import { webSearchRouteOrDefault } from '../../runtime/agent/orchestrator/runtim
 import { createRuntimeFacade } from '../runtime-facade.mjs';
 import { bootProfile } from '../boot-profile.mjs';
 import { dataDirOf, workflowHelpers } from './shared.mjs';
+import { reserveSessionTitle } from '../../runtime/agent/orchestrator/session/store/title-sequence.mjs';
 
 export function buildFacade(boot) {
   const { rt, setupTool } = boot;
@@ -41,6 +42,15 @@ function reserveSessionId(boot, id) {
   const { rt } = boot;
   if (rt.session?.id && rt.session.id !== id) {
     throw new Error(`session ${rt.session.id} is already materialized`);
+  }
+  if (!rt.session?.id && rt.reservedSessionId !== id) {
+    const profile = rt.sessionProfile || {};
+    rt.reservedSessionTitle = reserveSessionTitle({
+      ...profile,
+      id,
+      visibility: profile.owner === 'agent' ? 'agent-only' : profile.visibility,
+      createdAt: Date.now(),
+    });
   }
   rt.reservedSessionId = id;
   boot.bindRuntimeNotificationSession(id);

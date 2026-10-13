@@ -118,3 +118,24 @@ test('empty titles, invalid stages, closed sessions and missing sessions are not
   assert.equal(getSession('sess_title_closed').title, 'Closed title');
   assert.equal(await updateSessionGeneratedTitle('sess_title_missing', 'New title', 'first'), false);
 });
+
+test('numbered titles keep their reserved prefix and the independent body budget', async () => {
+  const id = 'sess_title_numbered';
+  await plantSession(id, { generatedTitlePrefix: '260102-007 | ' });
+  assert.equal(await updateSessionGeneratedTitle(id, '991231-999 | [000101] ' + '가'.repeat(64), 'first'), true);
+  assert.equal(getSession(id).title, `260102-007 | ${'가'.repeat(31)}…`);
+  assert.equal(await updateSessionGeneratedTitle(id, '260101-000 | Updated title', 'third'), true);
+  assert.equal(getSession(id).title, '260102-007 | Updated title');
+  const stored = JSON.parse(readFileSync(join(root, 'sessions', `${id}.json`), 'utf8'));
+  assert.equal(stored.generatedTitlePrefix, '260102-007 | ');
+  assert.equal(stored.title, '260102-007 | Updated title');
+});
+
+test('number-only titles are rejected and a numbered session still protects manual titles', async () => {
+  const id = 'sess_title_numbered_manual';
+  await plantSession(id, { generatedTitlePrefix: '260102-008 | ' });
+  assert.equal(await updateSessionGeneratedTitle(id, '260102-008 |', 'first'), false);
+  assert.equal(await updateSessionManualTitle(id, 'Custom numbered task'), true);
+  assert.equal(await updateSessionGeneratedTitle(id, 'Automatic replacement', 'first'), false);
+  assert.equal(getSession(id).title, 'Custom numbered task');
+});
