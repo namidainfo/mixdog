@@ -13,6 +13,7 @@ import { desktopUtilityDockTabEnabled, type DesktopUtilityDockTab } from './desk
 import { t } from './i18n';
 import { useUtilityDockGit } from './use-utility-dock-git';
 import { useUtilityDockProject } from './use-utility-dock-project';
+import { WorktrailPane } from './worktrail/WorktrailPane';
 
 export { prewarmUtilityDockGitState } from './utility-dock-git-state';
 export type UtilityDockTab = DesktopUtilityDockTab;
@@ -55,6 +56,7 @@ function UtilityDockViewSection({ active, children }: { active: boolean; childre
 }
 
 function utilityDockLoadingLabel(tab: UtilityDockTab): string {
+  if (tab === 'worktrail') return 'Worktrail 준비 중…';
   if (tab === 'search') return t('Preparing Search…');
   if (tab === 'source-control') return t('Preparing Source Control…');
   if (tab === 'pull-requests') return t('Preparing Pull Requests…');
@@ -62,6 +64,7 @@ function utilityDockLoadingLabel(tab: UtilityDockTab): string {
 }
 
 function utilityDockTabTitle(tab: UtilityDockTab): string {
+  if (tab === 'worktrail') return 'Worktrail';
   if (tab === 'agents') return t('Agents');
   if (tab === 'search') return t('Search');
   if (tab === 'pull-requests') return t('Pull Requests');
@@ -229,6 +232,13 @@ export const UtilityDock = memo(function UtilityDock({
         data-ready={selectedSurfaceVisible ? 'true' : 'false'}
         data-transitioning="false"
       >
+        {desktopUtilityDockTabEnabled('worktrail') && paneMounted('worktrail') && (
+          <UtilityDockViewSection active={paneActive('worktrail')}>
+            <DockPane tab="worktrail" active={paneActive('worktrail')}>
+              <WorktrailPane active={paneActive('worktrail')} />
+            </DockPane>
+          </UtilityDockViewSection>
+        )}
         {desktopUtilityDockTabEnabled('agents') && paneMounted('agents') && (
           <UtilityDockViewSection active={paneActive('agents')}>
             <DockPane tab="agents" active={paneActive('agents')}>

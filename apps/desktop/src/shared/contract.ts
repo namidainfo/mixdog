@@ -125,6 +125,12 @@ export type { GithubRequest, GithubResult } from '../../../../src/runtime/github
 /** Small, last-writer-wins UI projection shared by Electron and paired web
  * clients. Pane geometry remains local; `selection` is the first visual pane. */
 export interface DesktopApi {
+  /** Only the separately branded local personal host exposes this surface. */
+  readonly personalWorktrail?: boolean;
+  worktrailRequest?(
+    action: import('./worktrail-contract').WorktrailAction,
+    input?: Record<string, unknown>
+  ): Promise<unknown>;
   /** Immutable process timeline identity injected before renderer modules run. */
   readonly bootContext?: DesktopBootContext;
   /** The host accepts per-route Auto reasoning: `autoEffort` in model

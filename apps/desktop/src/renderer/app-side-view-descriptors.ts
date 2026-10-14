@@ -1,5 +1,6 @@
 import {
   Bot,
+  BookOpen,
   Clock,
   FileDiff,
   GitCompare,
@@ -70,6 +71,7 @@ export function createAppSideViewDescriptors(
     ],
     ['agents', { id: 'agents', label: t('Agents'), icon: Bot, onPrefetch: () => onPrefetch('agents') }],
     ['search', { id: 'search', label: t('Search'), icon: Search, onPrefetch: () => onPrefetch('search') }],
+    ['worktrail', { id: 'worktrail', label: 'Worktrail', icon: BookOpen, onPrefetch: () => onPrefetch('worktrail') }],
     [
       'source-control',
       {

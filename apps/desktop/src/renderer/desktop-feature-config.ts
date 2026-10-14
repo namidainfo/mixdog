@@ -16,6 +16,7 @@ type DesktopFeatureId =
   | 'agents'
   | 'explorer'
   | 'sourceControl'
+  | 'worktrail'
   | 'pullRequests';
 
 const DESKTOP_FEATURES: Readonly<Record<DesktopFeatureId, boolean>> = {
@@ -29,21 +30,23 @@ const DESKTOP_FEATURES: Readonly<Record<DesktopFeatureId, boolean>> = {
   agents: true,
   explorer: true,
   sourceControl: true,
+  worktrail: true,
   pullRequests: false,
 };
 
 type DesktopSidebarDestination = 'sessions' | 'projects' | 'workflows' | 'extensions' | 'schedules' | 'webhooks';
 
-export type DesktopUtilityDockTab = 'agents' | 'search' | 'source-control' | 'pull-requests';
+export type DesktopUtilityDockTab = 'agents' | 'search' | 'source-control' | 'pull-requests' | 'worktrail';
 
 const UTILITY_DOCK_FEATURES: Readonly<Record<DesktopUtilityDockTab, DesktopFeatureId>> = {
   agents: 'agents',
   search: 'explorer',
   'source-control': 'sourceControl',
+  worktrail: 'worktrail',
   'pull-requests': 'pullRequests',
 };
 
-const UTILITY_DOCK_TABS: readonly DesktopUtilityDockTab[] = ['agents', 'search', 'source-control', 'pull-requests'];
+const UTILITY_DOCK_TABS: readonly DesktopUtilityDockTab[] = ['agents', 'search', 'source-control', 'pull-requests', 'worktrail'];
 
 export function desktopFeatureEnabled(feature: DesktopFeatureId): boolean {
   return DESKTOP_FEATURES[feature];
@@ -54,6 +57,7 @@ export function desktopSidebarDestinationEnabled(destination: DesktopSidebarDest
 }
 
 export function desktopUtilityDockTabEnabled(tab: DesktopUtilityDockTab): boolean {
+  if (tab === 'worktrail' && !globalThis.window?.mixdogDesktop?.personalWorktrail) return false;
   return desktopFeatureEnabled(UTILITY_DOCK_FEATURES[tab]);
 }
 

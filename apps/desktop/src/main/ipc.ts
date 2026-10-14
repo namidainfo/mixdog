@@ -19,6 +19,7 @@ import { registerProjectFileIpc } from './ipc-project-files';
 import { registerSessionIpc } from './ipc-sessions';
 import type { RemoteHostWindows } from './remote-host-windows';
 import { registerSourceControlIpc } from './ipc-source-control';
+import { registerWorktrailIpc } from './ipc-worktrail';
 import { DesktopStateBridge, type DesktopUpdater } from './ipc-state-bridge';
 import { registerTerminalIpc, type DesktopTerminalHost } from './ipc-terminal';
 import { registerWindowSettingsIpc } from './ipc-window-settings';
@@ -206,6 +207,7 @@ export function registerDesktopIpc(
     describeLocalPaths: (value) => selectedFiles.describe(value),
   });
   registerProjectIpc({ handle, host, shell, invokeDesktopOperation, operations: serviceOperations });
+  registerWorktrailIpc(handle, () => app.getPath!('userData'), process.env.MIXDOG_PERSONAL === '1');
   handle(DESKTOP_IPC.requestLinuxInputAccess, () => requestLinuxInputAccess());
   registerProjectFileIpc({
     app,

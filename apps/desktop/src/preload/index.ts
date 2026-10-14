@@ -63,6 +63,8 @@ function subscribeIpc<Args extends unknown[]>(channel: string, listener: (...arg
 
 const api: DesktopApi = {
   ...(bootContext ? { bootContext } : {}),
+  personalWorktrail: additionalArgument('mixdog-personal-worktrail') === '1',
+  worktrailRequest: (action, input) => ipcRenderer.invoke(DESKTOP_IPC.worktrailRequest, action, input),
   // This app's own host always takes per-route Auto reasoning.
   routeAutoEffort: true,
   chooseProject: () => ipcRenderer.invoke(DESKTOP_IPC.chooseProject),

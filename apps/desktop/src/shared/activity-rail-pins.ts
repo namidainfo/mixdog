@@ -9,8 +9,9 @@ export const ACTIVITY_RAIL_PIN_IDS = [
   'source-control',
   'search',
   'webhooks',
+  'worktrail',
 ] as const;
-export const DEFAULT_ACTIVITY_RAIL_PINS = ['sessions', 'agents', 'schedules', 'workflows', 'projects', 'extensions'];
+export const DEFAULT_ACTIVITY_RAIL_PINS = ['sessions', 'agents', 'schedules', 'workflows', 'projects', 'extensions', 'worktrail'];
 
 export interface ActivityRailPinsState {
   pins: string[];

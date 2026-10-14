@@ -1203,6 +1203,7 @@ function createMainBrowserWindow(
       preload: join(import.meta.dirname, '../preload/index.js'),
       additionalArguments: [
         `--mixdog-boot-id=${desktopBootId}`,
+        `--mixdog-personal-worktrail=${process.env.MIXDOG_PERSONAL === '1' ? '1' : '0'}`,
         `--mixdog-process-started-at=${desktopProcessStartedAt}`,
         ...(desktopBootScenario ? [`--mixdog-boot-scenario=${desktopBootScenario}`] : []),
         ...(afterUpdate ? ['--mixdog-after-update=1'] : []),

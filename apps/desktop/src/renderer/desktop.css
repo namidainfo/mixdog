@@ -43,6 +43,7 @@
 @import "./desktop/30-dialogs.css";
 @import "./desktop/date-range-picker.css";
 @import "./desktop/error-notice.css";
+@import "./worktrail/worktrail.css";
 /* Narrow-window layout, phone composer lane and reduced-motion safety net:
    eager, and last so they override every base layer above. */
 @import "./desktop/shell-overrides.css";

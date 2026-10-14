@@ -178,6 +178,7 @@ export const DESKTOP_IPC = {
   gitStashDrop: 'mixdog:git-stash-drop',
   ghPrList: 'mixdog:gh-pr-list',
   githubRequest: 'mixdog:github-request',
+  worktrailRequest: 'mixdog:worktrail-request',
   ghPrDefaultBranch: 'mixdog:gh-pr-default-branch',
   ghPrCreate: 'mixdog:gh-pr-create',
   ghPrView: 'mixdog:gh-pr-view',
