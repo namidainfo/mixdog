@@ -47,6 +47,13 @@ export function createProviderUsage({
   scheduleProviderSetupWarmup,
 }) {
   const reg = () => getReg();
+  const requestConnectedAccountQuotaWindows = createQuotaAccountRequests({
+    getProvider: (id) => reg().getProvider(id),
+    refreshQuota: () => {
+      caches.usageDashboardCache = {};
+      return getUsageDashboard({ refresh: true, refreshSetup: false });
+    },
+  });
   let quickSetupRequest = null;
   let dashboardRequest = null;
   /** In-flight usage refreshes by scope, each tied to the cache generation it
@@ -259,5 +266,7 @@ export function createProviderUsage({
     hasProviderSetupCached: () => Boolean(caches.providerSetupCache.setup),
     getUsageDashboard,
     consumeCodexRateLimitResetCredit,
+    requestConnectedAccountQuotaWindows,
   };
 }
+import { createQuotaAccountRequests } from './services/quota-account-requests.mjs';

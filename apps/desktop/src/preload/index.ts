@@ -80,6 +80,8 @@ function subscribeIpc<Args extends unknown[]>(channel: string, listener: (...arg
 const api: DesktopApi = {
   ...(bootContext ? { bootContext } : {}),
   ...(connection ? { connection } : {}),
+  personalWorktrail: additionalArgument('mixdog-personal-worktrail') === '1',
+  worktrailRequest: (action, input) => ipcRenderer.invoke(DESKTOP_IPC.worktrailRequest, action, input),
   // This app's own host always takes per-route Auto reasoning.
   routeAutoEffort: true,
   chooseProject: () => ipcRenderer.invoke(DESKTOP_IPC.chooseProject),
@@ -555,6 +557,8 @@ const api: DesktopApi = {
   abortSession: (sessionId, options) => ipcRenderer.invoke(DESKTOP_IPC.abortSession, sessionId, options),
   resolveToolApprovalForSession: (sessionId, id, decision) =>
     ipcRenderer.invoke(DESKTOP_IPC.resolveToolApprovalForSession, sessionId, id, decision),
+  resolveUserQuestionForSession: (sessionId, id, response) =>
+    ipcRenderer.invoke(DESKTOP_IPC.resolveUserQuestionForSession, sessionId, id, response),
   resyncSessionState: (sessionId) => ipcRenderer.send(DESKTOP_IPC.sessionStateResync, sessionId),
   subscribeSessionState: (listener) => {
     const decoders = new Map<string, ReturnType<typeof createSnapshotDeltaDecoder>>();
@@ -617,6 +621,9 @@ const api: DesktopApi = {
   setTitleBarDim: (dim) => ipcRenderer.invoke(DESKTOP_IPC.setTitleBarDim, dim),
   onZoomFactorChanged: (listener) => subscribeIpc(DESKTOP_IPC.zoomFactorChanged, listener),
   onNotificationOpenSession: (listener) => subscribeIpc(DESKTOP_IPC.notificationOpenSession, listener),
+  onSessionOpenRequested: (listener) => subscribeIpc(DESKTOP_IPC.sessionOpenRequested, listener),
+  sessionOpenNavigationReady: (ready) => ipcRenderer.send(DESKTOP_IPC.sessionOpenNavigationReady, ready),
+  sessionOpenHandled: (result) => ipcRenderer.send(DESKTOP_IPC.sessionOpenHandled, result),
   onBrowserOpenRequested: (listener) => subscribeIpc(DESKTOP_IPC.browserOpenRequested, listener),
   onVisualizeChanged: (listener) => subscribeIpc(DESKTOP_IPC.visualizeChanged, listener),
   visualizeState: () => ipcRenderer.invoke(DESKTOP_IPC.visualizeState),

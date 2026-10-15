@@ -1,4 +1,4 @@
-import type { DesktopQuotaResume, DesktopSessionSummary, DesktopSessionWorkspace } from '../shared/contract';
+import type { DesktopQuotaResume, DesktopSessionSummary, DesktopSessionWorkspace, UserQuestionRequest } from '../shared/contract';
 
 export type RecordValue = Record<string, unknown>;
 export type Project = string;
@@ -106,6 +106,7 @@ export type Snapshot = RecordValue & {
   commandBusy?: boolean;
   queued?: unknown[];
   toolApproval?: Approval | null;
+  userQuestion?: UserQuestionRequest | null;
   toolApprovalResult?: { id: string; approved: boolean; device: string; at: number } | null;
   promptRestore?: { id: string; ids: string[]; text: string; device: string; at: number } | null;
   cwd?: string;

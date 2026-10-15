@@ -12,7 +12,9 @@ import {
   readCachedApiUsageSnapshot,
 } from '../../runtime/agent/orchestrator/providers/api-usage.mjs';
 import { num } from '../../runtime/agent/orchestrator/providers/lib/usage-primitives.mjs';
-import { readProviderAccountPool } from '../../runtime/shared/provider-accounts.mjs';
+import { ACCOUNT_PROVIDERS } from '../../runtime/shared/provider-accounts.mjs';
+import { listProviderAccounts } from './provider-admin.mjs';
+import { usageErrorDetails } from './usage-error.mjs';
 import {
   creditsFromSnapshot,
   applyApiUnavailable,
@@ -35,24 +37,40 @@ import {
 
 const CREDIT_PROVIDERS = new Set(['openai-oauth', 'anthropic-oauth']);
 
-async function oauthSnapshot(providerId, { refresh, getProvider, log }) {
-  const cached = readCachedOAuthUsageSnapshot({ provider: providerId, model: '' });
-  if (!refresh && cached) return cached;
+async function oauthSnapshot(providerId, { refresh, getProvider, log }, accountId) {
+  const route = { provider: providerId, model: '', ...(accountId ? { accountId } : {}) };
+  const cached = readCachedOAuthUsageSnapshot(route);
+  if (!refresh && cached) return { snapshot: cached };
   // A rate-limited or failed forced refresh (Anthropic /oauth/usage 429s
   // aggressively) must not blank a known quota row: fall back to the last
   // contentful snapshot — a stale meter with its updatedAt beats an empty row.
-  const staleFallback = () =>
-    cached || readCachedOAuthUsageSnapshot({ provider: providerId, model: '' }, { allowStale: true });
+  let refreshError = '';
+  const staleFallback = () => {
+    const snapshot = cached || readCachedOAuthUsageSnapshot(route, { allowStale: true });
+    return {
+      snapshot: snapshot ? { ...snapshot, stale: true } : null,
+      refreshState: refreshError ? 'failed' : 'unavailable',
+      ...(refreshError ? { refreshError } : {}),
+    };
+  };
   if (typeof getProvider === 'function') {
     try {
       const providerObj = getProvider(providerId);
       if (providerObj) {
-        const fresh = await fetchOAuthUsageSnapshot({ provider: providerId, model: '' }, providerObj, log, {
+        if (accountId && typeof providerObj.forAccount !== 'function') {
+          refreshError = 'Account-scoped quota reads are unavailable.';
+          return staleFallback();
+        }
+        const fresh = await fetchOAuthUsageSnapshot(route, providerObj, log, {
           force: refresh === true,
+          onFailure: (error) => { refreshError = usageErrorDetails(error); },
         });
-        return fresh || staleFallback();
+        // Some providers return a fallback reading after a failed measurement.
+        // It must not be presented as freshly verified quota.
+        return fresh && !refreshError ? { snapshot: fresh } : staleFallback();
       }
-    } catch {
+    } catch (error) {
+      refreshError = usageErrorDetails(error);
       return staleFallback();
     }
   }
@@ -72,7 +90,7 @@ async function apiSnapshot(providerId, { refresh } = {}) {
 function emitUsageDashboard(options, dashboard) {
   if (typeof options?.onUpdate !== 'function') return;
   try {
-    options.onUpdate(dashboard);
+    options.onUpdate(usageDashboardSnapshot(dashboard.rows, dashboard));
   } catch {
     // UI progress callbacks should never break the usage refresh itself.
   }
@@ -201,6 +219,55 @@ async function apiProviderRow(item, { config, providers, preview, refreshFor, sn
 /** One OAuth provider row. Same two-stage paint as the API lane, but the usage
  *  comes from the subscription quota windows its snapshot exposes rather than
  *  from a key balance. */
+async function readOAuthRow(row, providerId, options, accountId) {
+  if (!row.authenticated) return;
+  try {
+    const result = await oauthSnapshot(providerId, options, accountId);
+    const snapshot = result.snapshot;
+    row.refreshState = result.refreshState || 'available';
+    if (result.refreshError) row.refreshError = result.refreshError;
+    else delete row.refreshError;
+    const known = snapshotRemaining(snapshot);
+    const windows = snapshot
+      ? normaliseWindows(snapshot.quotaWindows, clean(snapshot.source) || 'provider-api')
+      : row.windows;
+    const resetCredits = normaliseResetCredits(snapshot?.resetCredits);
+    row.windows = windows;
+    if (resetCredits) row.resetCredits = resetCredits;
+    const credits = creditsFromSnapshot(providerId, snapshot);
+    if (credits) row.credits = credits;
+    else if (snapshot) delete row.credits;
+    row.updatedAt = snapshot ? num(snapshot.cachedAt, null) : row.updatedAt;
+    row.stale = snapshot?.stale === true || (!snapshot && windows.length > 0);
+    if (known) {
+      applyKnownRemaining(row, known, { estimated: false });
+      row.sourceLabel = 'API';
+      if (windows.length) row.detail = 'subscription quota';
+    } else if (windows.length) {
+      row.status = 'partial';
+      row.source = clean(snapshot?.source) || 'provider-api';
+      row.sourceLabel = 'API window';
+      row.primary = windows.map(displayWindow).slice(0, 2).join(' · ');
+      row.detail = 'subscription quota';
+    } else {
+      row.status = 'hidden';
+      row.source = 'usage-disabled';
+      row.sourceLabel = 'unavailable';
+      row.primary = '';
+      row.detail = 'Quota unavailable from provider';
+    }
+  } catch (err) {
+    row.status = 'error';
+    row.source = 'error';
+    row.sourceLabel = 'error';
+    row.primary = 'fetch failed';
+    row.detail = usageErrorDetails(err);
+    row.refreshState = 'failed';
+    row.refreshError = row.detail;
+  }
+  row.tone = rowTone(row);
+}
+
 async function oauthProviderRow(item, { providers, preview, snapshotOptions, rows, emit }) {
   const providerCfg = providers[item.id] || {};
   const row = baseRow(item, 'oauth', providerCfg);
@@ -210,7 +277,27 @@ async function oauthProviderRow(item, { providers, preview, snapshotOptions, row
   row.primary = row.authenticated ? '' : 'not signed in';
   row.detail = row.authenticated ? 'Checking provider usage' : item.detail || 'OAuth credentials missing';
   row.tone = rowTone(row);
-  if (CREDIT_PROVIDERS.has(item.id)) row.useCredits = readProviderAccountPool(item.id).useCredits === true;
+  const options = snapshotOptions(item.id);
+  if (CREDIT_PROVIDERS.has(item.id)) row.useCredits = options.accountPool?.useCredits === true;
+  if (ACCOUNT_PROVIDERS.includes(item.id)) {
+    const pool = options.accountPool;
+    const provider = options.getProvider?.(item.id);
+    row.accounts = pool.accounts
+      .filter((account) => account.authenticated === true && account.reauthRequired !== true)
+      .map((account) => ({
+        ...baseRow({ ...item, authenticated: true }, 'oauth'),
+        accountId: account.id,
+        alias: account.label,
+        identity: account.identity || '',
+        selected: pool.selectedId === account.id,
+        ...(CREDIT_PROVIDERS.has(item.id) ? { useCredits: row.useCredits } : {}),
+        minimalRequestSupported: typeof provider?.forAccount === 'function',
+        status: 'checking',
+        windows: normaliseWindows(account.usage?.windows, 'account-cache'),
+        updatedAt: num(account.usage?.checkedAt, null),
+        stale: true,
+      }));
+  }
   rows.push(row);
   emit(true);
 
@@ -218,42 +305,16 @@ async function oauthProviderRow(item, { providers, preview, snapshotOptions, row
     return row;
   }
 
-  // Same as the API lane: the not-signed-in row was already painted above.
-  if (row.authenticated) {
-    try {
-      const snapshot = await oauthSnapshot(item.id, snapshotOptions(item.id));
-      const known = snapshotRemaining(snapshot);
-      const windows = normaliseWindows(snapshot?.quotaWindows, clean(snapshot?.source) || 'provider-api');
-      const resetCredits = normaliseResetCredits(snapshot?.resetCredits);
-      row.windows = windows;
-      if (resetCredits) row.resetCredits = resetCredits;
-      const credits = creditsFromSnapshot(item.id, snapshot);
-      if (credits) row.credits = credits;
-      row.updatedAt = num(snapshot?.cachedAt, null);
-      if (known) {
-        applyKnownRemaining(row, known, { estimated: false });
-        row.sourceLabel = 'API';
-        if (windows.length) row.detail = 'subscription quota';
-      } else if (windows.length) {
-        row.status = 'partial';
-        row.source = clean(snapshot?.source) || 'provider-api';
-        row.sourceLabel = 'API window';
-        row.primary = windows.map(displayWindow).slice(0, 2).join(' · ');
-        row.detail = 'subscription quota';
-      } else {
-        row.status = 'hidden';
-        row.source = 'usage-disabled';
-        row.sourceLabel = 'disabled';
-        row.primary = '';
-        row.detail = 'No current usage query result';
-      }
-    } catch (err) {
-      row.status = 'error';
-      row.source = 'error';
-      row.sourceLabel = 'error';
-      row.primary = 'fetch failed';
-      row.detail = err?.message || String(err);
-    }
+  if (row.accounts?.length) {
+    await Promise.all(row.accounts.map(async (account) => {
+      await readOAuthRow(account, item.id, options, account.accountId);
+      emit(true);
+    }));
+    // Preserve the selected-provider row for existing usage/history consumers.
+    const selected = row.accounts.find((account) => account.selected);
+    if (selected) Object.assign(row, { ...selected, accounts: row.accounts, label: row.label });
+  } else {
+    await readOAuthRow(row, item.id, options);
   }
   row.tone = rowTone(row);
   emit(true);
@@ -262,20 +323,29 @@ async function oauthProviderRow(item, { providers, preview, snapshotOptions, row
 
 export async function createUsageDashboard(config = {}, options = {}) {
   const setup = options.setup || { api: [], oauth: [], local: [] };
+  const oauthItems = [...(setup.oauth || [])];
+  const accountPools = new Map();
+  for (const provider of ACCOUNT_PROVIDERS) {
+    const pool = (options.listAccounts || listProviderAccounts)(provider);
+    accountPools.set(provider, pool);
+    if (!oauthItems.some((item) => item.id === provider) && pool.accounts.some((account) => account.authenticated === true && account.reauthRequired !== true)) {
+      oauthItems.push({ id: provider, name: provider, authenticated: true });
+    }
+  }
   const providers = config.providers || {};
   const rows = [];
   const checkedAt = Date.now();
   const refresh = options.refresh === true;
   const scope = refresh ? refreshScope(options) : null;
   const refreshFor = (id) => refresh && (!scope || scope.has(String(id || '').toLowerCase()));
-  const snapshotOptions = (id) => ({ ...options, refresh: refreshFor(id) });
+  const snapshotOptions = (id) => ({ ...options, refresh: refreshFor(id), accountPool: accountPools.get(id) });
   const preview = options.preview === true;
   const emit = (checking = true) =>
     emitUsageDashboard(options, usageDashboardSnapshot(rows, { checkedAt, refresh, checking }));
 
   const lane = { config, providers, preview, refreshFor, snapshotOptions, rows, emit };
   const apiTasks = (setup.api || []).map((item) => apiProviderRow(item, lane));
-  const oauthTasks = (setup.oauth || []).map((item) => oauthProviderRow(item, lane));
+  const oauthTasks = oauthItems.map((item) => oauthProviderRow(item, lane));
 
   await Promise.all([...apiTasks, ...oauthTasks]);
 

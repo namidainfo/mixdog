@@ -11,7 +11,7 @@ import { createDisposeAction } from './lifecycle/dispose.mjs';
 import { publishModelSwitch } from './routes.mjs';
 
 export function createSessionLifecycleApi(bag, { restoreTranscriptItems, oauthFlows }) {
-  const { runtime, pushNotice, removeNotice, setProgressHint, finishToolApproval } = bag;
+  const { runtime, pushNotice, removeNotice, setProgressHint, finishToolApproval, finishUserQuestion } = bag;
 
   // Canonical close = execution fence at the local-session boundary. The fence
   // is raised synchronously BEFORE the runtime/manager close (which cancels the
@@ -59,6 +59,7 @@ export function createSessionLifecycleApi(bag, { restoreTranscriptItems, oauthFl
         typeof decision?.device === 'string' ? decision.device : ''
       );
     },
+    resolveUserQuestion: (id, response) => finishUserQuestion(id, response),
     pushNotice,
     removeNotice,
     setProgressHint,

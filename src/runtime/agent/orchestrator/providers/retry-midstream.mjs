@@ -8,6 +8,7 @@ import {
   WEBSOCKET_CONNECTION_LIMIT,
   WIRE_ERROR_FATAL_CODES,
   classifyError,
+  isCertificateVerificationError,
   isTransientErrorCode,
   typedStatusFrom,
 } from './retry-classification.mjs';
@@ -349,6 +350,7 @@ export function isWsMessageTooBigClose(err) {
 export function shouldFallbackTransport(err, { signal, enabled = true } = {}) {
   if (!enabled) return false;
   if (signal?.aborted) return false;
+  if (isCertificateVerificationError(err)) return false;
   // Transport fallback re-issues the request on another transport: it is a
   // replay, so the exposure deny applies. Eligibility itself stays typed
   // (status / errno / classifier) for the WS→HTTPS switch.

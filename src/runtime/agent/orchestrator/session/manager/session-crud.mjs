@@ -25,6 +25,9 @@ import {
 import { getProvider } from '../../providers/registry.mjs';
 import { isSessionCompactionBlocked, getSessionAbortSignal, _runtimeEntries } from './runtime-liveness.mjs';
 import { mintSessionId } from './session-id.mjs';
+import { compactSessionTitle } from '../../runtime-core/session-title.mjs';
+import { sessionTitleDatePrefix, splitSessionTitleDatePrefix } from '../../../../shared/session-title-format.mjs';
+import { reserveSessionTitle } from '../store/title-sequence.mjs';
 import { hideCompactionArchive } from '../compaction-archive-capture.mjs';
 import { writeStderrBestEffort } from '../../../../shared/best-effort-stderr.mjs';
 
@@ -73,12 +76,13 @@ function normalizeSessionTitle(title) {
 export async function updateSessionGeneratedTitle(id, title, stage) {
   const session = loadSession(id);
   if (!session || session.closed === true) return false;
-  const normalized = normalizeSessionTitle(title);
+  const body = compactSessionTitle(normalizeSessionTitle(splitSessionTitleDatePrefix(title).title));
   const normalizedStage = stage === 'third' || stage === 'first' ? stage : '';
-  if (!normalized || !normalizedStage) return false;
+  if (!body || !normalizedStage) return false;
   if (session.titleLocked === true) return false;
   if (session.generatedTitleStage === 'third') return false;
   if (normalizedStage === 'first' && session.generatedTitleStage === 'first') return false;
+  const normalized = `${session.generatedTitlePrefix || sessionTitleDatePrefix(session.createdAt)}${body}`;
   if (session.title === normalized && session.generatedTitleStage === normalizedStage) return false;
   session.title = normalized;
   session.generatedTitleStage = normalizedStage;
@@ -210,6 +214,13 @@ function forkOutgoingTranscript(session, messages, now) {
       ...clearedTokenAccounting(now),
     };
     delete fork.liveTurnMessages;
+    const titleReservation = reserveSessionTitle(fork);
+    if (titleReservation) {
+      fork.generatedTitlePrefix = titleReservation.prefix;
+      if (fork.title && fork.titleLocked !== true) {
+        fork.title = `${titleReservation.prefix}${splitSessionTitleDatePrefix(fork.title).title}`;
+      }
+    }
     // The archive sidecar belongs to the source id; the fork has none.
     if (fork.compaction?.archive) {
       fork.compaction = { ...fork.compaction };

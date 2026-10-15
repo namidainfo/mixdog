@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "protocol": 1,
+  "revision": 8,
+  "profile": "personal",
+  "bridgeScript": "src/standalone/bloom-bridge.mjs",
+  "nodeExecutable": "../../../../Mixdog Personal.exe",
+  "runAsNode": true
+}

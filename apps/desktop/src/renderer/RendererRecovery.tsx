@@ -5,6 +5,7 @@ import { safeErrorDetails } from '../../../../src/runtime/shared/error-presentat
 
 import type { DesktopRendererFailureDiagnostic } from '../shared/contract';
 import { ProgressSpinner, WindowLoadingMark } from './ProgressSpinner';
+import { transcriptPerformanceContext } from './transcript-performance-context';
 
 type RendererFailurePhase = DesktopRendererFailureDiagnostic['phase'];
 type RendererFailureLocation = {
@@ -156,10 +157,13 @@ export function reportRendererNotice(text: unknown, options: { bridge?: boolean 
 export function installGlobalRendererDiagnostics(): () => void {
   type DiagnosticsHost = Window & {
     __mixdogLongTaskObserver?: PerformanceObserver;
+    __mixdogInputDelayObserver?: PerformanceObserver;
   };
   const host = window as DiagnosticsHost;
   let longTaskObserver: PerformanceObserver | undefined;
+  let inputDelayObserver: PerformanceObserver | undefined;
   let lastLongTaskDiagnosticAt = 0;
+  let lastInputDelayDiagnosticAt = 0;
   try {
     // One observer per renderer, not one per mounted conversation pane.
     // Split panes otherwise report and process the same browser entry N times.
@@ -181,6 +185,7 @@ export function installGlobalRendererDiagnostics(): () => void {
           window.mixdogDesktop?.rendererDiagnostic?.({
             kind: 'long-task',
             durationMs: Math.round(peakDurationMs),
+            ...transcriptPerformanceContext(document),
           });
         }
       });
@@ -189,6 +194,34 @@ export function installGlobalRendererDiagnostics(): () => void {
     }
   } catch {
     longTaskObserver = undefined;
+  }
+  // Event Timing reports how long real input waited BEFORE its handler ran.
+  // No event key, field value or text is collected; registration is Personal-only.
+  host.__mixdogInputDelayObserver?.disconnect();
+  if (window.mixdogDesktop?.personalWorktrail) {
+    try {
+      inputDelayObserver = new PerformanceObserver(list => {
+        let peak: PerformanceEventTiming | undefined;
+        for (const entry of list.getEntries() as PerformanceEventTiming[]) {
+          if (!peak || entry.processingStart - entry.startTime > peak.processingStart - peak.startTime) peak = entry;
+        }
+        if (!peak) return;
+        const delay = peak.processingStart - peak.startTime;
+        const now = Date.now();
+        if (delay >= 50 && now - lastInputDelayDiagnosticAt >= 5_000) {
+          lastInputDelayDiagnosticAt = now;
+          window.mixdogDesktop?.rendererDiagnostic?.({
+            kind: 'input-delay', eventType: peak.name, inputDelayMs: Math.round(delay),
+            ...transcriptPerformanceContext(document),
+          });
+        }
+      });
+      inputDelayObserver.observe({ type: 'event', durationThreshold: 50 } as PerformanceObserverInit);
+      host.__mixdogInputDelayObserver = inputDelayObserver;
+    } catch {
+      inputDelayObserver = undefined;
+      window.mixdogDesktop?.perfLog?.('renderer-input-delay-observer-unavailable');
+    }
   }
   const onError = (event: ErrorEvent) => {
     if (isResizeObserverDeliveryWarning(event.error, event.message)) {
@@ -215,6 +248,8 @@ export function installGlobalRendererDiagnostics(): () => void {
     window.removeEventListener('error', onError);
     window.removeEventListener('unhandledrejection', onUnhandledRejection);
     longTaskObserver?.disconnect();
+    inputDelayObserver?.disconnect();
+    if (host.__mixdogInputDelayObserver === inputDelayObserver) delete host.__mixdogInputDelayObserver;
     if (host.__mixdogLongTaskObserver === longTaskObserver) {
       delete host.__mixdogLongTaskObserver;
     }

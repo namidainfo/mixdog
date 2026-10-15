@@ -117,5 +117,24 @@ export function createRemoteActions({
       })().catch((error) => log(`session approval failed: ${error?.message || error}`));
       return true;
     },
+    async resolveUserQuestion(id, response) {
+      assertLive();
+      await afterPendingTransition();
+      assertLive();
+      const targetSessionId = binding.sessionId;
+      const result = await sendCall(
+        'session.answer',
+        {
+          sessionId: targetSessionId,
+          questionId: id,
+          response,
+          open: openParams,
+          baseRevision: projection.baseRevisionFor(binding.attachment, targetSessionId),
+        },
+        randomUUID()
+      );
+      if (!binding.disposed && binding.sessionId === targetSessionId) await applyResult(result, 'answer');
+      return result?.accepted === true;
+    },
   };
 }

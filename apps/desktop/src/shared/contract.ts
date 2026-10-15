@@ -22,6 +22,7 @@ import type {
   DesktopUpdaterState,
   SessionSnapshot,
   ToolApprovalDecision,
+  UserQuestionResponse,
 } from './contract-session';
 import type {
   DesktopCapabilityReadRequest,
@@ -33,6 +34,7 @@ import type { DesktopSettingKey, DesktopSettings } from './contract-settings';
 import type { ConversationImportJob } from './contract-import';
 import type { ActivityRailPinsState } from './activity-rail-pins';
 import type { ProviderModelsChange } from './provider-models';
+import type { DesktopSessionOpenDelivery, DesktopSessionOpenResult } from './session-open-request';
 import type { SettingsChange } from './settings-changed';
 import type { HostDisplayPreferences } from './host-display-preferences';
 import type { TerminalSizeOwnerEvent } from './terminal-size-owner';
@@ -156,6 +158,12 @@ export type { GithubRequest, GithubResult } from '../../../../src/runtime/github
 /** Small, last-writer-wins UI projection shared by Electron and paired web
  * clients. Pane geometry remains local; `selection` is the first visual pane. */
 export interface DesktopApi {
+  /** Only the separately branded local personal host exposes this surface. */
+  readonly personalWorktrail?: boolean;
+  worktrailRequest?(
+    action: import('./worktrail-contract').WorktrailAction,
+    input?: Record<string, unknown>
+  ): Promise<unknown>;
   /** Immutable process timeline identity injected before renderer modules run. */
   readonly bootContext?: DesktopBootContext;
   /** The daemon connection this Electron window drives; absent on remote
@@ -738,6 +746,7 @@ export interface DesktopApi {
   submitToSession(sessionId: string, prompt: DesktopPromptContent, options?: DesktopSubmitOptions): Promise<boolean>;
   abortSession(sessionId: string, options?: DesktopAbortOptions): Promise<unknown>;
   resolveToolApprovalForSession(sessionId: string, id: string, decision: ToolApprovalDecision): Promise<boolean>;
+  resolveUserQuestionForSession(sessionId: string, id: string, response: UserQuestionResponse): Promise<boolean>;
   /** Per-session live snapshot lane covering every pooled session runtime. */
   subscribeSessionState(listener: (update: DesktopSessionStateUpdate) => void): () => void;
   listProviderModels(options?: DesktopModelCatalogOptions): Promise<DesktopModelOption[]>;
@@ -767,6 +776,10 @@ export interface DesktopApi {
   onZoomFactorChanged(listener: (factor: number) => void): () => void;
   /** Desktop host only: the user clicked a "task finished" OS notification. */
   onNotificationOpenSession?(listener: (sessionId: string) => void): () => void;
+  /** Desktop handoff: open an existing session, even without an open tab. */
+  onSessionOpenRequested?(listener: (request: DesktopSessionOpenDelivery) => void): () => void;
+  sessionOpenNavigationReady?(ready: boolean): void;
+  sessionOpenHandled?(result: DesktopSessionOpenResult): void;
   /** Agent browser bridge (desktop host only): retain the owning session's
    *  Browser surface and optionally reveal its dock for a foreground call. */
   onBrowserOpenRequested?(listener: (request: DesktopBrowserOpenRequest) => void): () => void;

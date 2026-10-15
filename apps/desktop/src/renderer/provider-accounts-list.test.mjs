@@ -286,11 +286,11 @@ test('switching accounts repaints that provider at once and confirms it with a s
     },
   };
   await render(React.createElement(SidebarUsage, { api }));
-  assert.equal(document.querySelector('.sidebar-usage-meter b').textContent, '80%');
+  assert.equal(document.querySelector('.sidebar-usage-meter b').textContent, '20%');
   await act(async () => document.querySelector('.provider-account-picker-trigger').click());
   await act(async () => document.querySelector('[data-account-id="b"] .provider-account-choice').click());
   assert.equal(pool.selectedId, 'b');
-  assert.equal(document.querySelector('.sidebar-usage-meter b').textContent, '12%');
+  assert.equal(document.querySelector('.sidebar-usage-meter b').textContent, '88%');
   assert.equal(dashboardArgs.length, 1);
   assert.deepEqual(dashboardArgs[0].refreshProviders, ['openai-oauth']);
   assert.equal(dashboardArgs[0].refresh, true);
@@ -334,7 +334,7 @@ test('switching to an account without usage clears old meters and reset credits 
     },
   };
   await render(React.createElement(SidebarUsage, { api }));
-  assert.equal(document.querySelector('[data-usage-provider="codex"] .sidebar-usage-meter b').textContent, '39%');
+  assert.equal(document.querySelector('[data-usage-provider="codex"] .sidebar-usage-meter b').textContent, '61%');
   assert.ok(document.querySelector('[data-usage-provider="codex"] .sidebar-usage-reset-credit'));
   await act(async () =>
     document.querySelector('[data-usage-provider="codex"] .provider-account-picker-trigger').click()
@@ -345,7 +345,7 @@ test('switching to an account without usage clears old meters and reset credits 
   assert.match(codex().querySelector('.sidebar-usage-meter-empty').textContent, /Loading usage/);
   assert.equal(codex().getAttribute('aria-busy'), 'true');
   assert.equal(document.querySelector('.sidebar-usage-reset-credit'), null);
-  assert.equal(document.querySelector('[data-usage-provider="claude"] .sidebar-usage-meter b').textContent, '3%');
+  assert.equal(document.querySelector('[data-usage-provider="claude"] .sidebar-usage-meter b').textContent, '97%');
   assert.deepEqual(
     usagePinEntries(getUsageDashboardSnapshot().dashboard).map((row) => [row.key, row.percent]),
     [['claude', 3]]
@@ -362,7 +362,7 @@ test('switching to an account without usage clears old meters and reset credits 
       },
     })
   );
-  assert.equal(codex().querySelector('.sidebar-usage-meter b').textContent, '12%');
+  assert.equal(codex().querySelector('.sidebar-usage-meter b').textContent, '88%');
   assert.equal(codex().querySelector('.sidebar-usage-meter-empty'), null);
   assert.equal(codex().getAttribute('aria-busy'), 'false');
   assert.equal(document.querySelector('.sidebar-usage-reset-credit'), null);

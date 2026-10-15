@@ -46,6 +46,7 @@ export const DEFERRED_DEFAULT_FULL_TOOLS = Object.freeze([
   'apply_patch',
   'Skill',
   'load_tool',
+  'request_user_input',
 ]);
 export const DEFERRED_DEFAULT_READONLY_TOOLS = Object.freeze([
   'find',
@@ -56,6 +57,7 @@ export const DEFERRED_DEFAULT_READONLY_TOOLS = Object.freeze([
   'read',
   'Skill',
   'load_tool',
+  'request_user_input',
 ]);
 export const DEFERRED_DEFAULT_LEAD_TOOLS = Object.freeze([
   'find',
@@ -76,6 +78,7 @@ export const DEFERRED_DEFAULT_LEAD_TOOLS = Object.freeze([
   'agent',
   'Skill',
   'load_tool',
+  'request_user_input',
 ]);
 
 export const READONLY_TOOL_NAMES = new Set([
@@ -90,6 +93,7 @@ export const READONLY_TOOL_NAMES = new Set([
   'recall',
   // memory is not listed: it adds, edits and deletes standing memories.
   'Skill',
+  'request_user_input',
 ]);
 
 export const DEFERRED_SELECT_ALIASES = {

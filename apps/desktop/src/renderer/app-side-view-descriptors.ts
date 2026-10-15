@@ -1,5 +1,6 @@
 import {
   Bot,
+  BookOpen,
   Clock,
   Eye,
   FileDiff,
@@ -63,6 +64,7 @@ export function createAppSideViewDescriptors(
     ['visualize', { id: 'visualize', label: t('Visualize'), tooltip: t('Visualize'), icon: Eye }],
     ['agents', { id: 'agents', label: t('Agents'), icon: Bot, onPrefetch: () => onPrefetch('agents') }],
     ['search', { id: 'search', label: t('Search'), icon: Search, onPrefetch: () => onPrefetch('search') }],
+    ['worktrail', { id: 'worktrail', label: 'Worktrail', icon: BookOpen, onPrefetch: () => onPrefetch('worktrail') }],
     [
       'source-control',
       {

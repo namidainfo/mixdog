@@ -33,6 +33,7 @@ import {
 import { createLazyOutputValidator } from './lazy-output-validator.mjs';
 import { appendMcpStderrTail, createMcpTransport, hasConfiguredMcpAuth } from './client-transport.mjs';
 import { listAllMcpTools, MCP_CONNECT_CANCELLED, runBoundedHandshake } from './client-handshake.mjs';
+import { normalizeWorktrailToolArguments } from './worktrail-input.mjs';
 import {
   clearMcpOAuth,
   hasStoredMcpOAuthTokens,
@@ -462,10 +463,11 @@ export async function executeMcpTool(name, args, options = {}) {
   const serverName = server.name;
   const toolName = definition?.mcpToolName || match[2];
   const callSignal = options?.signal || null;
+  let toolArguments = args;
   const dispatch = (target) =>
     definition?.mcpOperation
       ? _callMcpFeatureWithTimeout(target, definition.mcpOperation, args, callSignal)
-      : _callToolWithTimeout(target, toolName, args, callSignal);
+      : _callToolWithTimeout(target, toolName, toolArguments, callSignal);
   let retryServer = null;
   const secrets = () => oauthSecrets(server.transport, retryServer?.transport);
   const gate = callAdmissionFor(server);
@@ -475,6 +477,17 @@ export async function executeMcpTool(name, args, options = {}) {
       async () => {
         // The gate stops forwarding the caller's abort once this task is
         // admitted, so the task itself observes the signal for its whole run.
+        if (callSignal?.aborted) {
+          throw mcpAbortError(
+            callSignal,
+            `MCP tool call aborted before dispatch (server="${serverName}", tool="${toolName}")`
+          );
+        }
+        // Conversion is outside the reconnect retry boundary: a failed
+        // conversion must never dispatch or replay a server-side operation.
+        if (!definition?.mcpOperation) {
+          toolArguments = await normalizeWorktrailToolArguments(serverName, server.cfg, args, { signal: callSignal });
+        }
         if (callSignal?.aborted) {
           throw mcpAbortError(
             callSignal,

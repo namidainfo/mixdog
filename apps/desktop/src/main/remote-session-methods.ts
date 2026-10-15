@@ -13,6 +13,7 @@ import {
   requiredSubmitOptions,
   requiredToolApprovalDecision,
   requiredTranscriptItemLimit,
+  requiredUserQuestionResponse,
   sessionDisplayName,
 } from './ipc-validation';
 import { STALE_SESSION_VIEW_MARKER } from '../shared/session-devices';
@@ -105,6 +106,12 @@ export function sessionRemoteMethods(
         ...requiredToolApprovalDecision(decision),
         device: await connectionDevice(),
       }),
+    resolveUserQuestionForSession: ([sessionId, id, response]) =>
+      host.resolveUserQuestionForSession(
+        requiredSessionId(sessionId),
+        requiredString(id, 'question id', 1_024),
+        requiredUserQuestionResponse(response)
+      ),
     inheritSession: ([sourceSessionId, selection, options]) =>
       host.inheritSession(
         requiredSessionId(sourceSessionId),

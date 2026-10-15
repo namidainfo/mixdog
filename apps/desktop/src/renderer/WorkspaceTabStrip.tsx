@@ -305,7 +305,7 @@ function workspaceTabNode({
         aria-current={active ? 'page' : undefined}
         // Compact tabs hide the title text; the name must not depend on it.
         aria-label={tab.title}
-        data-tooltip={tab.title}
+        data-tooltip={tab.tooltip || tab.title}
       >
         {/* While the session works, the tab GLYPH becomes the
               progress spinner (user decision) — no extra dot. */}

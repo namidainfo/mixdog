@@ -11,7 +11,9 @@
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { createOAuthPkce, parseOAuthCodeInput } from './lib/oauth-pkce.mjs';
-import { OAUTH_PAGE_CONTENT_TYPE, oauthSuccessHtml } from './lib/oauth-page.mjs';
+import { OAUTH_PAGE_CONTENT_TYPE, oauthSuccessHtml, oauthErrorHtml } from './lib/oauth-page.mjs';
+import { classifyTransportError, transportErrorText } from '../../../shared/transport-error-text.mjs';
+import { withOAuthTlsDiagnostics } from './openai-oauth-tls-diagnostics.mjs';
 import { openLoginUrl } from './lib/open-login-url.mjs';
 
 const TOKEN_URL = 'https://auth.openai.com/oauth/token';
@@ -42,12 +44,14 @@ function _scrubOAuthLoginBody(text) {
  * @param {(tokens:object)=>void} deps.saveTokens
  */
 export function createOpenAIOAuthLogin(deps) {
-  const { clientId, originator, extractAccountId, identityFromTokens, expiryFromAccessToken, saveTokens } = deps;
+  const { clientId, originator, extractAccountId, identityFromTokens, expiryFromAccessToken, saveTokens, createServerFn = createServer } = deps;
 
-  async function exchangeAuthorizationCode({ pkce, code }) {
+  async function exchangeAuthorizationCode({ pkce, code, signal }) {
     const cleanCode = String(code || '').trim();
     if (!cleanCode) throw new Error('[openai-oauth] authorization code is required');
-    const tokenRes = await fetch(TOKEN_URL, {
+    let tokenRes;
+    try {
+      tokenRes = await withOAuthTlsDiagnostics(() => fetch(TOKEN_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -58,8 +62,15 @@ export function createOpenAIOAuthLogin(deps) {
         code_verifier: pkce.verifier,
       }),
       redirect: 'error',
-      signal: AbortSignal.timeout(TOKEN_TIMEOUT_MS),
-    });
+      signal: AbortSignal.any([signal, AbortSignal.timeout(TOKEN_TIMEOUT_MS)]),
+      }));
+    } catch (cause) {
+      const code = classifyTransportError(cause)?.code;
+      const detail = typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(code)
+        ? transportErrorText({ code })
+        : null;
+      throw new Error(`[openai-oauth] 인증 코드 교환 실패: ${detail || '연결 요청에 실패했습니다.'}`, { cause });
+    }
     if (!tokenRes.ok) {
       const text = await tokenRes.text().catch(() => '');
       throw new Error(`[openai-oauth] token exchange ${tokenRes.status}: ${_scrubOAuthLoginBody(text).slice(0, 500)}`);
@@ -78,6 +89,7 @@ export function createOpenAIOAuthLogin(deps) {
       account_id: extractAccountId(json.access_token),
       identity: identityFromTokens(json.id_token, json.access_token),
     };
+    signal.throwIfAborted();
     saveTokens(tokens);
     return tokens;
   }
@@ -100,11 +112,14 @@ export function createOpenAIOAuthLogin(deps) {
     let server = null;
     let timeout = null;
     let finish = null;
+    const controller = new AbortController();
+    let exchangePromise = null;
     const waitForCallback = new Promise((resolve, reject) => {
       let settled = false;
       finish = (value, error = null) => {
         if (settled) return;
         settled = true;
+        controller.abort();
         if (timeout) clearTimeout(timeout);
         try {
           server?.close();
@@ -114,7 +129,7 @@ export function createOpenAIOAuthLogin(deps) {
         if (error) reject(error);
         else resolve(value);
       };
-      server = createServer(async (req, res) => {
+      server = createServerFn(async (req, res) => {
         const u = new URL(req.url || '/', `http://${CALLBACK_HOST}:${CALLBACK_PORT}`);
         if (u.pathname !== CALLBACK_PATH) {
           res.writeHead(404);
@@ -128,12 +143,20 @@ export function createOpenAIOAuthLogin(deps) {
           finish(null);
           return;
         }
-        res.writeHead(200, { 'Content-Type': OAUTH_PAGE_CONTENT_TYPE });
-        res.end(oauthSuccessHtml('OpenAI'));
+        if (settled) {
+          res.writeHead(409);
+          res.end('Login is already processing or closed');
+          return;
+        }
         try {
-          const tokens = await exchangeAuthorizationCode({ pkce, code });
+          exchangePromise ??= exchangeAuthorizationCode({ pkce, code, signal: controller.signal });
+          const tokens = await exchangePromise;
+          res.writeHead(200, { 'Content-Type': OAUTH_PAGE_CONTENT_TYPE });
+          res.end(oauthSuccessHtml('OpenAI'));
           finish(tokens);
         } catch (err) {
+          res.writeHead(502, { 'Content-Type': OAUTH_PAGE_CONTENT_TYPE });
+          res.end(oauthErrorHtml('앱에서 인증을 완료하지 못했습니다. 앱의 오류 내용을 확인하고 다시 시도해 주세요.'));
           finish(null, err instanceof Error ? err : new Error(String(err)));
         }
       });
@@ -159,9 +182,17 @@ export function createOpenAIOAuthLogin(deps) {
       url: url.toString(),
       waitForCallback,
       completeCode: async (input) => {
+        controller.signal.throwIfAborted();
         const parsed = parseOAuthCodeInput(input, { allowHashState: true });
         if (parsed.state && parsed.state !== state) throw new Error('[openai-oauth] OAuth state mismatch');
-        const tokens = await exchangeAuthorizationCode({ pkce, code: parsed.code });
+        let tokens;
+        try {
+          exchangePromise ??= exchangeAuthorizationCode({ pkce, code: parsed.code, signal: controller.signal });
+          tokens = await exchangePromise;
+        } catch (error) {
+          finish?.(null, error);
+          throw error;
+        }
         finish?.(tokens);
         return tokens;
       },

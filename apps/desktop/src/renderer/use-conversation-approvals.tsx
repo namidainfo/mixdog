@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { isOtherDevice, sessionUsesMultipleDevices } from '../shared/session-devices';
 import { ApprovalCard } from './ApprovalCard';
+import { UserQuestionCard } from './UserQuestionCard';
 import type { ComposerIslandFlash } from './ComposerIsland';
 import type { Snapshot } from './desktop-types';
 import { t } from './i18n';
@@ -60,6 +61,17 @@ export function useConversationApprovals(snapshot: Snapshot, routeSessionIdRef: 
           }
           return accepted;
         }}
+      />
+    );
+  } else if (!pendingApproval && snapshot.userQuestion) {
+    const request = snapshot.userQuestion;
+    approvalCard = (
+      <UserQuestionCard
+        key={`${request.sessionId}:${request.id}`}
+        request={request}
+        resolve={(response) =>
+          window.mixdogDesktop.resolveUserQuestionForSession(request.sessionId, request.id, response)
+        }
       />
     );
   }

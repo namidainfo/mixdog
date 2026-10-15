@@ -8,6 +8,7 @@ src/tui/dist/
 apps/desktop/.runtime/
 apps/desktop/.cache/
 apps/desktop/dist/
+apps/desktop/dist-personal*/
 apps/desktop/out/
 apps/desktop/artifacts/
 apps/relay/renderer/

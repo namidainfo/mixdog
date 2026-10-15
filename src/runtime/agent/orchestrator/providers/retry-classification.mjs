@@ -51,6 +51,32 @@ const CONTEXT_OVERFLOW_CODES = new Set([
   'context_window_exceeded',
   'model_context_window_exceeded',
 ]);
+// Trust and identity failures need caller intervention; record/protocol faults
+// remain transient and use the upstream provider recovery policy.
+const CERTIFICATE_VERIFICATION_ERROR_CODES = new Set([
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'UNABLE_TO_GET_ISSUER_CERT',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'CERT_HAS_EXPIRED',
+  'CERT_NOT_YET_VALID',
+  'CERT_REVOKED',
+  'CERT_SIGNATURE_FAILURE',
+  'CERT_UNTRUSTED',
+  'CERT_REJECTED',
+  'CERT_CHAIN_TOO_LONG',
+  'INVALID_CA',
+  'INVALID_PURPOSE',
+  'PATH_LENGTH_EXCEEDED',
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+  'ERR_TLS_CERT_SIGNATURE_ALGORITHM_UNSUPPORTED',
+  'ERR_SSL_CERTIFICATE_VERIFY_FAILED',
+]);
+
+export function isCertificateVerificationError(err) {
+  return boundedCauseChain(err).some((item) => CERTIFICATE_VERIFICATION_ERROR_CODES.has(String(item?.code || '')));
+}
 
 // Structured status fields a provider error / wire event may carry. A value is
 // accepted only when it is a real numeric HTTP status; string codes
@@ -140,6 +166,7 @@ export function classifyError(err, options = {}) {
     return 'transient';
   }
   if (kind === 'auth' || kind === 'permission') return 'auth';
+  if (isCertificateVerificationError(err)) return 'permanent';
   if (DETERMINISTIC_KINDS.has(kind)) return 'permanent';
   // An origin-TLS edge failure is final whatever code accompanies it.
   if (TERMINAL_EDGE_STATUSES.has(status)) return 'permanent';
@@ -167,7 +194,8 @@ function isInvalidToolCallFinish(err) {
   return !(Array.isArray(err.partialToolCalls) && err.partialToolCalls.length > 0);
 }
 
-// Transport symptoms, consulted only once no status verdict applied.
+// Transport symptoms, consulted only after cancellation/certificate denials
+// and once no status verdict applied.
 function classifyByTransport(err, chain, status) {
   if (isInvalidToolCallFinish(err)) return 'transient';
   // A stream that closed WITHOUT its terminal frame is a transport symptom,
@@ -400,6 +428,7 @@ export function isServerUnavailable(err) {
  */
 export function canFallbackNonStreaming(err, { signal } = {}) {
   if (!err || signal?.aborted) return false;
+  if (isCertificateVerificationError(err)) return false;
   const outcome = readStreamOutcome(err);
   // A completed turn needs no fallback; a user cancel must never be re-issued.
   if (outcome.terminalObserved || outcome.userAbort) return false;

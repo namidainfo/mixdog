@@ -1,3 +1,4 @@
+import './personal-profile';
 import { createHash } from 'node:crypto';
 import { existsSync, statSync } from 'node:fs';
 import * as nodeModule from 'node:module';
@@ -60,6 +61,7 @@ import { createDesktopTurnNotifier } from './desktop-turn-notifier';
 import { desktopIdentity } from './desktop-identity';
 import { notificationSoundPath, playWindowsNotificationSound, scaledNotificationSound } from './notification-sound';
 import { activateDesktopWindow, openDesktopNotificationSession } from './notification-window';
+import { SessionOpenRequests } from './session-open-requests';
 import type { RemoteHostWindows } from './remote-host-windows';
 import { createIdleReclaim, purgeRendererMemory, type IdleReclaim } from './idle-reclaim';
 import { watchCrashHandler } from './crash-handler-watch';
@@ -73,6 +75,7 @@ import {
   type GpuFallbackEnvironment,
 } from './gpu-recovery';
 import { registerDesktopIpc } from './ipc';
+import { personalWorktrailEnabled } from './ipc-worktrail';
 import { registerSshHostIpc } from './ipc-ssh-hosts';
 import { createBrowserHost, type BrowserHost } from './browser/host';
 import { createComputerHost, type ComputerHost } from './computer';
@@ -121,6 +124,7 @@ import {
 import {
   normalizeRendererComposerActionDiagnostic,
   normalizeRendererDiagnostic,
+  normalizeRendererInputDelayDiagnostic,
   normalizeRendererLongTaskDiagnostic,
   normalizeRendererWhatsNewDiagnostic,
   rendererRecoveryDecision,
@@ -186,7 +190,9 @@ if (process.env.MIXDOG_DESKTOP_USER_DATA) {
 
 // Branding must not relocate an existing profile. Development and notification
 // probes must never register electron.exe under the installed sender identity.
-const desktopBrand = desktopIdentity(app.isPackaged ? 'installed' : 'development');
+const desktopBrand = process.env.MIXDOG_PERSONAL === '1'
+  ? { ...desktopIdentity('installed'), name: 'Mixdog Personal', appId: 'io.namidainfo.mixdog.personal' }
+  : desktopIdentity(app.isPackaged ? 'installed' : 'development');
 const desktopUserData = app.getPath('userData');
 app.setName(desktopBrand.name);
 app.setPath('userData', desktopUserData);
@@ -438,6 +444,7 @@ function adoptLoginShellEnvironment(): Promise<void> {
     });
   });
 }
+let cancelSessionOpenRequests: ((error: string) => void) | null = null;
 // Several daemon connections live side by side: this PC's (`local`, the main
 // window's, always open) and one per ssh server window. Each connection owns
 // its service client, transport, RemoteSession and model proxy; desktop.init
@@ -498,6 +505,9 @@ const connectionDependencies: DesktopConnectionDependencies = {
     return allowed === null || allowed.includes(provider);
   },
   onDiagnostic: (connection, event, data) => {
+    if (connection.kind === 'local' && (event === 'desktop-transport-exit' || event === 'session-stream-reconnecting')) {
+      cancelSessionOpenRequests?.('Desktop daemon disconnected during navigation.');
+    }
     const entry =
       event === 'desktop-transport-error'
         ? {
@@ -723,6 +733,22 @@ const awakeService = new AgentAwakeService(powerSaveBlocker);
 let turnAttention: TurnAttention | null = null;
 let unsubscribeAwake: (() => void) | null = null;
 let unsubscribeServiceSettings: (() => void) | null = null;
+const sessionOpenRequests = new SessionOpenRequests((event, error) => {
+  writeBootDiagnostic(`session-open-${event}`, { ...(error ? { error } : {}) });
+  if (event === 'invalid' || event === 'failed' || event === 'delivery-failed') {
+    console.error(`[mixdog-session-open] ${event}`, error ?? '');
+  }
+}, (result) => {
+  void localService.invokeDesktopOperation('sessionOpenHandled', [result]).catch((error: unknown) => {
+    console.error('Could not acknowledge existing-session navigation:', error);
+  });
+});
+cancelSessionOpenRequests = (error) => sessionOpenRequests.failAll(error);
+let desktopWindowInitialized = false;
+
+function ensureSessionOpenWindow(): Promise<void> {
+  return showConnectionWindow(localConnection);
+}
 let unsubscribeUpdaterRelay: (() => void) | null = null;
 // OS notification on final answers: schedules notify even in the foreground,
 // ordinary conversations only while unfocused. Both respect the setting.
@@ -747,6 +773,7 @@ const playNotificationSound = async (): Promise<string> => {
 };
 const turnNotifier = createDesktopTurnNotifier({
   isEnabled: () => turnNotificationsEnabled,
+  focusOnNotify: process.env.MIXDOG_PERSONAL === '1',
   isSupported: () => Notification.isSupported(),
   isForeground: () =>
     Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && mainWindow.isFocused()),
@@ -852,6 +879,15 @@ function applyComputerObserveOnlySetting(enabled: boolean): void {
 // This PC's daemon drives the PC-wide features: the Browser Use host, the
 // updater and trash requests of paired phones, and the desktop settings.
 unsubscribeServiceSettings = localService.subscribeDesktopEvents(({ name, value }) => {
+  if (name === 'session-open-request') {
+    if (!sessionOpenRequests.request(value)) return;
+    if (!mainWindow && desktopWindowInitialized && !quitApproved) {
+      void ensureSessionOpenWindow().catch((error: unknown) => {
+        sessionOpenRequests.failAll(`Desktop window creation failed: ${String(error)}`);
+      });
+    }
+    return;
+  }
   if (name === 'session-runtime-released') {
     const event = value as { sessionId?: unknown; restore?: unknown } | null;
     if (isSessionId(event?.sessionId)) {
@@ -1206,6 +1242,7 @@ function disposeDesktopResources(): Promise<void> {
   turnNotifier.dispose();
   unsubscribeServiceSettings?.();
   unsubscribeServiceSettings = null;
+  sessionOpenRequests.failAll('Desktop is stopping.');
   unsubscribeUpdaterRelay?.();
   unsubscribeUpdaterRelay = null;
   awakeService.dispose();
@@ -1396,6 +1433,7 @@ function createMainBrowserWindow(
       preload: join(import.meta.dirname, '../preload/index.js'),
       additionalArguments: [
         `--mixdog-boot-id=${desktopBootId}`,
+        `--mixdog-personal-worktrail=${personalWorktrailEnabled(connection.kind) ? '1' : '0'}`,
         `--mixdog-process-started-at=${desktopProcessStartedAt}`,
         ...(desktopBootScenario ? [`--mixdog-boot-scenario=${desktopBootScenario}`] : []),
         ...(afterUpdate ? ['--mixdog-after-update=1'] : []),
@@ -1507,10 +1545,13 @@ function rendererDiagnosticListener(window: BrowserWindow): (event: Electron.Ipc
     }
     const composerAction = normalizeRendererComposerActionDiagnostic(payload);
     const longTask = composerAction ? null : normalizeRendererLongTaskDiagnostic(payload);
+    const inputDelay = composerAction || longTask ? null : normalizeRendererInputDelayDiagnostic(payload);
     if (composerAction) {
       diagnostics?.write('renderer-composer-action', composerAction);
     } else if (longTask) {
       diagnostics?.write('renderer-long-task', longTask);
+    } else if (inputDelay) {
+      diagnostics?.write('renderer-input-delay', inputDelay);
     } else {
       diagnostics?.write('renderer-error', normalizeRendererDiagnostic(payload));
     }
@@ -1720,6 +1761,36 @@ function createWindowPresentation(window: BrowserWindow, startupStartedAt: numbe
  *  the close-to-background behavior. Returns its Browser Use host. */
 function installLocalWindowFeatures(window: BrowserWindow): BrowserHost {
   mainWindow = window;
+  sessionOpenRequests.setTarget({
+    activate: () => {
+      if (!activateDesktopWindow(window)) throw new Error('Desktop window is unavailable.');
+    },
+    send: (request) => {
+      if (window.isDestroyed() || window.webContents.isDestroyed()) throw new Error('Desktop renderer is unavailable.');
+      window.webContents.send(DESKTOP_IPC.sessionOpenRequested, request);
+    },
+  });
+  const onSessionOpenReady = (event: Electron.IpcMainEvent, ready: unknown) => {
+    if (event.sender === window.webContents && event.senderFrame === window.webContents.mainFrame) {
+      sessionOpenRequests.setReady(ready === true);
+    }
+  };
+  const onSessionOpenHandled = (event: Electron.IpcMainEvent, result: unknown) => {
+    if (event.sender === window.webContents && event.senderFrame === window.webContents.mainFrame) {
+      sessionOpenRequests.acknowledge(result);
+    }
+  };
+  ipcMain.on(DESKTOP_IPC.sessionOpenNavigationReady, onSessionOpenReady);
+  ipcMain.on(DESKTOP_IPC.sessionOpenHandled, onSessionOpenHandled);
+  window.webContents.on('render-process-gone', () => sessionOpenRequests.setReady(false));
+  window.webContents.on('did-start-navigation', (_event, _url, isInPlace, isMainFrame) => {
+    if (isMainFrame && !isInPlace) sessionOpenRequests.setReady(false);
+  });
+  window.on('closed', () => {
+    sessionOpenRequests.setTarget(null);
+    ipcMain.removeListener(DESKTOP_IPC.sessionOpenNavigationReady, onSessionOpenReady);
+    ipcMain.removeListener(DESKTOP_IPC.sessionOpenHandled, onSessionOpenHandled);
+  });
   if (!computerHost) {
     computerHost = createComputerHost({
       bridgeEnabled: false,
@@ -2161,9 +2232,11 @@ if (!app.requestSingleInstanceLock()) {
       // the final-answer rule needs background work as well as turn state.
       const unsubscribeTurnSessions = localService.subscribeSessions(turnNotifier.onSessions);
       const unsubscribeTurnAgents = localService.subscribeAgentPool(turnNotifier.onAgentPool);
+      const unsubscribeTurnStates = localService.subscribeSessionStates(turnNotifier.onSessionState);
       unsubscribeTurnNotifier = () => {
         unsubscribeTurnSessions();
         unsubscribeTurnAgents();
+        unsubscribeTurnStates();
       };
       void settingsStore
         .read()
@@ -2251,6 +2324,7 @@ if (!app.requestSingleInstanceLock()) {
         },
       });
       await showConnectionWindow(localConnection);
+      desktopWindowInitialized = true;
       void serverWindowRestore.restore().catch((error: unknown) => {
         console.error('Failed to reopen the server windows:', error);
       });

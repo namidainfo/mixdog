@@ -54,7 +54,8 @@ export const USAGE_DASHBOARD_REQUEST_TIMEOUT_MS = 30_000;
 const MAX_DASHBOARD_KEYS = 32;
 const MAX_ROWS = 24;
 const MAX_ROW_KEYS = 32;
-const MAX_WINDOWS = 12;
+const MAX_WINDOWS = 512;
+const MAX_ACCOUNTS = 20;
 const MAX_WINDOW_KEYS = 16;
 const MAX_RESET_CREDITS = 24;
 const MAX_CREDIT_KEYS = 12;
@@ -147,6 +148,16 @@ function sanitizeRow(value: unknown): UsageRecord | null {
   // stay as scalars, quota windows and reset credits keep their own scalars.
   if (Array.isArray(source.windows)) {
     row.windows = scalarRecordList(source.windows, MAX_WINDOWS, MAX_WINDOW_KEYS);
+  }
+  if (Array.isArray(source.accounts)) {
+    row.accounts = source.accounts.slice(0, MAX_ACCOUNTS).map((account) => {
+      const sanitized = scalarRecord(account, MAX_ROW_KEYS);
+      if (!sanitized) return null;
+      sanitized.windows = scalarRecordList((account as UsageRecord).windows, MAX_WINDOWS, MAX_WINDOW_KEYS);
+      const resetCredits = sanitizeResetCredits((account as UsageRecord).resetCredits);
+      if (resetCredits) sanitized.resetCredits = resetCredits;
+      return sanitized;
+    }).filter((account): account is UsageRecord => account !== null);
   }
   const resetCredits = sanitizeResetCredits(source.resetCredits);
   if (resetCredits) row.resetCredits = resetCredits;
@@ -366,7 +377,7 @@ export function subscribeAccountSwitches(listener: (provider: string) => void): 
  *  in progress. Reset credits and other quota fields belong to the old account
  *  and must not survive either case. `refreshedAt` is NOT advanced: any supplied
  *  windows are last-known data, not a live result. */
-export function applyAccountUsageWindows(provider: string, windows: unknown): boolean {
+export function applyAccountUsageWindows(provider: string, windows: unknown, accountId?: string | null): boolean {
   const win = ensureHost();
   if (!win) return false;
   const id = String(provider || '');
@@ -374,7 +385,16 @@ export function applyAccountUsageWindows(provider: string, windows: unknown): bo
   const rows = Array.isArray(snapshot.dashboard.rows) ? (snapshot.dashboard.rows as UsageRecord[]) : [];
   const index = rows.findIndex((row) => String(row?.id || '') === id);
   if (!id || index < 0) return false;
-  const accountWindows = scalarRecordList(windows, MAX_WINDOWS, MAX_WINDOW_KEYS);
+  const selectedAccount = Array.isArray(rows[index].accounts)
+    ? (rows[index].accounts as UsageRecord[]).find((account) => account.accountId === accountId)
+    : undefined;
+  // Missing switch payloads are not empty measurements. Only the chosen
+  // account's own evidence can fill the provider summary while it is checked.
+  const accountWindows = scalarRecordList(
+    Array.isArray(windows) ? windows : selectedAccount?.windows,
+    MAX_WINDOWS,
+    MAX_WINDOW_KEYS
+  );
   const dashboard: UsageRecord = {
     ...snapshot.dashboard,
     rows: rows.map((row, position) =>
@@ -387,6 +407,16 @@ export function applyAccountUsageWindows(provider: string, windows: unknown): bo
             windows: accountWindows,
             status: 'checking',
             updatedAt: null,
+            ...(Array.isArray(row.accounts) ? {
+              accounts: row.accounts.map((value) => {
+                const account = value as UsageRecord;
+                return {
+                  ...account,
+                  selected: accountId ? account.accountId === accountId : false,
+                  ...(account.accountId === accountId ? { windows: accountWindows, status: 'checking', stale: true, refreshState: 'pending' } : {}),
+                };
+              }),
+            } : {}),
           }
         : row
     ),
@@ -398,17 +428,30 @@ export function applyAccountUsageWindows(provider: string, windows: unknown): bo
 
 /** An unsuccessful check must settle without restoring another account's
  *  quotas or leaving its replacement on an indefinite loading message. */
-function finishUsageChecks(win: Window): void {
+function finishUsageChecks(win: Window, reason?: string): void {
   const rows = snapshot.dashboard.rows as UsageRecord[] | undefined;
-  if (!rows?.some((row) => row.status === 'checking')) return;
+  if (!rows) return;
+  let changed = false;
+  const finishRow = (row: UsageRecord): UsageRecord => {
+    const settled = Array.isArray(row.accounts)
+      ? { ...row, accounts: (row.accounts as UsageRecord[]).map(finishRow) }
+      : row;
+    if (row.status !== 'checking') return settled;
+    changed = true;
+    const known = Array.isArray(row.windows) && row.windows.length > 0;
+    return {
+      ...settled,
+      status: known ? 'partial' : 'unavailable',
+      stale: known || row.stale === true,
+      refreshState: reason ? 'failed' : 'unavailable',
+      refreshError: reason,
+    };
+  };
   const dashboard: UsageRecord = {
     ...snapshot.dashboard,
-    rows: rows.map((row) => {
-      if (row.status !== 'checking') return row;
-      const status = Array.isArray(row.windows) && row.windows.length > 0 ? 'partial' : 'unavailable';
-      return { ...row, status };
-    }),
+    rows: rows.map(finishRow),
   };
+  if (!changed) return;
   writeCache(win, dashboard);
   publish({ ...snapshot, dashboard });
 }
@@ -422,7 +465,7 @@ function isFresh(): boolean {
   );
 }
 
-function failRefresh(win: Window, timedOut: boolean): void {
+function failRefresh(win: Window, timedOut: boolean, reason?: string): void {
   if (timedOut) {
     // The underlying host call may still be unresolved. Retiring its generation
     // is what makes the bounded retry safe to start alongside it: a late
@@ -452,8 +495,9 @@ function failRefresh(win: Window, timedOut: boolean): void {
       USAGE_DASHBOARD_RETRY_DELAY_MS
     );
   }
-  // Preserve known quotas, but settle account-switch placeholders as unknown.
-  finishUsageChecks(win);
+  // Settle both provider summaries and their account-specific checks, retaining
+  // the last measurements and the actual failure instead of perpetual pending.
+  finishUsageChecks(win, reason);
   publishStatus(retryable && snapshot.refreshedAt === 0 ? 'loading' : settledStatus());
 }
 
@@ -515,7 +559,11 @@ async function runRefresh(
   } catch (cause) {
     // A retired generation has no owner: no publish, no cache write, no retry.
     if (!owns(win, id, generation)) return;
-    failRefresh(win, (cause as { code?: string } | null)?.code === USAGE_TIMEOUT_CODE);
+    failRefresh(
+      win,
+      (cause as { code?: string } | null)?.code === USAGE_TIMEOUT_CODE,
+      String((cause as { message?: string } | null)?.message || cause).slice(0, MAX_STRING_LENGTH)
+    );
     return;
   }
   if (!owns(win, id, generation)) return;
@@ -614,7 +662,7 @@ function bindAccountChanges(win: Window, api: UsageApi): void {
     latestAccountChanges.set(change.provider, { accountId: change.accountId, at: change.at });
     // Read the CURRENT selection, not meters embedded in a possibly replayed
     // session frame. Retire old requests before the confirming account read.
-    applyAccountUsageWindows(change.provider, undefined);
+    applyAccountUsageWindows(change.provider, undefined, change.accountId);
     void refreshUsageDashboardAfterAuth(api, [change.provider]);
   };
   const releaseState = api.subscribeState?.(receive);

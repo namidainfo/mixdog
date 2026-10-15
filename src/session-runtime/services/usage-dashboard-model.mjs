@@ -60,6 +60,7 @@ export function normaliseWindows(value, source = 'config') {
         null
       );
       const usedPct = num(entry.usedPct ?? entry.used_pct ?? entry.percent ?? entry.pct, null);
+      const remainingPct = num(entry.remainingPct, null);
       const remainingCredits = num(
         entry.remainingCredits ?? entry.remaining_credits ?? entry.creditsRemaining ?? entry.credits_remaining,
         null
@@ -71,16 +72,23 @@ export function normaliseWindows(value, source = 'config') {
         label: clean(entry.label) || String(key || 'USE').toUpperCase(),
         source: clean(entry.source) || source,
       };
+      if (entry.id) out.id = clean(entry.id);
+      const windowSeconds = num(entry.windowSeconds ?? entry.limit_window_seconds, null);
+      if (windowSeconds !== null) out.windowSeconds = windowSeconds;
       if (remainingUsd !== null) out.remainingUsd = round(remainingUsd, 4);
       if (limitUsd !== null) out.limitUsd = round(limitUsd, 4);
       if (usedUsd !== null) out.usedUsd = round(usedUsd, 4);
       if (usedPct !== null) out.usedPct = round(usedPct, 2);
+      else if (remainingPct !== null) out.usedPct = round(100 - remainingPct, 2);
       if (remainingCredits !== null) out.remainingCredits = round(remainingCredits, 4);
       if (limitCredits !== null) out.limitCredits = round(limitCredits, 4);
       if (usedCredits !== null) out.usedCredits = round(usedCredits, 4);
       if (resetAt) out.resetAt = resetAt;
       if (out.usedPct === undefined && out.limitUsd > 0 && out.usedUsd !== undefined) {
         out.usedPct = round(Math.min(100, (out.usedUsd * 100) / out.limitUsd), 2);
+      }
+      if (out.usedPct === undefined && out.limitCredits > 0 && out.usedCredits !== undefined) {
+        out.usedPct = round(Math.min(100, (out.usedCredits * 100) / out.limitCredits), 2);
       }
       return out;
     })
@@ -487,6 +495,7 @@ function snapshotRow(row) {
     ...row,
     ...(row.credits ? { credits: { ...row.credits } } : {}),
     windows: row.windows.map((window) => ({ ...window })),
+    ...(row.accounts ? { accounts: row.accounts.map(snapshotRow) } : {}),
     ...(row.resetCredits
       ? {
           resetCredits: {

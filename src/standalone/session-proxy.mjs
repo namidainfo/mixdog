@@ -32,6 +32,7 @@ export function createSessionProxyFactory({ attachSession, ensureDaemon, closeId
       cwd,
       provider: options.provider,
       model: options.model,
+      effort: options.effort,
       toolMode: options.toolMode || 'full',
       remote: options.remote === true,
       desktopSession: options.desktopSession ?? null,
@@ -40,9 +41,9 @@ export function createSessionProxyFactory({ attachSession, ensureDaemon, closeId
       ...(options.worktree ? { worktree: options.worktree } : {}),
     };
     const attachment = await pool.ensure({ cwd, log });
-    const created = await attachment.client.create(openParams, {
-      callId: `session-create:${process.pid}:${randomUUID()}`,
-    });
+    const created = options.sessionId
+      ? await attachment.client.subscribe({ sessionId: options.sessionId, open: openParams, baseRevision: null })
+      : await attachment.client.create(openParams, { callId: `session-create:${process.pid}:${randomUUID()}` });
     const sessionId = String(created?.sessionId || '');
     if (!sessionId) throw new Error('session.create returned no sessionId');
     const binding = { attachment, sessionId, disposed: false };
@@ -56,7 +57,7 @@ export function createSessionProxyFactory({ attachSession, ensureDaemon, closeId
     const { applyResult, afterPendingTransition } = transitions;
     const proxyView = createProxyView({ binding, projection, pool, resync, recover, log });
     view = proxyView.view;
-    const { remoteCall, submitAsync, submit, abortAsync, abort, resolveToolApproval } = createRemoteActions({
+    const { remoteCall, submitAsync, submit, abortAsync, abort, resolveToolApproval, resolveUserQuestion } = createRemoteActions({
       binding,
       projection,
       openParams,
@@ -86,17 +87,42 @@ export function createSessionProxyFactory({ attachSession, ensureDaemon, closeId
         await binding.attachment.client.read({ sessionId: target, open: openParams, baseRevision: null });
         return true;
       },
+      async readSessionSnapshot(targetSessionId) {
+        const target = String(targetSessionId || '');
+        if (!target) throw new TypeError('sessionId is required');
+        const result = await binding.attachment.client.read({ sessionId: target, open: openParams, baseRevision: null });
+        if (result?.sessionId !== target || !result.full) throw new Error('Session read returned another identity or no snapshot.');
+        return result.full;
+      },
       submitAsync,
       submit,
       abortAsync,
       abort,
       resolveToolApproval,
+      resolveUserQuestion,
+      async approveAsync(approvalId, decision) {
+        const targetSessionId = binding.sessionId;
+        const result = await sendCall('session.approve', {
+          sessionId: targetSessionId, approvalId, decision, open: openParams,
+          baseRevision: projection.baseRevisionFor(),
+        }, randomUUID());
+        if (binding.disposed || binding.sessionId !== targetSessionId || result?.sessionId !== targetSessionId)
+          throw new Error('Session identity changed during approval.');
+        await applyResult(result, 'approval');
+        return result?.approved === true;
+      },
+      handoff: ({ signal } = {}) => sendCall('session.handoff', { sessionId: binding.sessionId }, randomUUID(), { signal }),
       dispose: proxyView.dispose,
     };
 
     for (const action of [...SESSION_READ_ACTIONS, ...SESSION_CONFIGURE_ACTIONS]) {
       if (!Object.hasOwn(base, action)) base[action] = (...args) => remoteCall(action, args);
     }
+    base.setToolMode = async (mode) => {
+      const result = await remoteCall('setToolMode', [mode]);
+      openParams.toolMode = result;
+      return result;
+    };
     return base;
   };
 }

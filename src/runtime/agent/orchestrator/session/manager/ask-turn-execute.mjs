@@ -166,8 +166,12 @@ export async function runAskAgentLoop({
   const session = turn.session;
   const agentLoop = await runAbortable(turnSignal, () => _getAgentLoop());
   const priorToolApprovalHook = session.toolApprovalHook;
+  const priorUserQuestionHook = session.userQuestionHook;
   if (typeof askOpts?.onToolApproval === 'function') {
     session.toolApprovalHook = askOpts.onToolApproval;
+  }
+  if (typeof askOpts?.onUserQuestion === 'function') {
+    session.userQuestionHook = askOpts.onUserQuestion;
   }
   try {
     if (!input.promptSource) {
@@ -213,6 +217,11 @@ export async function runAskAgentLoop({
       delete session.toolApprovalHook;
     } else {
       session.toolApprovalHook = priorToolApprovalHook;
+    }
+    if (priorUserQuestionHook === undefined) {
+      delete session.userQuestionHook;
+    } else {
+      session.userQuestionHook = priorUserQuestionHook;
     }
   }
 }

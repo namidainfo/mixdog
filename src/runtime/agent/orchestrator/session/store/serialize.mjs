@@ -34,7 +34,7 @@ export function _sessionForDisk(session) {
   //    estimate live context growth) — a duplicate of the working transcript
   //    that must never be serialized (mid-turn saves would bloat the file and
   //    persist a non-canonical message array).
-  //  - toolApprovalHook: the askOpts.onToolApproval callback wired for the
+  //  - toolApprovalHook / userQuestionHook: the interactive callbacks wired for the
   //    turn — a function that must never be serialized.
   //  - _providerPrefixGuardState: hashes of the live provider projection.
   //    Stored history intentionally omits inline media, so these hashes are
@@ -44,6 +44,7 @@ export function _sessionForDisk(session) {
     typeof session === 'object' &&
     (Object.hasOwn(session, 'liveTurnMessages') ||
       Object.hasOwn(session, 'toolApprovalHook') ||
+      Object.hasOwn(session, 'userQuestionHook') ||
       Object.hasOwn(session, '_providerPrefixGuardState'));
   const messages = Array.isArray(session?.messages) ? session.messages : null;
   const out = messages?.length ? _messagesForDisk(messages) : messages;
@@ -58,6 +59,7 @@ function _withoutTransientFields(session) {
   const {
     liveTurnMessages: _dropLTM,
     toolApprovalHook: _dropTAH,
+    userQuestionHook: _dropUQH,
     _providerPrefixGuardState: _dropPPGS,
     ...rest
   } = session;

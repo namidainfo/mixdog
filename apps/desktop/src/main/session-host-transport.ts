@@ -22,6 +22,7 @@ export interface SessionClient {
   submit(args?: Record<string, unknown>, options?: SessionCallOptions): Promise<Record<string, unknown>>;
   abort(args?: Record<string, unknown>, options?: SessionCallOptions): Promise<Record<string, unknown>>;
   approve(args?: Record<string, unknown>, options?: SessionCallOptions): Promise<Record<string, unknown>>;
+  answer(args?: Record<string, unknown>, options?: SessionCallOptions): Promise<Record<string, unknown>>;
   configure(args?: Record<string, unknown>, options?: SessionCallOptions): Promise<Record<string, unknown>>;
   close(reason?: string): Promise<void>;
 }

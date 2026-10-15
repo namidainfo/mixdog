@@ -546,7 +546,7 @@ function windowIntervals(instance, events, mixed) {
  * overlapping `mixed` spans never calibrate the rate: their outside share is
  * the rise that Mixdog's own dollars at that rate do not cover.
  */
-function allocateQuota(instances, events, mixed = [], listed = []) {
+function allocateQuota(instances, events, mixed = [], listed = [], externalPrior = []) {
   const shares = new Float64Array(events.length);
   const outside = [];
   const calibration = new Map();
@@ -565,7 +565,12 @@ function allocateQuota(instances, events, mixed = [], listed = []) {
     instance.outsideUnpriced = 0;
     instance.intervals = windowIntervals(instance, events, mixed);
     const own = instance.intervals.filter((interval) => !interval.mixed);
-    const prior = earlierWindows(listed, instance).flatMap(calibrationOf);
+    const localPrior = earlierWindows(listed, instance).flatMap(calibrationOf);
+    // External observations calibrate only; they never become ledger events,
+    // meter points or chart series. Do not double-weight a local window or
+    // let future evidence change an earlier window's estimate.
+    const before = Math.min(instance.startMs, ...localPrior.map((interval) => interval.fromMs));
+    const prior = [...externalPrior.filter((interval) => interval.toMs <= before), ...localPrior];
     instance.estimate = estimateQuotaValue(own, prior);
     // The estimate still splits the meter, but it is shown in dollars only
     // once it rests on more than a few coincidences: a light Mixdog spend
@@ -842,6 +847,30 @@ function readQuotaRows(db, { provider, account, label }) {
     .all(provider, account, label);
 }
 
+export function selectQuotaSeries(db, options = {}) {
+  return pickSelection(listQuotaSeries(db), options);
+}
+
+/** Reuse the meter/interval rules for a separate, calibration-only store. */
+export function readQuotaCalibration(db, selection, events, now = Date.now()) {
+  const instances = quotaInstances(readQuotaRows(db, selection), selection.label, now).filter(
+    (instance) => !instance.idle
+  );
+  const mixed = finerOutsideSpans(db, selection, events, instances, now);
+  return instances
+    .flatMap((instance) => windowIntervals(instance, events, mixed))
+    .filter((interval) => interval.measured && interval.priced && !interval.mixed)
+    .map(({ fromMs, toMs, points, costUsd, resolution, measured, priced }) => ({
+      fromMs, toMs, points, costUsd, resolution, measured, priced,
+    }));
+}
+
+function calibrationFor(selection, calibration) {
+  return calibration && ['provider', 'account', 'label'].every((key) => calibration[key] === selection[key])
+    ? calibration.intervals
+    : [];
+}
+
 /**
  * The history of one limit window over a period: the meter's path, who moved
  * it (per model and hover slot), where each window in it peaked and, for the
@@ -861,6 +890,7 @@ export function readQuotaHistory(
     fromMs = null,
     toMs = null,
     now = Date.now(),
+    calibration = null,
   } = {}
 ) {
   const subscriptions = listQuotaSeries(db);
@@ -890,7 +920,8 @@ export function readQuotaHistory(
     shown,
     events,
     finerOutsideSpans(db, selection, events, calibrated, now),
-    listed
+    listed,
+    calibrationFor(selection, calibration)
   );
   const points = quotaPoints(shown);
 
@@ -1020,7 +1051,7 @@ export function readQuotaHistory(
  */
 export function readQuotaWindows(
   db,
-  { provider = '', account = '', label = '', inUse = {}, page = 0, now = Date.now() } = {}
+  { provider = '', account = '', label = '', inUse = {}, page = 0, now = Date.now(), calibration = null } = {}
 ) {
   const selection = pickSelection(listQuotaSeries(db), { provider, account, label, inUse });
   const base = { generatedAt: now, selection, page: 0, pageCount: 0, total: 0, windows: [] };
@@ -1041,7 +1072,8 @@ export function readQuotaWindows(
     fromMs: Math.min(...calibrated.map((instance) => instance.startMs)),
     toMs: Math.max(...shown.map((instance) => instance.endMs)),
   });
-  allocateQuota(shown, events, finerOutsideSpans(db, selection, events, calibrated, now), chronological);
+  allocateQuota(shown, events, finerOutsideSpans(db, selection, events, calibrated, now), chronological,
+    calibrationFor(selection, calibration));
   return {
     ...base,
     page: index,

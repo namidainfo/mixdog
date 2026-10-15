@@ -288,13 +288,36 @@ export function isReadonlySelectable(tool) {
 
 export function applyDeferredToolSurface(session, mode, extraTools = [], options = {}) {
   if (!session || !Array.isArray(session.tools)) return session;
+  if (mode === 'none' || mode === 'questions') {
+    // Retain the work catalog privately. Restricted modes never expose a
+    // deferred/native pool; questions permits only the explicit question tool.
+    session.noToolCatalog = [...new Map([...(session.noToolCatalog || []), ...session.tools, ...extraTools, ...deferredCatalogUnion(session)]
+      .map((tool) => [tool.name, tool])).values()];
+    const questionTools = mode === 'questions'
+      ? filterDisallowedTools(session.noToolCatalog, [...(session.disallowedTools || []), ...(options.disallowed || [])])
+        .filter((tool) => tool.name === 'request_user_input').map(activeToolForSurface)
+      : [];
+    const questionNames = questionTools.map((tool) => tool.name);
+    session.tools.length = 0;
+    session.tools.push(...questionTools);
+    session.deferredToolCatalog = questionTools.slice();
+    session.deferredLateToolCatalog = [];
+    session.deferredCallableTools = questionNames.slice();
+    session.deferredSelectedTools = questionNames.slice();
+    session.deferredDiscoveredTools = [];
+    session.deferredDefaultTools = questionNames.slice();
+    session.deferredNativeTools = false;
+    session.deferredProviderMode = 'none';
+    session.deferredSurfaceMode = mode;
+    return session;
+  }
   const providerMode = deferredProviderMode(options.provider || session.provider);
   const byName = new Map();
   // Rebuild from the full catalog, not just its eager projection. Current
   // definitions still take precedence over retained definitions.
   const candidates = filterDisallowedTools(
     filterModelEditTools(
-      [...session.tools, ...(extraTools || []), ...deferredCatalogUnion(session)],
+      [...session.tools, ...(extraTools || []), ...(session.noToolCatalog || []), ...deferredCatalogUnion(session)],
       options.model || session.model
     ),
     [...(session.disallowedTools || []), ...(options.disallowed || [])]
@@ -305,6 +328,7 @@ export function applyDeferredToolSurface(session, mode, extraTools = [], options
     byName.set(name, activeToolForSurface(tool));
   }
   const catalog = sortedCatalogByMeasuredUsage([...byName.values()]);
+  delete session.noToolCatalog;
   const defaultNames = defaultDeferredToolNames(catalog, mode);
   // Solo keeps `agent` in the deferred pool: loadable on request, never eager.
   if (session.orchestrationMode === 'none') defaultNames.delete('agent');
@@ -406,6 +430,7 @@ export function rebuildDeferredToolSurfaceForProvider(session, provider) {
 // and idempotent: no genuinely-new MCP name => no-op / no mutation.
 export function refreshInitialDeferredMcpSurface(session, liveMcpTools) {
   if (!session || !Array.isArray(session.messages)) return false;
+  if (session.deferredSurfaceMode === 'none' || session.deferredSurfaceMode === 'questions') return false;
   if (session.deferredProviderMode === 'full') return false;
   const live = filterDisallowedTools(Array.isArray(liveMcpTools) ? liveMcpTools : [], session.disallowedTools);
   const byName = new Map();
@@ -465,6 +490,7 @@ export function refreshInitialDeferredMcpSurface(session, liveMcpTools) {
  */
 export function reconcileDeferredMcpToolCatalog(session, liveMcpTools) {
   if (!session || !Array.isArray(session.tools)) return null;
+  if (session.deferredSurfaceMode === 'none' || session.deferredSurfaceMode === 'questions') return null;
   const cached = RECONCILE_STATE.get(session);
   if (cached && reconcileStateMatches(cached, reconcileStateOf(session, liveMcpTools))) return null;
   const result = reconcileDeferredMcpToolCatalogUncached(session, liveMcpTools);
@@ -617,6 +643,19 @@ export function refreshDeferredMcpToolCatalog(session, config = null) {
 }
 
 export function selectDeferredTools(session, names, mode, { exact = false } = {}) {
+  if (mode === 'none' || session?.deferredSurfaceMode === 'none') {
+    return { added: [], already: [], missing: [], blocked: names.map((name) => ({ name, reason: 'no-tools mode' })), native: false };
+  }
+  if (mode === 'questions' || session?.deferredSurfaceMode === 'questions') {
+    const available = session?.tools?.some((tool) => tool.name === 'request_user_input');
+    return {
+      added: [],
+      already: available ? names.filter((name) => name === 'request_user_input') : [],
+      missing: available ? [] : names.filter((name) => name === 'request_user_input'),
+      blocked: names.filter((name) => name !== 'request_user_input').map((name) => ({ name, reason: 'question-only mode' })),
+      native: false,
+    };
+  }
   // Resolve against the union of the boot-frozen catalog and the late-connected
   // MCP catalog so load_tool can load a late tool. Native providers register it
   // independently; canonical fallback providers already expose the full array.

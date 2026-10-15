@@ -18,6 +18,7 @@ import type {
   DesktopSubmitOptions,
   SessionSnapshot,
   ToolApprovalDecision,
+  UserQuestionResponse,
 } from '../shared/contract';
 import type { DesktopService } from './desktop-service-contract';
 
@@ -321,6 +322,9 @@ export class CaptureService implements DesktopService {
   }
   resolveToolApprovalForSession(_sessionId: string, _id: string, _decision: ToolApprovalDecision): boolean {
     return true;
+  }
+  async resolveUserQuestionForSession(_sessionId: string, _id: string, _response: UserQuestionResponse): Promise<boolean> {
+    return false;
   }
 
   async submitNewTask(

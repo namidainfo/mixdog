@@ -21,6 +21,7 @@ export function createSetupApi({
   cachedProviderSetup,
   getUsageDashboard,
   consumeCodexRateLimitResetCredit,
+  requestConnectedAccountQuotaWindows,
   collectProviderModels,
 }) {
   return {
@@ -60,6 +61,13 @@ export function createSetupApi({
         throw new Error('Codex reset is unavailable');
       }
       return await consumeCodexRateLimitResetCredit(options);
+    },
+    async requestConnectedAccountQuotaWindows() {
+      await awaitKeychainPrewarm();
+      if (typeof requestConnectedAccountQuotaWindows !== 'function') {
+        throw new Error('Connected-account quota requests are unavailable');
+      }
+      return await requestConnectedAccountQuotaWindows();
     },
     async listProviderModels(options = {}) {
       return await collectProviderModels({

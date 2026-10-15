@@ -155,6 +155,7 @@ function wireProviderUsage(boot) {
     hasProviderSetupCached,
     getUsageDashboard,
     consumeCodexRateLimitResetCredit,
+    requestConnectedAccountQuotaWindows,
   } = createProviderUsage({
     caches: providerUsageCaches,
     getReg: () => boot.reg,
@@ -173,6 +174,7 @@ function wireProviderUsage(boot) {
     hasProviderSetupCached,
     getUsageDashboard,
     consumeCodexRateLimitResetCredit,
+    requestConnectedAccountQuotaWindows,
   });
 }
 

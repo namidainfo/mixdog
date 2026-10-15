@@ -34,6 +34,12 @@ export function packageRootDir() {
   return _PACKAGE_ROOT;
 }
 
+export function isPersonalInstall() {
+  return process.env.MIXDOG_PERSONAL === '1';
+}
+
+export const PERSONAL_UPDATE_DISABLED_ERROR = 'Updates are disabled in Mixdog Personal. Use a personal installer.';
+
 /**
  * isDevInstall() — true when the running mixdog is a git checkout / clone (or
  * otherwise not a normal npm install), so auto-update must be skipped: an
@@ -53,6 +59,7 @@ export function isDevInstall() {
 
 let _localVersionCache = null;
 export function localPackageVersion() {
+  if (isPersonalInstall() && process.env.MIXDOG_PERSONAL_VERSION) return process.env.MIXDOG_PERSONAL_VERSION;
   if (_localVersionCache) return _localVersionCache;
   try {
     const raw = JSON.parse(readFileSync(_PACKAGE_JSON_PATH, 'utf8'));
@@ -119,6 +126,9 @@ async function fetchLatestFromRegistry() {
  */
 export async function checkLatestVersion({ force = false, dataDir } = {}) {
   const currentVersion = localPackageVersion();
+  if (isPersonalInstall()) {
+    return { currentVersion, latestVersion: null, updateAvailable: false, lastCheckedAt: 0 };
+  }
   const cache = force ? null : readCache(dataDir);
   const now = Date.now();
   if (cache && typeof cache.lastCheckedAt === 'number' && now - cache.lastCheckedAt < CACHE_TTL_MS) {

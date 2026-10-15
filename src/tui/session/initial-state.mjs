@@ -26,6 +26,7 @@ export function createInitialSessionState({ runtime, runtimeCwd, baseRouteState 
     queued: [],
     thinking: null,
     toolApproval: null,
+    userQuestion: null,
     // How the last approval ended and from which device, so every device can
     // say who answered ({ id, approved, device, at }).
     toolApprovalResult: null,

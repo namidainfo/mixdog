@@ -11,7 +11,10 @@ import { hasActiveBackgroundTasks } from '../../../runtime/shared/background-tas
 export function createBusyTracker({ sessions, currentSessionId }) {
   function stateBusy(state) {
     return (
-      state?.busy === true || state?.commandBusy === true || (Array.isArray(state?.queued) && state.queued.length > 0)
+      state?.busy === true ||
+      state?.commandBusy === true ||
+      state?.userQuestion != null ||
+      (Array.isArray(state?.queued) && state.queued.length > 0)
     );
   }
 

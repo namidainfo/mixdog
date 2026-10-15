@@ -436,6 +436,7 @@ function windowFromPercent(label, value, source) {
     label: labelForDuration(windowSeconds || windowMinutes * 60, label),
     source,
   };
+  if (windowSeconds || windowMinutes) out.windowSeconds = windowSeconds || windowMinutes * 60;
   if (usedPct !== null) out.usedPct = round(usedPct, 2);
   if (limitUsd !== null) out.limitUsd = round(limitUsd, 4);
   if (usedUsd !== null) out.usedUsd = round(usedUsd, 4);
@@ -540,13 +541,14 @@ function balanceFromExtraUsage(extra) {
   const limitCents = num(extra.monthly_limit, null);
   if (limitCents === null) return null;
   const limit = limitCents / 100;
-  const used = num(extra.used_credits, 0) / 100;
+  const usedCents = num(extra.used_credits, null);
+  const used = usedCents === null ? null : usedCents / 100;
   return {
     source: 'anthropic-oauth-extra',
     period: 'monthly',
     budgetUsd: round(limit, 4),
-    spentUsd: round(used, 4),
-    remainingUsd: round(Math.max(0, limit - used), 4),
+    spentUsd: used === null ? null : round(used, 4),
+    remainingUsd: used === null ? null : round(Math.max(0, limit - used), 4),
     currency: cleanString(extra.currency) || 'USD',
   };
 }
@@ -672,7 +674,7 @@ function scopedAnthropicWindows(data, source) {
     const scope = entry.scope?.model || entry.scope?.surface;
     const label = scopedWindowLabel(scope?.display_name || scope?.id);
     if (!label) continue;
-    const window = windowFromPercent(label, { percent: entry.percent, resets_at: entry.resets_at }, source);
+    const window = windowFromPercent(label, entry, source);
     if (window) byLabel.set(label, window);
   }
   return [...byLabel.values()];
@@ -683,22 +685,24 @@ function scopedAnthropicWindows(data, source) {
 function anthropicLimitWindows(limits, source) {
   return limits
     .filter((x) => x && !x.scope?.model && !x.scope?.surface)
-    .map((x) => windowFromPercent(limitWindowLabel(x), { percent: x.percent, resets_at: x.resets_at }, source))
+    .map((x) => windowFromPercent(limitWindowLabel(x), x, source))
     .filter(Boolean);
 }
 
 // The extra-usage (pay-as-you-go) window when it is enabled, else null.
 function anthropicExtraUsageWindow(extraUsage) {
   if (extraUsage?.is_enabled !== true) return null;
-  const limitUsd = num(extraUsage.monthly_limit, 0) / 100;
-  const usedUsd = num(extraUsage.used_credits, 0) / 100;
+  const limit = num(extraUsage.monthly_limit, null);
+  const used = num(extraUsage.used_credits, null);
+  const limitUsd = limit === null ? null : limit / 100;
+  const usedUsd = used === null ? null : used / 100;
   return windowFromPercent(
     'EXTRA',
     {
       utilization: extraUsage.utilization,
       limit_dollars: limitUsd,
       used_dollars: usedUsd,
-      remaining_dollars: Math.max(0, limitUsd - usedUsd),
+      remaining_dollars: limitUsd !== null && usedUsd !== null ? Math.max(0, limitUsd - usedUsd) : null,
     },
     'anthropic-oauth-extra'
   );
@@ -710,7 +714,11 @@ export function normalizeAnthropicUsage(data, source = 'anthropic-oauth') {
     windowFromPercent('5H', data.five_hour, source),
     windowFromPercent('7D', data.seven_day, source),
   ].filter(Boolean);
-  if (!windows.length && Array.isArray(data.limits)) windows = anthropicLimitWindows(data.limits, source);
+  if (Array.isArray(data.limits)) {
+    for (const window of anthropicLimitWindows(data.limits, source)) {
+      if (!windows.some((known) => known.label === window.label)) windows.push(window);
+    }
+  }
   windows.push(...scopedAnthropicWindows(data, source));
   const extra = anthropicExtraUsageWindow(data.extra_usage);
   if (extra) windows.push(extra);
@@ -750,10 +758,11 @@ async function fetchOpenAICodexUsage(providerObj) {
   return usage && resolvedResetCredits ? { ...usage, resetCredits: resolvedResetCredits } : usage;
 }
 
-async function fetchAnthropicUsage(providerObj) {
+async function fetchAnthropicUsage(providerObj, routeInfo) {
   const auth = await providerObj?.ensureAuth?.({ reason: 'usage' });
   const token = auth?.accessToken || auth?.access_token;
-  if (!token) return latestClaudeStatuslineUsage();
+  const localFallback = () => routeInfo.accountId === 'default' ? latestClaudeStatuslineUsage() : null;
+  if (!token) return localFallback();
   const res = await fetch(
     'https://api.anthropic.com/api/oauth/usage',
     fetchOptions({
@@ -766,7 +775,7 @@ async function fetchAnthropicUsage(providerObj) {
   );
   if (!res.ok) throw Object.assign(new Error(`anthropic oauth usage ${res.status}`), { status: res.status });
   const data = await res.json();
-  return normalizeAnthropicUsage(data) || latestClaudeStatuslineUsage();
+  return normalizeAnthropicUsage(data) || localFallback();
 }
 
 function grokProxyHeaders(token, userId, extra) {
@@ -862,7 +871,7 @@ function isUsageAuthRejection(error) {
 
 async function measureUsage(provider, providerObj, routeInfo) {
   if (provider === 'openai-oauth') return await fetchOpenAICodexUsage(providerObj);
-  if (provider === 'anthropic-oauth') return await fetchAnthropicUsage(providerObj);
+  if (provider === 'anthropic-oauth') return await fetchAnthropicUsage(providerObj, routeInfo);
   if (provider === 'grok-oauth') return await fetchGrokUsage(providerObj, routeInfo);
   if (
     (provider === 'cursor-oauth' ||
@@ -946,19 +955,27 @@ export async function fetchOAuthUsageSnapshot(routeInfo, providerObj, log = () =
     if (cached) return cached;
     if (negativeFresh(key) || negativeFresh(providerOnly)) return null;
   }
-  if (inflight.has(key)) return inflight.get(key);
+  // Each caller observes failures even when it joins shared auth/cache work.
+  const receive = async (task) => {
+    const { snapshot, failure } = await task;
+    if (failure) options.onFailure?.(failure);
+    return snapshot;
+  };
+  if (inflight.has(key)) return receive(inflight.get(key));
 
   const task = (async () => {
     let snapshot = null;
+    let failure = null;
     try {
       snapshot = await measureUsageWithAuthRetry(provider, providerObj, routeInfo);
     } catch (err) {
+      failure = err;
       snapshot = await usageAfterFailure(err, provider, accountId, log);
     }
     if (!isContentfulSnapshot(snapshot)) {
       cacheNegative(key, 'empty');
       cacheNegative(providerOnly, 'empty');
-      return null;
+      return { snapshot: null, failure };
     }
     if (ACCOUNT_PROVIDERS.includes(provider)) {
       try {
@@ -968,10 +985,10 @@ export async function fetchOAuthUsageSnapshot(routeInfo, providerObj, log = () =
       }
     }
     void recordQuotaReadings(provider, accountId, snapshot, log);
-    return cacheUsageSnapshot(snapshot, { routeInfo, provider, accountId, providerOnly });
+    return { snapshot: cacheUsageSnapshot(snapshot, { routeInfo, provider, accountId, providerOnly }), failure };
   })().finally(() => {
     inflight.delete(key);
   });
   inflight.set(key, task);
-  return task;
+  return receive(task);
 }

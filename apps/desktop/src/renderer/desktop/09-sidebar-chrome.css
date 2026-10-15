@@ -22,6 +22,11 @@
   width: 100%;
 }
 .rail-usage-pin-brand {
+  /* Same quota palette as the expanded panel; thresholds use USED quota. */
+  --quota-good: #65dcc5;
+  --quota-low: #ffc977;
+  --quota-critical: #ff8b9f;
+  --quota-tone: var(--mx-text-muted);
   display: grid;
   gap: 2px;
   justify-items: center;
@@ -43,12 +48,11 @@
   width: var(--mx-icon-lg);
   height: var(--mx-icon-lg);
 }
-/* Miniature of the flyout meter (user: 프로그래스라도 중간에): a 3px track
-   between icon and number, filled in accent ink until the tone escalates. */
+/* Miniature of the flyout meter: glow paints outside the unchanged 3px track. */
 .rail-usage-pin-brand > i {
   position: relative;
   display: block;
-  overflow: hidden;
+  overflow: visible;
   width: 26px;
   height: 3px;
   border-radius: var(--mx-radius-pill);
@@ -58,20 +62,33 @@
   position: absolute;
   inset: 0 auto 0 0;
   border-radius: inherit;
-  /* Calm resting fill (user: 파란색 너무 눈에 띔): quiet ink until the
-     warning/danger tones below take over. */
-  background: var(--mx-meter-fill);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--quota-tone) 72%, transparent), var(--quota-tone) 75%, color-mix(in srgb, var(--quota-tone) 80%, white));
 }
 /* Short + long mode stacks two meters (the brand's 2px gap separates them);
    the tone colors only the bar that drives the figure. */
-.rail-usage-pin-brand.tone-warning > i:not(.is-cool) > i {
-  background: var(--mx-meter-warning);
+.rail-usage-pin-brand > i.is-cool {
+  --quota-tone: var(--mx-meter-fill);
 }
-.rail-usage-pin-brand.tone-danger > i:not(.is-cool) > i {
-  background: var(--mx-meter-danger);
+.rail-usage-pin-brand.has-quota {
+  --quota-tone: var(--quota-good);
+}
+.rail-usage-pin-brand.tone-warning {
+  --quota-tone: var(--quota-low);
+}
+.rail-usage-pin-brand.tone-danger {
+  --quota-tone: var(--quota-critical);
+}
+.rail-usage-pin-brand.glowing > i::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--quota-value);
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: 0 0 6px color-mix(in srgb, var(--quota-tone) 55%, transparent), 0 0 12px color-mix(in srgb, var(--quota-tone) 24%, transparent);
 }
 .rail-usage-pin-brand > small {
-  color: var(--mx-text);
+  color: var(--quota-tone);
   display: block;
   width: 100%;
   text-align: center;
@@ -84,11 +101,25 @@
   letter-spacing: 0;
   font-variant-numeric: tabular-nums;
 }
-.rail-usage-pin-brand.tone-warning > small {
-  color: var(--mx-warning);
+.rail-usage-pin-brand.has-quota > small {
+  text-shadow: 0 0 8px color-mix(in srgb, var(--quota-tone) 48%, transparent);
 }
-.rail-usage-pin-brand.tone-danger > small {
-  color: var(--mx-danger);
+.rail-usage-pin-brand.is-stale.glowing > i::before {
+  opacity: .35;
+}
+.rail-usage-pin-brand.is-stale > small {
+  text-shadow: none;
+}
+:root[data-mixdog-theme="light"] .rail-usage-pin-brand {
+  --quota-good: #087966;
+  --quota-low: #986000;
+  --quota-critical: #ba3046;
+}
+:root[data-mixdog-theme="light"] .rail-usage-pin-brand.glowing > i::before {
+  opacity: .55;
+}
+:root[data-mixdog-theme="light"] .rail-usage-pin-brand.is-stale.glowing > i::before {
+  opacity: .25;
 }
 /* ONE hairline per seam: the sidebar already draws its right edge and the
    activity rail its own — the main panel adding a second left hairline

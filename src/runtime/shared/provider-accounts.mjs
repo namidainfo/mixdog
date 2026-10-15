@@ -246,11 +246,19 @@ export async function removeProviderAccount(provider, id) {
 
 export async function recordProviderAccountUsage(provider, id, snapshot) {
   if (!snapshot || !Array.isArray(snapshot.quotaWindows)) return;
-  const windows = snapshot.quotaWindows.slice(0, 12).map((row) => ({
-    label: String(row.label || '').slice(0, 40),
-    usedPct: typeof row.usedPct === 'number' && Number.isFinite(row.usedPct) ? row.usedPct : null,
-    resetAt: typeof row.resetAt === 'number' && Number.isFinite(row.resetAt) ? row.resetAt : null,
-  }));
+  const windows = snapshot.quotaWindows.map((row) => {
+    const window = {
+      label: String(row.label || '').slice(0, 512),
+      usedPct: typeof row.usedPct === 'number' && Number.isFinite(row.usedPct) ? row.usedPct : null,
+      resetAt: typeof row.resetAt === 'number' && Number.isFinite(row.resetAt) ? row.resetAt : null,
+    };
+    for (const key of ['id', 'source', 'windowSeconds', 'remainingPct', 'limitUsd', 'usedUsd', 'remainingUsd', 'limitCredits', 'usedCredits', 'remainingCredits']) {
+      const value = row[key];
+      if (typeof value === 'number' && Number.isFinite(value)) window[key] = value;
+      else if (typeof value === 'string') window[key] = value.slice(0, 512);
+    }
+    return window;
+  });
   if (!readProviderAccountPool(provider).accounts.some((row) => row.id === id)) return;
   await update(provider, (pool) => {
     const row = pool.accounts.find((entry) => entry.id === id);

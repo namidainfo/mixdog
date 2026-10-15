@@ -1,7 +1,7 @@
 // Self-update controller: registry version check + background staging of the
 // next version; the runtime facade owns wiring only. State is per-runtime and
 // in-memory; the 24h TTL lives in the shared update-checker cache.
-import { checkLatestVersion, isDevInstall } from '../runtime/shared/update-checker.mjs';
+import { checkLatestVersion, isDevInstall, isPersonalInstall, PERSONAL_UPDATE_DISABLED_ERROR } from '../runtime/shared/update-checker.mjs';
 import { spawnStagedInstall, runStagedInstall, isStagedComplete } from '../runtime/shared/staged-update.mjs';
 
 const STAGE_POLL_MS = 3_000;
@@ -41,7 +41,7 @@ export function createSelfUpdateController({ getConfig, getDataDir, emitNotifica
   let bootTimer = null;
 
   function autoUpdateEnabled() {
-    return getConfig()?.update?.auto !== false;
+    return !isPersonalInstall() && getConfig()?.update?.auto !== false;
   }
 
   async function checkForUpdate({ force = false } = {}) {
@@ -59,6 +59,10 @@ export function createSelfUpdateController({ getConfig, getDataDir, emitNotifica
   }
 
   async function runUpdateNow() {
+    if (isPersonalInstall()) {
+      processState = { phase: 'failed', version: null, error: PERSONAL_UPDATE_DISABLED_ERROR };
+      return processState;
+    }
     if (processState.phase === 'installing') {
       return { ...processState, alreadyInstalling: true, error: 'update already in progress' };
     }
@@ -96,6 +100,7 @@ export function createSelfUpdateController({ getConfig, getDataDir, emitNotifica
   // installed version); checkLatestVersion still falls back to it offline.
   // isDevInstall(): a git checkout must never self-update.
   function startBootCheck() {
+    if (isPersonalInstall()) return null;
     if (bootTimer) return bootTimer;
     bootTimer = setTimeout(() => {
       bootTimer = null;

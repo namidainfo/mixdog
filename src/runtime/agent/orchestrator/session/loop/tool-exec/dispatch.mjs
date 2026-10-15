@@ -57,6 +57,8 @@ function dispatchInternal(name, args, { cwd, callerSessionId, sessionRef, execut
     turnId: Number(sessionRef?.usageMetricsTurnId) || 0,
     notifyFn,
     toolApprovalHook,
+    userQuestionHook:
+      typeof executeOpts.userQuestionHook === 'function' ? executeOpts.userQuestionHook : sessionRef?.userQuestionHook,
     toolCallId: executeOpts.toolCallId || null,
     invocationSource: 'model-tool',
   });

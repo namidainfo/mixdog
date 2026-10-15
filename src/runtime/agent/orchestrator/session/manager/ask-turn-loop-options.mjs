@@ -138,6 +138,7 @@ export function buildAgentLoopOptions({
       if (typeof askOpts?.onToolResult === 'function') askOpts.onToolResult(message);
     },
     onToolApproval: optionalFn(askOpts?.onToolApproval),
+    onUserQuestion: optionalFn(askOpts?.onUserQuestion),
     beforeToolExecution: optionalFn(askOpts?.beforeToolExecution),
     onCompactEvent: (event) => {
       checkpoint.refreshContextState();

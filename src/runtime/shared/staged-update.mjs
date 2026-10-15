@@ -53,6 +53,8 @@ import { detachedSpawnOpts, hiddenSpawnOpts } from './spawn-flags.mjs';
 import { renameWithRetrySync } from './atomic-file.mjs';
 import {
   isDevInstall,
+  isPersonalInstall,
+  PERSONAL_UPDATE_DISABLED_ERROR,
   localPackageVersion,
   compareSemver,
   isNewerVersion,
@@ -229,6 +231,7 @@ function releaseStagingLock(verDir) {
  * package.json version, then writes the completion marker. Never throws.
  */
 export async function runStagedInstall(version) {
+  if (isPersonalInstall()) return { ok: false, error: PERSONAL_UPDATE_DISABLED_ERROR };
   const v = String(version || '').trim();
   if (!v) return { ok: false, error: 'no version' };
   if (isStagedComplete(v)) {
@@ -311,6 +314,7 @@ export async function runStagedInstall(version) {
  * No-op if already staged. Never throws.
  */
 export function spawnStagedInstall(version) {
+  if (isPersonalInstall()) return false;
   const v = String(version || '').trim();
   if (!v) return false;
   if (process.env.MIXDOG_DISABLE_STAGED_INSTALL) return false;
@@ -484,6 +488,7 @@ function cleanupStaging(currentVersion) {
  * Synchronous, silent, and safe: any obstacle → false, run current version.
  */
 export function performPendingSwap() {
+  if (isPersonalInstall()) return false;
   try {
     if (process.env.MIXDOG_SWAP_REEXEC) return false;
     if (process.env.MIXDOG_DISABLE_STAGED_SWAP) return false;

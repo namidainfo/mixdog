@@ -28,6 +28,11 @@
   display: none;
 }
 .sidebar-usage {
+  /* CodexQuota widget.css palette; thresholds use remaining quota:
+     <= 10% critical, <= 30% low, otherwise good (widget.mjs). */
+  --quota-good: #65dcc5;
+  --quota-low: #ffc977;
+  --quota-critical: #ff8b9f;
   display: grid;
   gap: 0;
   overflow: hidden;
@@ -228,6 +233,7 @@
   row-gap: 6px;
 }
 .sidebar-usage-meter {
+  --quota-tone: var(--mx-text-muted);
   grid-column: 1 / -1;
   min-width: 0;
   display: grid;
@@ -263,7 +269,7 @@
 .sidebar-usage-meter > i {
   position: relative;
   display: block;
-  overflow: hidden;
+  overflow: visible;
   width: 100%;
   min-width: 0;
   height: 5px;
@@ -274,17 +280,28 @@
   position: absolute;
   inset: 0 auto 0 0;
   border-radius: inherit;
-  /* Same quiet/default → warning → danger ladder as the pinned rail meter. */
-  background: var(--mx-meter-fill);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--quota-tone) 72%, transparent), var(--quota-tone) 75%, color-mix(in srgb, var(--quota-tone) 80%, white));
 }
-.sidebar-usage-meter.tone-warning > i > i {
-  background: var(--mx-meter-warning);
+.sidebar-usage-meter.has-quota {
+  --quota-tone: var(--quota-good);
 }
-.sidebar-usage-meter.tone-danger > i > i {
-  background: var(--mx-meter-danger);
+.sidebar-usage-meter.tone-warning {
+  --quota-tone: var(--quota-low);
+}
+.sidebar-usage-meter.tone-danger {
+  --quota-tone: var(--quota-critical);
+}
+.sidebar-usage-meter.glowing > i::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--quota-value);
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: 0 0 6px color-mix(in srgb, var(--quota-tone) 55%, transparent), 0 0 12px color-mix(in srgb, var(--quota-tone) 24%, transparent);
 }
 .sidebar-usage-meter > b {
-  color: var(--mx-text);
+  color: var(--quota-tone);
   font-size: var(--mx-font-meta);
   /* One weight under the provider names, so each row reads name first and
      the figure second (user: % 가 좀 굵다). */
@@ -293,11 +310,77 @@
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
-.sidebar-usage-meter.tone-warning > b {
-  color: var(--mx-warning);
+.sidebar-usage-meter.has-quota > b {
+  text-shadow: 0 0 8px color-mix(in srgb, var(--quota-tone) 48%, transparent);
 }
-.sidebar-usage-meter.tone-danger > b {
-  color: var(--mx-danger);
+.sidebar-usage-row.is-stale .sidebar-usage-meter.glowing > i::before {
+  opacity: .35;
+}
+.sidebar-usage-row.is-stale .sidebar-usage-meter > b {
+  text-shadow: none;
+}
+.theme-light .sidebar-usage,
+:root[data-theme="light"] .sidebar-usage {
+  --quota-good: #087966;
+  --quota-low: #986000;
+  --quota-critical: #ba3046;
+}
+.theme-light .sidebar-usage-meter.glowing > i::before,
+:root[data-theme="light"] .sidebar-usage-meter.glowing > i::before {
+  opacity: .55;
+}
+.theme-light .sidebar-usage-row.is-stale .sidebar-usage-meter.glowing > i::before,
+:root[data-theme="light"] .sidebar-usage-row.is-stale .sidebar-usage-meter.glowing > i::before {
+  opacity: .25;
+}
+.sidebar-usage-bulk {
+  display: grid;
+  gap: 6px;
+  padding: 6px 14px 12px;
+}
+.sidebar-usage-bulk button {
+  min-height: 32px;
+  padding: 7px 10px;
+  border: 1px solid var(--mx-border-strong);
+  border-radius: var(--mx-radius-md);
+  color: var(--mx-text);
+  background: var(--mx-bg-layer-2);
+  font-weight: 600;
+  cursor: pointer;
+}
+.sidebar-usage-bulk button:hover:not(:disabled) {
+  background: var(--mx-hover-opaque);
+}
+.sidebar-usage-bulk button:focus-visible {
+  outline: 2px solid var(--mx-focus);
+  outline-offset: 2px;
+}
+.sidebar-usage-bulk button:disabled {
+  opacity: .5;
+  cursor: default;
+}
+.sidebar-usage-bulk p,
+.sidebar-usage-request-results,
+.sidebar-usage-account-note,
+.sidebar-usage-quota-details {
+  color: var(--mx-row-meta-ink);
+  font-size: var(--mx-font-supporting);
+  overflow-wrap: anywhere;
+}
+.sidebar-usage-request-results {
+  margin: 0;
+  padding-left: 16px;
+}
+.sidebar-usage-account-note,
+.sidebar-usage-quota-details {
+  grid-column: 1 / -1;
+}
+.sidebar-usage-quota-details {
+  padding-top: 3px;
+}
+.sidebar-usage-line .sidebar-usage-selected {
+  flex-shrink: 0;
+  color: var(--quota-good);
 }
 .sidebar-usage-meter-empty {
   grid-template-columns: minmax(0, 1fr);
@@ -320,31 +403,30 @@
   outline-offset: 2px;
   border-radius: var(--mx-radius-md);
 }
-/* Reset credits keep their individual expiry and action visible. */
-.sidebar-usage-credit,
+/* Credit controls must not widen the quota window's shared label column. */
 .sidebar-usage-reset-credit {
   grid-column: 1 / -1;
   min-width: 0;
   position: relative;
   display: grid;
-  grid-template-columns: subgrid;
+  grid-template-columns: minmax(0, 1fr);
+  row-gap: 6px;
 }
-/* Credit and reset lines share the meter columns: label under the window
-   label, value from the track start, control flush with the reset column. */
+/* These full-width rows own their layout, independently of the quota grid. */
 .sidebar-usage-credit,
 .sidebar-usage-reset-line {
   grid-column: 1 / -1;
   min-width: 0;
   min-height: 24px;
-  display: grid;
-  grid-template-columns: subgrid;
+  display: flex;
+  gap: 6px;
   align-items: center;
   font-size: var(--mx-font-supporting);
   line-height: var(--mx-line-meta);
 }
 .sidebar-usage-credit > small,
 .sidebar-usage-reset-line > small {
-  grid-column: 1;
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -355,7 +437,7 @@
   letter-spacing: var(--mx-tracking-wide);
 }
 .sidebar-usage-credit-value {
-  grid-column: 2 / 4;
+  flex: 1;
   min-width: 0;
   display: flex;
   align-items: center;
@@ -387,8 +469,7 @@
 }
 .sidebar-usage-credit-switch {
   position: relative;
-  grid-column: 4;
-  justify-self: end;
+  margin-left: auto;
   width: 28px;
   height: 16px;
   padding: 0;
@@ -430,9 +511,12 @@
   white-space: nowrap;
 }
 .sidebar-usage-reset-line > .sidebar-usage-reset-use {
-  grid-column: 4;
-  justify-self: end;
+  flex-shrink: 0;
+  margin-left: auto;
   padding: 0 10px;
+}
+.sidebar-usage-reset-credit > .sidebar-usage-account-note {
+  margin: 0;
 }
 .sidebar-usage-reset-line .sidebar-usage-reset-info {
   display: grid;

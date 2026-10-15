@@ -217,8 +217,8 @@ export function resolveAntigravityWireModel(model, effort, models = antigravityC
 
 function quotaRow(label, bucket) {
   if (!bucket || typeof bucket !== 'object') return null;
-  if (typeof bucket.remainingFraction !== 'number' || !Number.isFinite(bucket.remainingFraction)) return null;
-  const usedPct = Math.round(Math.max(0, Math.min(100, (1 - bucket.remainingFraction) * 100)) * 100) / 100;
+  const measured = typeof bucket.remainingFraction === 'number' && Number.isFinite(bucket.remainingFraction);
+  const usedPct = measured ? Math.round(Math.max(0, Math.min(100, (1 - bucket.remainingFraction) * 100)) * 100) / 100 : null;
   const resetAt = Date.parse(String(bucket.resetTime || ''));
   return {
     label,
@@ -228,17 +228,17 @@ function quotaRow(label, bucket) {
   };
 }
 
-/** Shared Gemini 5H/7D rows from retrieveUserQuotaSummary. Missing fields stay omitted. */
+/** Every reported group/window from retrieveUserQuotaSummary, without guessing
+ * a weekly window or a percentage for reset-only buckets. */
 export function antigravityQuotaWindows(summary) {
   const groups = Array.isArray(summary?.groups) ? summary.groups : [];
-  const group = groups.find((entry) => entry && typeof entry === 'object' && entry.displayName === 'Gemini Models');
-  const buckets = Array.isArray(group?.buckets) ? group.buckets : [];
-  let fiveHour = null;
-  let weekly = null;
-  for (const bucket of buckets) {
-    if (!bucket || typeof bucket !== 'object') continue;
-    if (!fiveHour && bucket.window === '5h') fiveHour = bucket;
-    if (!weekly && bucket.window === 'weekly') weekly = bucket;
-  }
-  return [quotaRow('5H', fiveHour), quotaRow('7D', weekly)].filter(Boolean);
+  return groups.flatMap((group) => {
+    const buckets = Array.isArray(group?.buckets) ? group.buckets : [];
+    return buckets.map((bucket) => {
+      if (!bucket || typeof bucket !== 'object') return null;
+      const period = bucket.window === '5h' ? '5H' : bucket.window === 'weekly' ? '7D' : String(bucket.window || bucket.displayName || 'Quota');
+      const label = group.displayName && group.displayName !== 'Gemini Models' ? `${group.displayName} ${period}` : period;
+      return quotaRow(label, bucket);
+    }).filter(Boolean).sort((a, b) => (a.label.endsWith('5H') ? 0 : 1) - (b.label.endsWith('5H') ? 0 : 1));
+  });
 }

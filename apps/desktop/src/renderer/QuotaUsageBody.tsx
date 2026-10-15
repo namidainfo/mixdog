@@ -49,6 +49,7 @@ import {
 } from './usage-stats-model';
 import { clearQuotaFocus, writeQuotaSubscription } from './usage-surface-mode';
 import { subscribeAccountSwitches } from './usage-dashboard-store';
+import { usageFailureReason } from './usage-status';
 
 type QuotaView = StatsView | 'window';
 type QuotaQuery = {
@@ -397,7 +398,7 @@ export function QuotaUsageBody({ api }: { api: QuotaApi }) {
     let current = true;
     const question = quotaArgs(query);
     const known = cachedQuotaAnswer(api, question);
-    if (known) setData(known);
+    setData(known ?? null);
     setBusy(true);
     setError('');
     readQuotaAnswer(api, question)
@@ -420,7 +421,7 @@ export function QuotaUsageBody({ api }: { api: QuotaApi }) {
         }
       })
       .catch((reason) => {
-        if (current) setError(String(reason?.message || reason));
+        if (current) setError(usageFailureReason(reason?.message || reason));
       })
       .finally(() => {
         if (current) setBusy(false);
@@ -437,12 +438,12 @@ export function QuotaUsageBody({ api }: { api: QuotaApi }) {
   const account = String(selection.account || '');
   const label = String(selection.label || query.window);
 
-  // The shown subscription switching its account in use (an exhausted one
-  // replaced automatically, or another picked by hand) moves to the new one.
+  // Default openings follow the account in use; explicitly focused/picked
+  // accounts remain the subject even if the global account selection changes.
   useEffect(
     () =>
       subscribeAccountSwitches((switched) => {
-        if (switched !== provider) return;
+        if (switched !== provider || query.account) return;
         setQuery((current) => ({
           ...current,
           provider,
@@ -451,7 +452,7 @@ export function QuotaUsageBody({ api }: { api: QuotaApi }) {
           ...(current.view === 'window' ? { anchor: undefined } : {}),
         }));
       }),
-    [provider, label]
+    [provider, label, query.account]
   );
 
   // The window history is read on its own, a page at a time, for the
@@ -477,7 +478,7 @@ export function QuotaUsageBody({ api }: { api: QuotaApi }) {
         if (current) setHistoryAnswer(answer);
       })
       .catch((reason) => {
-        if (current) setHistoryError(String(reason?.message || reason));
+        if (current) setHistoryError(usageFailureReason(reason?.message || reason));
       });
     return () => {
       current = false;

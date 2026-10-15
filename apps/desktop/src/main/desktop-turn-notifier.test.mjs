@@ -255,3 +255,84 @@ test('a sound failure leaves the native banner and click navigation intact', asy
   h.notifications[0].emit('click');
   assert.deepEqual(h.opened, ['a']);
 });
+
+test('Personal activates a finished session once without losing its background banner', async t => {
+  const h = harness(t, { focusOnNotify: true });
+  h.finish();
+  await h.tick();
+  assert.deepEqual(h.opened, ['a']);
+  assert.equal(h.notifications.length, 1);
+  h.notifier.onSessions([{ id: 'a', title: 'Task' }]);
+  await h.tick(5_000);
+  h.notifications[0].emit('show');
+  assert.deepEqual(h.opened, ['a']);
+  assert.ok(h.events.some(event => event.event === 'focus-requested' && event.reason === 'completion'));
+});
+
+const questionFrame = (id, frameSource = 'live') => ({
+  sessionId: 'a', frameSource, snapshot: { busy: true, userQuestion: {
+    id, sessionId: 'a', toolCallId: 'ask-call', requestedAt: 1_000, questions: [{ id: 'choice', question: '선택해 주세요.' }],
+  } },
+});
+
+test('Personal focuses a new live question once, not a replay or reconnect of the same question', t => {
+  const h = harness(t, { focusOnNotify: true });
+  h.notifier.onSessions([{ id: 'a', title: '질문 작업' }]);
+  h.notifier.onSessionState(questionFrame('old', 'replay'));
+  h.notifier.onSessionState(questionFrame('old'));
+  assert.deepEqual(h.opened, []);
+  h.notifier.onSessionState(questionFrame('new'));
+  h.notifier.onSessionState(questionFrame('new'));
+  h.notifier.onSessionState(questionFrame('old', 'replay'));
+  h.notifier.onSessionState({ sessionId: 'a', snapshot: {}, frameSource: 'replay' });
+  h.notifier.onSessionState(questionFrame('new'));
+  h.notifier.onSessionState({ sessionId: 'a', snapshot: null, laneEnd: 'disconnected', frameSource: 'live' });
+  h.notifier.onSessionState(questionFrame('new'));
+  assert.deepEqual(h.opened, ['a']);
+  assert.equal(h.notifications.length, 1);
+  assert.deepEqual(h.notifications[0].content, { title: '질문 작업', body: '사용자의 답변이 필요합니다.' });
+  h.notifier.onSessionState(questionFrame('next'));
+  assert.deepEqual(h.opened, ['a', 'a']);
+});
+
+test('ordinary hosts do not activate for questions', t => {
+  const ordinary = harness(t);
+  ordinary.notifier.onSessionState(questionFrame('ordinary'));
+  assert.deepEqual(ordinary.opened, []);
+  assert.equal(ordinary.notifications.length, 0);
+});
+
+test('disabled notifications do not activate or redeliver an existing question when enabled', t => {
+  const personal = harness(t, { focusOnNotify: true });
+  personal.state.enabled = false;
+  personal.notifier.onSessionState(questionFrame('disabled'));
+  personal.finish();
+  assert.deepEqual(personal.opened, []);
+  personal.state.enabled = true;
+  personal.notifier.onSessionState(questionFrame('disabled'));
+  assert.deepEqual(personal.opened, []);
+});
+
+test('Personal focus is independent of native notification support and foreground suppression', async t => {
+  const h = harness(t, { focusOnNotify: true });
+  h.state.supported = false;
+  h.finish();
+  await h.tick();
+  assert.deepEqual(h.opened, ['a']);
+  assert.equal(h.notifications.length, 0);
+  h.state.foreground = true;
+  h.notifier.onSessionState(questionFrame('foreground'));
+  assert.deepEqual(h.opened, ['a', 'a']);
+  assert.equal(h.notifications.length, 0);
+  h.notifier.dispose();
+  h.notifier.onSessionState(questionFrame('after-dispose'));
+  assert.deepEqual(h.opened, ['a', 'a']);
+});
+
+test('a focus dispatch failure is recorded and does not block the completion banner', async t => {
+  const h = harness(t, { focusOnNotify: true, openSession() { throw new Error('window dispatch failed'); } });
+  h.finish();
+  await h.tick();
+  assert.equal(h.notifications.length, 1);
+  assert.ok(h.events.some(event => event.event === 'focus-failed' && event.error === 'window dispatch failed'));
+});

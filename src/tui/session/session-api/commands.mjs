@@ -152,6 +152,7 @@ export function createSessionCommandsApi(bag) {
         if (!readOnlyList) set({ commandBusy: false });
       }
     },
+    searchConversations: (query, args = {}) => runtime.searchConversations(query, args),
     recall: async (query, args = {}) => {
       if (getState().commandBusy) return null;
       return withCommandStatus('Recalling memory', 'recalling', async () => {

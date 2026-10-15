@@ -19,6 +19,7 @@ import { positiveInt } from '../../runtime/shared/numbers.mjs';
 const CRITICAL_CALLS = new Set([
   'session.abort',
   'session.approve',
+  'session.answer',
   'session.unsubscribe',
   'desktop.control',
   'desktop.ready',

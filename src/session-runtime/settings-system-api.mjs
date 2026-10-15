@@ -1,4 +1,6 @@
 // Automation worker status, the system shell and self-update settings.
+import { isPersonalInstall } from '../runtime/shared/update-checker.mjs';
+
 export function createSystemSettings({
   getConfig,
   saveConfigAndAdopt,
@@ -33,19 +35,21 @@ export function createSystemSettings({
     },
     getUpdateSettings() {
       const updateCheckState = getUpdateCheckState();
+      const manualOnly = isPersonalInstall();
       return {
-        autoUpdate: autoUpdateEnabled(),
-        currentVersion: updateCheckState.currentVersion || localPackageVersion(),
-        latestVersion: updateCheckState.latestVersion,
-        updateAvailable: updateCheckState.updateAvailable,
-        lastCheckedAt: updateCheckState.lastCheckedAt,
+        autoUpdate: !manualOnly && autoUpdateEnabled(),
+        currentVersion: manualOnly ? localPackageVersion() : updateCheckState.currentVersion || localPackageVersion(),
+        latestVersion: manualOnly ? null : updateCheckState.latestVersion,
+        updateAvailable: !manualOnly && updateCheckState.updateAvailable,
+        lastCheckedAt: manualOnly ? 0 : updateCheckState.lastCheckedAt,
+        ...(manualOnly ? { manualOnly: true } : {}),
       };
     },
     setAutoUpdate(enabled) {
       const config = getConfig();
       saveConfigAndAdopt({
         ...config,
-        update: { ...(config.update || {}), auto: enabled === true },
+        update: { ...(config.update || {}), auto: !isPersonalInstall() && enabled === true },
       });
       return this.getUpdateSettings();
     },

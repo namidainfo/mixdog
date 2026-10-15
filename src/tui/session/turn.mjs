@@ -387,6 +387,12 @@ function toolHandlers(ctx) {
       if (!isCurrentTurn()) return { approved: false, reason: 'turn no longer active' };
       return approveToolRequest(ctx, request);
     },
+    onUserQuestion: async (request) => {
+      if (!isCurrentTurn()) return { cancelled: true, answers: {}, reason: 'turn no longer active' };
+      ctx.markPromptCommitted();
+      flushStreamBatch(ctx.stream);
+      return ctx.requestUserQuestion(request);
+    },
   };
 }
 

@@ -51,7 +51,7 @@ export function useAppSideDocks({ paneWorkspace, sessionSurfaces, applySidebarOp
       ...(visualizeAvailable ? ['visualize' as const] : []),
       ...(browserFeatureInstalled ? ['browser' as const] : []),
       'terminal' as const,
-      ...(['agents', 'search', 'source-control', 'pull-requests'] as const).filter((panel) =>
+      ...(['agents', 'search', 'source-control', 'pull-requests', 'worktrail'] as const).filter((panel) =>
         desktopUtilityDockTabEnabled(panel)
       ),
     ],

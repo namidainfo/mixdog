@@ -54,6 +54,16 @@ export function createCallRoute({ handleCall, clients, lanes, callCache, nowMs }
     }
     c.lastSeen = nowMs();
     const name = String(body.name || '');
+    // Handoff is navigation owned by this waiting caller, not an autonomous
+    // session mutation. Closing its response retires pending desktop work.
+    const handoff = name === 'session.handoff' ? new AbortController() : null;
+    const cancelHandoff = () => {
+      if (!res.writableEnded) handoff.abort(new Error('Session handoff cancelled by caller.'));
+    };
+    if (handoff) {
+      res.on('close', cancelHandoff);
+      if (res.destroyed) cancelHandoff();
+    }
     const callId = body.callId ? String(body.callId) : null;
     const args = body.args || {};
     // Scheduling fairness follows the addressed session, but idempotency
@@ -78,21 +88,22 @@ export function createCallRoute({ handleCall, clients, lanes, callCache, nowMs }
             leadPid: c.leadPid ?? null,
             cwd: c.cwd ?? null,
             revision: c.revision ?? 0,
+            ...(handoff ? { signal: handoff.signal } : {}),
           }),
-        { lane: callLane(name, args) }
+        { lane: callLane(name, args), ...(handoff ? { signal: handoff.signal } : {}) }
       );
       if (cacheKey) callCache.track(cacheKey, dispatch, signature);
     }
     try {
       const result = await dispatch;
-      sendJson(res, { result });
+      if (!res.destroyed) sendJson(res, { result });
     } catch (err) {
       // Session call errors travel as a 200 {error} envelope so the client can
       // tell a failed CALL from a dead TRANSPORT (which must re-attach). The
       // machine-readable `code` (ECALLIDCONFLICT / ECALLRESULTDROPPED) travels
       // with it: a client must be able to branch on it, not parse prose.
       // Typed (worktree) failures also carry their plain JSON `details`.
-      sendJson(
+      if (!res.destroyed) sendJson(
         res,
         {
           error: err?.message || String(err),
@@ -101,6 +112,8 @@ export function createCallRoute({ handleCall, clients, lanes, callCache, nowMs }
         },
         200
       );
+    } finally {
+      if (handoff) res.off('close', cancelHandoff);
     }
   };
 }

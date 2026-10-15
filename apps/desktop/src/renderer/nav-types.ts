@@ -37,6 +37,7 @@ export type WorkspaceSelection =
 export interface WorkspaceTab {
   key: string;
   title: string;
+  tooltip?: string;
   selection: WorkspaceSelection;
   preview?: boolean;
   pinned?: boolean;

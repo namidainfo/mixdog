@@ -12,6 +12,7 @@ const { drainSessionStore, saveSessionAsync } = await import('../store.mjs');
 const { SUMMARY_PREFIX } = await import('../compact.mjs');
 const { clearSessionMessages } = await import('./session-crud.mjs');
 const { settleSessionSummaryIndex } = await import('../store/listing.mjs');
+const { reserveSessionTitle } = await import('../store/title-sequence.mjs');
 
 async function removeDataDir(dir) {
   for (let attempt = 0; ; attempt += 1) {
@@ -114,4 +115,24 @@ test('clear refuses unknown and closed sessions', async () => {
   session.closed = true;
   await saveSessionAsync(session, { expectedGeneration: session.generation });
   assert.equal(await clearSessionMessages(id), false);
+});
+
+test('a new transcript fork gets its own number without changing the original task title', async (t) => {
+  const createdAt = new Date(2026, 0, 2, 12).getTime();
+  t.mock.method(Date, 'now', () => createdAt);
+  const id = 'sess_clear_numbered';
+  const session = await plantSession(id, [{ role: 'user', content: 'archived numbered work' }]);
+  session.createdAt = createdAt;
+  session.generatedTitlePrefix = reserveSessionTitle(session).prefix;
+  session.title = `${session.generatedTitlePrefix}Archived work`;
+  await saveSessionAsync(session);
+  assert.equal(session.title, '260102-000 | Archived work');
+  const cleared = await clearSessionMessages(id);
+  assert.equal(cleared.title, '260102-000 | Archived work');
+  drainSessionStore();
+  const fork = storedSessions().find((row) =>
+    row.id !== id && row.messages.some((message) => message.content === 'archived numbered work')
+  );
+  assert.equal(fork.generatedTitlePrefix, '260102-001 | ');
+  assert.equal(fork.title, '260102-001 | Archived work');
 });

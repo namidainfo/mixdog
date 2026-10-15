@@ -9,6 +9,7 @@ import { isMobileRemoteSurface } from './mobile-surface';
 import type { SkillMentionResult } from './composer-skill-mentions';
 import { classifyPromptEscape } from '../../../../src/tui/components/prompt-input/escape-policy.mjs';
 import { paletteOwnsPromptVerticalArrow } from '../../../../src/tui/components/prompt-input/restore-policy.mjs';
+import { composerListIndentEdit, composerNewlineEdit, type ComposerTextEdit } from './composer-markdown-edit';
 
 type TextareaKeyEvent = KeyboardEvent<HTMLTextAreaElement>;
 
@@ -118,22 +119,34 @@ export function useComposerKeyboard({
     clearAttachments(): void;
   };
 }) {
-  const insertNewline = useCallback(
-    (element: HTMLTextAreaElement) => {
-      const start = element.selectionStart;
-      const end = element.selectionEnd;
-      const atEnd = end === element.value.length;
-      draft.set((current) => `${current.slice(0, start)}\n${current.slice(end)}`);
+  const applyTextEdit = useCallback(
+    (element: HTMLTextAreaElement, edit: ComposerTextEdit, revealEnd = false) => {
+      const direction = element.selectionDirection;
+      draft.ref.current = edit.value;
+      draft.set(edit.value);
+      draft.setCaretOffset(edit.start);
+      history.navigation.current = { index: -1, seed: '' };
       window.setTimeout(() => {
         if (draft.textarea.current !== element) return;
         element.focus();
-        element.setSelectionRange(start + 1, start + 1);
+        element.setSelectionRange(edit.start, edit.end, direction);
         // Programmatic selection does not scroll like a native newline. Wait
         // for the controlled value and CSS autosize, then reveal an appended line.
-        if (atEnd) element.scrollTop = element.scrollHeight;
+        if (revealEnd) element.scrollTop = element.scrollHeight;
       }, 0);
     },
-    [draft]
+    [draft, history.navigation]
+  );
+
+  const insertNewline = useCallback(
+    (element: HTMLTextAreaElement) => {
+      applyTextEdit(
+        element,
+        composerNewlineEdit(element.value, element.selectionStart, element.selectionEnd),
+        element.selectionEnd === element.value.length
+      );
+    },
+    [applyTextEdit]
   );
 
   const selectMention = useCallback(
@@ -389,6 +402,7 @@ export function useComposerKeyboard({
       if (composing && newlineChord && !mobile) {
         const element = event.currentTarget;
         window.setTimeout(() => {
+          if (draft.textarea.current !== element) return;
           const caret = element.selectionStart;
           if (element.value.slice(Math.max(0, caret - 1), caret) === '\n') return;
           insertNewline(element);
@@ -417,7 +431,7 @@ export function useComposerKeyboard({
         window.setTimeout(() => draft.textarea.current?.setSelectionRange(removeStart, removeStart), 0);
         return;
       }
-      if (event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'j') {
+      if (!composing && event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'j') {
         event.preventDefault();
         insertNewline(event.currentTarget);
         return;
@@ -426,6 +440,20 @@ export function useComposerKeyboard({
       if (navigateSlashPalette(event)) return;
       if (navigateMentionPalette(event)) return;
       if (navigateSkillMentionPalette(event)) return;
+      if (event.key === 'Tab' && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        const element = event.currentTarget;
+        const edit = composerListIndentEdit(
+          element.value,
+          element.selectionStart,
+          element.selectionEnd,
+          event.shiftKey
+        );
+        if (edit) {
+          event.preventDefault();
+          applyTextEdit(element, edit);
+          return;
+        }
+      }
       if (event.key === 'Escape') {
         handleEscape(event);
         return;
@@ -482,6 +510,7 @@ export function useComposerKeyboard({
     [
       actions,
       applyHistoryEntry,
+      applyTextEdit,
       draft,
       handleEscape,
       history,

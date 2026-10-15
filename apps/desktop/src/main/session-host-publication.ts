@@ -219,6 +219,7 @@ export class SessionHostPublication {
         snapshot?.busy === true ||
         snapshot?.commandBusy === true ||
         snapshot?.toolApproval != null ||
+        snapshot?.userQuestion != null ||
         (Array.isArray(snapshot?.queued) && snapshot.queued.length > 0)
       )
         continue;

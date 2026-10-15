@@ -49,6 +49,7 @@ const ALL_VIEW_IDS: readonly WorkbenchSideViewId[] = [
   'search',
   'source-control',
   'pull-requests',
+  'worktrail',
 ];
 
 /** The left rail carries Project-wide destinations, including Source Control.
@@ -64,6 +65,7 @@ const DEFAULT_WORKBENCH_SIDE_VIEW_LAYOUT: WorkbenchSideViewLayout = {
     ['extensions'],
     ['source-control'],
     ['search'],
+    ['worktrail'],
     ['webhooks'],
     ['ports'],
   ],

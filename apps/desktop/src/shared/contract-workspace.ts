@@ -370,9 +370,22 @@ export interface DesktopRendererFailureDiagnostic {
   column?: number;
 }
 
-export interface DesktopRendererLongTaskDiagnostic {
+export interface DesktopRendererSessionActivity {
+  sessionKeys?: string[];
+  visibleTranscripts?: number;
+  toolGroups?: number;
+  expandedToolGroups?: number;
+}
+
+export interface DesktopRendererLongTaskDiagnostic extends DesktopRendererSessionActivity {
   kind: 'long-task';
   durationMs: number;
+}
+
+export interface DesktopRendererInputDelayDiagnostic extends DesktopRendererSessionActivity {
+  kind: 'input-delay';
+  inputDelayMs: number;
+  eventType: string;
 }
 
 export interface DesktopRendererComposerActionDiagnostic {
@@ -408,6 +421,7 @@ export type DesktopRendererDiagnostic =
   | DesktopRendererFailureDiagnostic
   | DesktopRendererWhatsNewDiagnostic
   | DesktopRendererLongTaskDiagnostic
+  | DesktopRendererInputDelayDiagnostic
   | DesktopRendererComposerActionDiagnostic
   | import('./transcript-read-diagnostics').TranscriptReadDiagnostic;
 

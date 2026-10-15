@@ -18,6 +18,7 @@ import type {
   DesktopSubmitOptions,
   SessionSnapshot,
   ToolApprovalDecision,
+  UserQuestionResponse,
 } from '../shared/contract';
 import type { SessionFinalAnswer } from './session-final-answer';
 
@@ -112,6 +113,7 @@ export interface DesktopService {
     id: string,
     decision: ToolApprovalDecision
   ): boolean | Promise<boolean>;
+  resolveUserQuestionForSession(sessionId: string, id: string, response: UserQuestionResponse): Promise<boolean>;
   listProviderModels(options?: DesktopModelCatalogOptions): Promise<DesktopModelOption[]>;
   /** Optional sessionId targets a pane; omitted routes through the control
    *  session for settings that are not owned by a conversation. */
@@ -176,6 +178,7 @@ export const DESKTOP_SERVICE_METHODS = [
   'submitToSession',
   'abortSession',
   'resolveToolApprovalForSession',
+  'resolveUserQuestionForSession',
   'listProviderModels',
   'setModelRoute',
   'setFast',

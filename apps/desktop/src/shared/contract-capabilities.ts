@@ -136,6 +136,7 @@ export const DESKTOP_CAPABILITIES = [
   'getQuotaHistory',
   'getSessionUsage',
   'consumeCodexRateLimitResetCredit',
+  'requestConnectedAccountQuotaWindows',
   'getOnboardingStatus',
   'getOAuthProviderLoginStatus',
   'skipOnboarding',

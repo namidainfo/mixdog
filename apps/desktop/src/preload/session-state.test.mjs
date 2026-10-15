@@ -45,6 +45,31 @@ function fixture() {
   };
 }
 
+test('preload exposes isolated session-open delivery, readiness and navigation receipts without IPC events', () => {
+  const f = fixture();
+  const received = [];
+  const notifications = [];
+  const stop = f.api.onSessionOpenRequested((...args) => received.push(args));
+  const stopNotification = f.api.onNotificationOpenSession((id) => notifications.push(id));
+  const request = { requestId: 1, sessionId: 'existing-session', cwd: '/project' };
+  f.ipc.emit(DESKTOP_IPC.sessionOpenRequested, { privateEvent: true }, request);
+  assert.deepEqual(received, [[request]]);
+  assert.deepEqual(notifications, []);
+  f.api.sessionOpenNavigationReady(true);
+  const result = { requestId: 1, sessionId: 'existing-session', opened: true };
+  f.api.sessionOpenHandled(result);
+  assert.deepEqual(f.sent, [
+    [DESKTOP_IPC.sessionOpenNavigationReady, true],
+    [DESKTOP_IPC.sessionOpenHandled, result],
+  ]);
+  f.ipc.emit(DESKTOP_IPC.notificationOpenSession, {}, 'notification-session');
+  assert.deepEqual(notifications, ['notification-session']);
+  assert.equal(received.length, 1);
+  stop();
+  stopNotification();
+  assert.equal(f.ipc.listenerCount(DESKTOP_IPC.sessionOpenRequested), 0);
+});
+
 test('preload retains independent session decoders and forwards snapshot metadata without exposing IPC events', () => {
   const f = fixture();
   const updates = [];

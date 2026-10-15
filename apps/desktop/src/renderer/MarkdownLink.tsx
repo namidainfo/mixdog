@@ -624,10 +624,49 @@ function LocalLinkIcon({ target }: { target: LocalLinkTarget }) {
  *  as its own focusable button (callers keep it out of the header's
  *  disclosure button). Enter/Space open it; its events never reach a
  *  disclosure around it. */
+function localLinkMenu(link: LocalLinkTarget, point: { x: number; y: number }): ScmContextMenuState {
+  const external = !isRemoteHostRenderer();
+  return {
+    label: link.name,
+    ...point,
+    items: [
+      { id: 'open', label: t('Open'), onSelect: () => void link.open() },
+      ...(link.webPage
+        ? [{ id: 'open-browser', label: t('Open in browser'), onSelect: () => void link.open(true) }]
+        : []),
+      ...(external
+        ? [
+            { id: 'open-default', label: t('Open in default app'), onSelect: () => void link.openDefault() },
+            {
+              id: 'reveal',
+              label: t('Reveal in Explorer'),
+              onSelect: () => void (link.kind === 'folder' && !isSshConnectionWindow() ? link.openDefault() : link.reveal()),
+            },
+          ]
+        : []),
+      ...(link.download && !external
+        ? [
+            {
+              id: 'download',
+              label: t('Download / Share'),
+              onSelect: link.download,
+              disabled: Boolean(link.downloadBlocked),
+              title: link.downloadBlocked,
+            },
+          ]
+        : []),
+      { id: 'copy-path', label: t('Copy path'), onSelect: () => void link.copyPath(), separatorBefore: true },
+    ],
+  };
+}
+
 export function LocalPathMention({ path, line, children }: { path: string; line?: number; children: ReactNode }) {
   const link = useLocalLinkTarget(line ? `${path}:${line}` : path);
+  const [menu, setMenu] = useState<ScmContextMenuState | null>(null);
   if (!link.local) return <>{children}</>;
   return (
+    <>
+    {menu && <ScmContextMenu state={menu} onClose={() => setMenu(null)} />}
     <button
       type="button"
       className="tool-path-link"
@@ -639,7 +678,17 @@ export function LocalPathMention({ path, line, children }: { path: string; line?
       }}
       onPointerUp={link.onPointerUp}
       onPointerCancel={link.onPointerCancel}
-      onKeyDown={(event) => event.stopPropagation()}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setMenu(localLinkMenu(link, pointerMenuPoint(event)));
+      }}
+      onKeyDown={(event) => {
+        event.stopPropagation();
+        if (!isContextMenuKey(event)) return;
+        event.preventDefault();
+        setMenu(localLinkMenu(link, elementMenuPoint(event.currentTarget)));
+      }}
       onKeyUp={(event) => event.stopPropagation()}
       onClick={(event) => {
         event.preventDefault();
@@ -650,6 +699,7 @@ export function LocalPathMention({ path, line, children }: { path: string; line?
       <LocalLinkIcon target={link} />
       {children}
     </button>
+    </>
   );
 }
 
@@ -680,39 +730,7 @@ export function MarkdownLink({
   const [menu, setMenu] = useState<ScmContextMenuState | null>(null);
   const openWebLinkExternal = () => openWebLinkInSystemBrowser(sessionId, target);
   const openMenu = (point: { x: number; y: number }) => {
-    if (!local) {
-      setMenu(webLinkMenu(sessionId, target, point));
-      return;
-    }
-    const external = !isRemoteHostRenderer();
-    setMenu({
-      label: link.name,
-      ...point,
-      items: [
-        { id: 'open', label: t('Open'), onSelect: () => void link.open() },
-        ...(link.webPage
-          ? [{ id: 'open-browser', label: t('Open in browser'), onSelect: () => void link.open(true) }]
-          : []),
-        ...(external
-          ? [
-              { id: 'open-default', label: t('Open in default app'), onSelect: () => void link.openDefault() },
-              { id: 'reveal', label: t('Reveal in Explorer'), onSelect: () => void link.reveal() },
-            ]
-          : []),
-        ...(link.download && !external
-          ? [
-              {
-                id: 'download',
-                label: t('Download / Share'),
-                onSelect: link.download,
-                disabled: Boolean(link.downloadBlocked),
-                title: link.downloadBlocked,
-              },
-            ]
-          : []),
-        { id: 'copy-path', label: t('Copy path'), onSelect: () => void link.copyPath(), separatorBefore: true },
-      ],
-    });
+    setMenu(local ? localLinkMenu(link, point) : webLinkMenu(sessionId, target, point));
   };
   const pathLike =
     local &&

@@ -59,6 +59,7 @@ export function useAppWorkbenchHubs(
   const { activatePaneSurface, paneStripFor, stripTitleFor } = useAppPaneChrome({
     tabs,
     sessions,
+    projects: shell.projectCatalog.projects,
     paneWorkspace,
     dirtyFileKeys: editorState.dirtyFileKeys,
     workingSessionIds: sessionTitle.workingSessionIds,

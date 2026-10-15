@@ -239,6 +239,19 @@ function updaterInstallLabel(state: PanelContext['updaterState']): string {
 
 function UpdatePanel({ data, pending, run, updaterState, checkDesktopUpdate, installDesktopUpdate }: PanelContext) {
   const update = record(data.update);
+  if (update.manualOnly === true) {
+    return (
+      <Group title={t('Update')}>
+        <ResourceRow title={t('Current version')} meta={String(update.currentVersion || t('unknown'))} />
+        <ToggleRow title={t('Auto-update')} checked={false} disabled onChange={() => {}} />
+        <ResourceRow
+          title={t('Update method')}
+          meta={t('Manual installation')}
+          description={t('Personal builds use manual installers. Official updates are disabled.')}
+        />
+      </Group>
+    );
+  }
   const version = 'version' in updaterState ? updaterState.version : String(update.latestVersion || '');
   const busy =
     Boolean(pending) ||

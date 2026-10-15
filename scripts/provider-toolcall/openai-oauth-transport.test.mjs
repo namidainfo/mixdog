@@ -155,6 +155,7 @@ for (const authRetry of [false, true]) {
     ['429', { httpStatus: 429, retryAfterMs: 15000 }, 'permanent'],
     ['503', { httpStatus: 503 }, 'transient'],
     ['unknown', {}, 'unknown'],
+    ['certificate', { code: 'SELF_SIGNED_CERT_IN_CHAIN' }, 'permanent'],
     ['cancelled', { name: 'AbortError' }, 'permanent'],
     ['visible text', { liveTextEmitted: true, unsafeToRetry: true }, 'permanent'],
     ['dispatched tool', { emittedToolCall: true, unsafeToRetry: true }, 'permanent'],
@@ -205,6 +206,52 @@ for (const authRetry of [false, true]) {
       assert.equal(httpCalls, firstSendHttpCalls + 1);
     });
   }
+}
+
+for (const [label, wrap] of [
+  ['direct', (cause) => cause],
+  ['fetch', (cause) => new TypeError('fetch failed', { cause })],
+  ['SDK', (cause) => Object.assign(new Error('connection error', { cause }), { name: 'APIConnectionError' })],
+]) {
+  test(`OpenAI OAuth ${label} certificate failure after ECONNRESET never falls back to HTTP`, async (t) => {
+    withOpenAiTransportEnv(t);
+    const provider = oauthProvider();
+    const certificate = Object.assign(new Error('certificate verification failed'), {
+      code: 'SELF_SIGNED_CERT_IN_CHAIN',
+    });
+    const current = wrap(certificate);
+    const originalCause = current.cause;
+    let acquires = 0;
+    let httpCalls = 0;
+    const delays = [];
+    await assert.rejects(
+      provider.send([], prebuiltBody.model, [], {
+        sessionId: `oauth-certificate-${label}`,
+        _prebuiltBody: prebuiltBody,
+        _sendViaWebSocketFn: (args) => sendViaWebSocket({
+          ...args,
+          _acquireWithRetryFn: async () => {
+            acquires += 1;
+            if (acquires === 1) throw Object.assign(new Error('reset'), { code: 'ECONNRESET' });
+            throw current;
+          },
+          _sleepFn: async (ms) => { delays.push(ms); },
+          _sendSpanTraceFn: () => {},
+          _agentTraceFn: () => {},
+        }),
+        _sendViaHttpSseFn: async () => {
+          httpCalls += 1;
+          return { content: 'must-not-fallback', toolCalls: [] };
+        },
+      }),
+      (error) => error === current
+    );
+    assert.equal(acquires, 2);
+    assert.equal(delays.length, 1);
+    assert.equal(httpCalls, 0);
+    assert.equal(current.cause, originalCause);
+    assert.equal(classifyError(current), 'permanent');
+  });
 }
 
 test('OpenAI OAuth handshake 404 falls back to HTTP once without catalog or WS retries', async (t) => {

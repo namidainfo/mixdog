@@ -43,6 +43,7 @@ import {
   type VisualizeInlineContent,
 } from '../shared/visualize';
 import { requiredSessionId } from './desktop-state';
+export { normalizeUserQuestionResponse as requiredUserQuestionResponse } from '../../../../src/runtime/user-questions/contract.mjs';
 import { hasControlCharacter } from './ipc-control-chars';
 import { isWorktreeCapability, validateWorktreeCapabilityArgs, WORKTREE_CAPABILITY_ARITY } from './worktree-validation';
 import { IMPORT_CAPABILITY_ARITY, isImportCapability, validateImportCapabilityArgs } from './import-validation';
@@ -405,6 +406,7 @@ const CAPABILITY_ARITY = {
   getQuotaHistory: [0, 1],
   getSessionUsage: [0, 0],
   consumeCodexRateLimitResetCredit: [1, 1],
+  requestConnectedAccountQuotaWindows: [0, 0],
   getSessionReviewDiff: [0, 0],
   getTurnReviewDiff: [0, 1],
   revertTurnReview: [0, 1],

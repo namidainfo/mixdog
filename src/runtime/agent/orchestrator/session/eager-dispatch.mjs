@@ -42,6 +42,7 @@ export function createEagerDispatcher({
       signal,
       notifyFn: opts.notifyFn,
       toolApprovalHook: opts.onToolApproval,
+      userQuestionHook: opts.onUserQuestion,
       iteration: getNextIteration(),
       localSearchTelemetry: entry.localSearchTelemetry,
       resultTelemetry: entry.resultTelemetry,

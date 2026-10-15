@@ -1,6 +1,6 @@
 import { Info, Plus } from 'lucide-react';
 import { SidebarUsageMenu } from './SidebarUsageMenu';
-import { useEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type KeyboardEvent } from 'react';
 import { invalidateSidebarReferenceForMutation } from './sidebar-reference-cache';
 
 import { PaneSurfaceGate } from './PaneSurfaceGate';
@@ -33,6 +33,7 @@ import { ProviderAccountPicker } from './ProviderAccountPicker';
 import { focusQuotaUsage } from './usage-surface-mode';
 import { prefetchQuotaUsage } from './quota-usage-cache';
 import { SUBSCRIPTIONS, type Subscription } from './subscription-providers';
+import { usageAccountNote, usageFailureReason } from './usage-status';
 
 const SIDEBAR_CODEX_RESET_ATTEMPT_KEY = 'mixdog.desktop.codex-reset-attempt.v1';
 const SIDEBAR_CODEX_RESET_TIMEOUT_MS = 90_000;
@@ -80,7 +81,7 @@ function quotaWindows(row: UsageRecord): UsageRecord[] {
 }
 
 function quotaWindowKey(window: UsageRecord, index: number): string {
-  return String(window.id || window.window || window.period || window.label || `window:${index}`);
+  return `${window.id || window.window || window.period || window.label || 'window'}:${index}`;
 }
 
 function resetCreditKey(credit: UsageRecord, index: number): string {
@@ -92,7 +93,41 @@ function resetCreditKey(credit: UsageRecord, index: number): string {
 }
 
 function subscriptionConnected(row: UsageRecord): boolean {
-  return row.authenticated === true || quotaWindows(row).length > 0;
+  return row.authenticated === true && row.reauthRequired !== true;
+}
+
+/** An authoritative account roster is never collapsed to the selected account.
+ * Older cached dashboards can still paint their authenticated provider row. */
+export function connectedUsageAccounts(dashboard: unknown): UsageRecord[] {
+  return rows(dashboard).flatMap((row) => {
+    const subscription = SUBSCRIPTIONS.find((entry) => entry.provider === row.id);
+    if (row.group !== 'oauth' && subscription?.key !== 'opencode-go') return [];
+    const accounts = Array.isArray(row.accounts) ? row.accounts.map(record) : [row];
+    return accounts.filter(subscriptionConnected).map((account) => {
+      const provider = String(row.id || '');
+      const brand = subscription?.label || String(row.label || provider);
+      const alias = String(account.alias || '').trim();
+      return {
+        ...account,
+        provider,
+        providerKey: subscription?.key || provider,
+        key: `${provider}:${account.accountId || 'provider'}`,
+        displayLabel: alias ? `${brand} (${alias})` : brand,
+        minimalRequestSupported: account.minimalRequestSupported === true,
+      };
+    });
+  });
+}
+
+function quotaAmountDetails(window: UsageRecord): string {
+  const parts: string[] = [];
+  for (const [suffix, unit] of [['Usd', '$'], ['Credits', ' credits']] as const) {
+    for (const [field, label] of [['remaining', 'Remaining'], ['limit', 'Limit'], ['used', 'Used']] as const) {
+      const value = number(window[`${field}${suffix}`]);
+      if (value !== null) parts.push(`${t(label)} ${suffix === 'Usd' ? unit : ''}${value}${suffix === 'Credits' ? unit : ''}`);
+    }
+  }
+  return parts.join(' · ');
 }
 
 function usedPercent(window: UsageRecord): number | null {
@@ -186,8 +221,19 @@ function pinWindows(
  *  window joins as a second bar (none for a provider without one) and the
  *  figure/tone follow the higher of the two. */
 export function usagePinEntries(dashboard: unknown, mode: UsageRailBars = 'long'): UsagePinEntry[] {
-  return SUBSCRIPTIONS.flatMap((subscription) => {
-    const picked = pinWindows(quotaWindows(subscriptionRow(dashboard, subscription)), subscription.provider);
+  const sources = rows(dashboard).some((row) => Array.isArray(row.accounts))
+    ? connectedUsageAccounts(dashboard).map((account) => ({
+        key: String(account.key),
+        label: `${account.displayLabel}${account.selected ? ` — ${t('In use')}` : ''}`,
+        provider: String(account.provider),
+        windows: quotaWindows(account),
+      }))
+    : SUBSCRIPTIONS.map((subscription) => ({
+        ...subscription,
+        windows: quotaWindows(subscriptionRow(dashboard, subscription)),
+      }));
+  return sources.flatMap((source) => {
+    const picked = pinWindows(source.windows, source.provider);
     if (!picked) return [];
     const windows = picked.short ? [picked.short, picked.long] : [picked.long];
     const bars = mode === 'short-long' ? windows : [picked.long];
@@ -197,14 +243,14 @@ export function usagePinEntries(dashboard: unknown, mode: UsageRailBars = 'long'
     });
     return [
       {
-        key: subscription.key,
-        label: subscription.label,
-        provider: subscription.provider,
+        key: source.key,
+        label: source.label,
+        provider: source.provider,
         percent: bars[hot].percent,
         bars,
         windows,
         hot,
-        tooltip: usagePinTooltip(subscription.label, windows),
+        tooltip: usagePinTooltip(source.label, windows),
       },
     ];
   });
@@ -397,10 +443,9 @@ export function SidebarUsage({
   const snapshot = useSyncExternalStore(subscribeUsageDashboard, getUsageDashboardSnapshot);
   const dashboard = snapshot.dashboard;
   const rowsPresent = rows(dashboard).length > 0;
-  const anyConnected = SUBSCRIPTIONS.some((subscription) =>
-    subscriptionConnected(subscriptionRow(dashboard, subscription))
-  );
-  const resetAts = rows(dashboard)
+  const connectedAccounts = connectedUsageAccounts(dashboard);
+  const anyConnected = connectedAccounts.length > 0;
+  const resetAts = connectedAccounts
     .flatMap((row) => quotaWindows(row))
     .map((window) => timestamp(window.resetAt))
     .filter((value): value is number => value !== null);
@@ -417,6 +462,34 @@ export function SidebarUsage({
   const [resetConfirming, setResetConfirming] = useState<string | null>(null);
   const [resetting, setResetting] = useState(false);
   const [resetNotice, setResetNotice] = useState('');
+  const bulkPending = useRef(false);
+  const [requestingAccounts, setRequestingAccounts] = useState(false);
+  const [accountRequestResults, setAccountRequestResults] = useState<UsageRecord[]>([]);
+  const [accountRequestNotice, setAccountRequestNotice] = useState('');
+  const requestAllAccounts = async () => {
+    if (bulkPending.current || !anyConnected || !api?.invokeCapability) return;
+    bulkPending.current = true;
+    setRequestingAccounts(true);
+    setAccountRequestResults([]);
+    setAccountRequestNotice('');
+    try {
+      const response = await api.invokeCapability({ capability: 'requestConnectedAccountQuotaWindows', args: [] });
+      const result = record(response?.value);
+      if (result.status !== 'completed' || !Array.isArray(result.results)) {
+        throw new Error(t('The account requests could not be confirmed.'));
+      }
+      setAccountRequestResults(result.results.map(record));
+      if (result.results.length === 0) setAccountRequestNotice(t('No connected supported OAuth accounts are available.'));
+      if (result.refreshError) setAccountRequestNotice(t('Quota refresh failed: {{reason}}', { reason: usageFailureReason(result.refreshError) }));
+      if (!publishUsageDashboard(result.dashboard)) await refreshUsageDashboard(api, { force: true });
+    } catch (cause) {
+      setAccountRequestNotice(usageFailureReason(cause instanceof Error ? cause.message : cause));
+      await refreshUsageDashboard(api, { force: true });
+    } finally {
+      bulkPending.current = false;
+      setRequestingAccounts(false);
+    }
+  };
 
   // One cadence for the renderer: the rail holds it too, so a popup remount
   // never restarts the five-minute timer and never re-requests.
@@ -424,14 +497,14 @@ export function SidebarUsage({
 
   // A provider name or meter opens its own subscription usage: the name with
   // that provider's first window, a meter with its window selected.
-  const quotaTrigger = (provider: string, window = '') => {
+  const quotaTrigger = (provider: string, window = '', account = '') => {
     if (!onOpenStats) return {};
     const open = () => {
-      focusQuotaUsage({ provider, window });
+      focusQuotaUsage({ provider, window, account });
       onOpenStats();
     };
     // What the click opens is read while the pointer is still on its way.
-    const readAhead = () => prefetchQuotaUsage(api, { provider, window });
+    const readAhead = () => prefetchQuotaUsage(api, { provider, window, account });
     return {
       role: 'button',
       tabIndex: 0,
@@ -575,7 +648,7 @@ export function SidebarUsage({
       const reason = cause instanceof Error && cause.message ? cause.message.trim() : '';
       setResetNotice(
         reason
-          ? t('Reset could not be confirmed ({{reason}}). Retrying is safe.', { reason })
+          ? t('Reset could not be confirmed ({{reason}}). Retrying is safe.', { reason: usageFailureReason(reason) })
           : t('Reset could not be confirmed. Retrying is safe.')
       );
     } finally {
@@ -624,34 +697,65 @@ export function SidebarUsage({
       </header>
       <PaneSurfaceGate ready={!awaitingFirstUsage} label={t('Loading usage…')} fallback={<InitialSurface />}>
         <div className="sidebar-usage-content">
+          <div className="sidebar-usage-bulk">
+            <button
+              type="button"
+              className="sidebar-usage-request-all"
+              disabled={requestingAccounts || !anyConnected || !api?.invokeCapability}
+              aria-busy={requestingAccounts}
+              onClick={() => void requestAllAccounts()}
+            >
+              {requestingAccounts ? t('Requesting…') : t('Send minimal requests to all accounts')}
+            </button>
+            {accountRequestNotice && <p role="status">{accountRequestNotice}</p>}
+            {accountRequestResults.length > 0 && (
+              <ul className="sidebar-usage-request-results" role="status">
+                {accountRequestResults.map((result, index) => (
+                  <li key={`${result.provider}:${result.accountId || index}`}>
+                    {SUBSCRIPTIONS.find((entry) => entry.provider === result.provider)?.label || String(result.provider)}
+                    {result.label ? ` (${result.label})` : ''}: {result.status === 'sent'
+                      ? t('Request sent; check refreshed quota')
+                      : result.status === 'unsupported' ? t('Unsupported') : t('Failed')}
+                    {result.message ? ` — ${usageFailureReason(result.message)}` : ''}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
           <div id="sidebar-usage-list" className="sidebar-usage-list">
             {/* Flat roster: header (icon · name · soonest reset) with
             EVERY quota window inline beneath — nothing left to drill into. */}
-            {SUBSCRIPTIONS.map((subscription) => {
-              const row = subscriptionRow(dashboard, subscription);
+            {connectedAccounts.map((row) => {
+              const provider = String(row.provider);
               const windows = quotaWindows(row);
               const credits = creditsOf(row);
               const checking = row.status === 'checking';
+              const accountNote = usageAccountNote(row);
               // Only connected providers are listed, so a row here always
               // reads as connected and never as a first-load placeholder.
               if (!subscriptionConnected(row)) return null;
               return (
                 <div
-                  className="sidebar-usage-row"
-                  key={subscription.key}
-                  data-usage-provider={subscription.key}
+                  className={`sidebar-usage-row${row.stale ? ' is-stale' : ''}`}
+                  key={String(row.key)}
+                  data-usage-provider={String(row.providerKey)}
+                  data-usage-account={String(row.accountId || '')}
+                  data-account-selected={row.selected === true}
                   aria-busy={checking}
                 >
                   <span className="sidebar-usage-line">
                     <span className="sidebar-usage-provider-icon">
-                      <ProviderIcon provider={subscription.provider} />
+                      <ProviderIcon provider={provider} />
                     </span>
-                    <b {...quotaTrigger(subscription.provider)}>{subscription.label}</b>
-                    {subscription.provider.endsWith('-oauth') && (
-                      <ProviderAccountPicker api={api} provider={subscription.provider} />
+                    <b title={String(row.displayLabel)} {...quotaTrigger(provider, '', String(row.accountId || ''))}>{String(row.displayLabel)}</b>
+                    {row.selected === true && <small className="sidebar-usage-selected">{t('In use')}</small>}
+                    {provider.endsWith('-oauth') && (row.selected === true || !row.accountId) && (
+                      <ProviderAccountPicker api={api} provider={provider} />
                     )}
                     {windows.length === 0 && !checking && <small>{t('Connected')}</small>}
                   </span>
+                  {row.minimalRequestSupported === false && <small className="sidebar-usage-account-note">{t('Minimal requests unsupported: account routing unavailable')}</small>}
+                  {accountNote && <small className="sidebar-usage-account-note" role="status">{accountNote}</small>}
                   <span className="sidebar-usage-meters">
                     {windows.map((window, index) => {
                       const percent = usedPercent(window);
@@ -660,45 +764,55 @@ export function SidebarUsage({
                         percent,
                         resetAt,
                         refreshedAt: snapshot.refreshedAt,
-                        verificationFailed: resetAt !== null && failedResetAts.has(resetAt),
+                        verificationFailed: resetAt !== null && (resetAt <= Date.now() || failedResetAts.has(resetAt)),
                       });
                       const effectivePercent = resetPresentation.percent;
-                      const displayedPercent = displayUsagePercent(effectivePercent);
+                      const remainingPercent = effectivePercent === null ? null : 100 - effectivePercent;
+                      const displayedPercent = displayUsagePercent(remainingPercent);
                       const tone = usageToneClass(effectivePercent);
-                      const resetSentence =
-                        resetPresentation.resetTextOverride === null ? resetText(window.resetAt) : '';
+                      const details = quotaAmountDetails(window);
+                      const resetTitle = resetAt === null ? t('Reset time unavailable') : `${resetText(window.resetAt)} · ${new Date(resetAt).toLocaleString()}`;
+                      const remainingTitle = displayedPercent === null ? t('Remaining unavailable') : t('{{percent}}% remaining', { percent: displayedPercent });
                       return (
                         <span
-                          className={`sidebar-usage-meter${tone}`}
+                          className={`sidebar-usage-meter${tone}${remainingPercent !== null ? ' has-quota' : ''}${remainingPercent !== null && remainingPercent > 0 ? ' glowing' : ''}`}
+                          style={{ '--quota-value': `${remainingPercent ?? 0}%` } as CSSProperties}
                           key={quotaWindowKey(window, index)}
-                          {...quotaTrigger(subscription.provider, String(window.label || ''))}
+                          title={`${remainingTitle} · ${resetTitle}${details ? ` · ${details}` : ''}`}
+                          {...quotaTrigger(provider, String(window.label || ''), String(row.accountId || ''))}
                         >
                           <small title={windowLabel(window)}>{windowLabel(window)}</small>
-                          <i>
-                            <i style={{ width: `${effectivePercent ?? 0}%` }} />
+                          <i aria-label={`${row.displayLabel} ${windowLabel(window)}: ${remainingTitle}`}
+                            role={remainingPercent === null ? undefined : 'meter'}
+                            aria-valuemin={remainingPercent === null ? undefined : 0}
+                            aria-valuemax={remainingPercent === null ? undefined : 100}
+                            aria-valuenow={remainingPercent ?? undefined}
+                            aria-valuetext={remainingTitle}>
+                            <i style={{ width: `${remainingPercent ?? 0}%` }} />
                           </i>
                           <b>{displayedPercent === null ? '—' : `${displayedPercent}%`}</b>
-                          <em title={resetSentence || undefined}>
+                          <em title={resetTitle}>
                             {resetPresentation.resetTextOverride ?? resetShortText(window.resetAt)}
                           </em>
+                          {details && <span className="sidebar-usage-quota-details">{details}</span>}
                         </span>
                       );
                     })}
                     {windows.length === 0 && (
                       <span className="sidebar-usage-meter sidebar-usage-meter-empty">
-                        <small>{checking ? t('Loading usage…') : t('No current quota window')}</small>
+                        <small>{checking ? t('Loading usage…') : t('Quota unavailable from provider')}</small>
                       </span>
                     )}
                   </span>
                   {credits && (
                     <CreditLine
                       credits={credits}
-                      on={creditSwitch[subscription.provider] ?? row.useCredits === true}
+                      on={creditSwitch[provider] ?? row.useCredits === true}
                       exhausted={windows.some((window) => (usedPercent(window) ?? 0) >= 100)}
-                      onToggle={(next) => void toggleCredits(subscription.provider, next)}
+                      onToggle={(next) => void toggleCredits(provider, next)}
                     />
                   )}
-                  {subscription.key === 'codex' && codexResetOffer && codexResetCount > 0 && (
+                  {row.providerKey === 'codex' && (row.selected === true || !row.accountId) && codexResetOffer && codexResetCount > 0 && (
                     <div className="sidebar-usage-reset-credit" ref={resetRef}>
                       <div className="sidebar-usage-reset-line">
                         <small>{t('Reset credits')}</small>
@@ -723,6 +837,11 @@ export function SidebarUsage({
                           {t('Use')}
                         </button>
                       </div>
+                      {timestamp(codexResetCredits.nextExpiresAt) !== null && (
+                        <p className="sidebar-usage-account-note">
+                          {t('Next reset credit expiry: {{expiry}}', { expiry: resetExpiryText(codexResetCredits.nextExpiresAt) })}
+                        </p>
+                      )}
                       {resetInfoOpen && (
                         <ul className="sidebar-usage-reset-popover" role="dialog" aria-label={t('Reset credits')}>
                           {codexResetRows.map((credit, index) => {

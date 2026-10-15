@@ -7,6 +7,7 @@ import { createRuntimeFacade } from '../runtime-facade.mjs';
 import { bootProfile } from '../boot-profile.mjs';
 import { assertAdmissionOpen, bindSessionAddress } from '../session-address.mjs';
 import { dataDirOf, workflowHelpers } from './shared.mjs';
+import { reserveSessionTitle } from '../../runtime/agent/orchestrator/session/store/title-sequence.mjs';
 
 export function buildFacade(boot) {
   const { rt, setupTool } = boot;
@@ -66,6 +67,15 @@ function reserveSessionId(boot, id) {
   }
   assertAdmissionOpen(rt);
   bindSessionAddress(rt, id);
+  if (!rt.session?.id && rt.reservedSessionId !== id) {
+    const profile = rt.sessionProfile || {};
+    rt.reservedSessionTitle = reserveSessionTitle({
+      ...profile,
+      id,
+      visibility: profile.owner === 'agent' ? 'agent-only' : profile.visibility,
+      createdAt: Date.now(),
+    });
+  }
   if (!rt.session?.id) rt.reservedSessionId = id;
   boot.bindRuntimeNotificationSession(id);
   boot.goalRuntime?.watchSession(id);

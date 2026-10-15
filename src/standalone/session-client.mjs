@@ -94,6 +94,7 @@ function request({
   timeoutMs = 120_000,
   control = false,
   urgent = false,
+  signal,
   // Total-duration bound (timeoutMs only measures socket inactivity, which a
   // trickling response keeps resetting). Probes set it; calls do not.
   deadlineMs = 0,
@@ -121,6 +122,7 @@ function request({
           ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}),
         },
         timeout: timeoutMs,
+        signal,
       },
       (res) => {
         let data = '';

@@ -97,6 +97,8 @@ export function useAppSessionCommands(
     tabs,
     finishPendingConversationHandoff,
     activateSelection,
+    existingSessionReady: nav.startupSettled && nav.sessionCatalogReady && shell.snapshotHydrated && !shell.paneWorkspace.restorePending,
+    onSessionOpenError: setError,
   });
   openSessionRef.current = openSession;
   const prefetchSession = useCallback((sessionId: string) => requestSessionRead(sessionId), []);

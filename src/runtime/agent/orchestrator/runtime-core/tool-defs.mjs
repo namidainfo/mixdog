@@ -1,6 +1,7 @@
 // Standalone session tool definitions (wrapper tools surfaced by the runtime).
 // Pure, self-contained schemas + the agent-hidden default helper; no runtime
 // closure dependencies.
+import { REQUEST_USER_INPUT_TOOL } from '../../../user-questions/tool.mjs';
 
 export const TOOL_SEARCH_TOOL = {
   name: 'load_tool',
@@ -128,6 +129,7 @@ export function collectStandaloneToolDefs({
   const webSearchRuntimeTools = admitted(webSearchToolDefs?.TOOL_DEFS, WEB_SEARCH_RUNTIME_TOOLS);
   const standaloneTools = [
     TOOL_SEARCH_TOOL,
+    REQUEST_USER_INPUT_TOOL,
     ...(skillToolEnabled ? [SKILL_TOOL] : []),
     CWD_TOOL,
     ...webSearchRuntimeTools.filter((tool) => tool?.public !== false),

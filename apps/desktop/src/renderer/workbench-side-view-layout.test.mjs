@@ -193,6 +193,7 @@ test('a corrupt or missing persisted layout falls back to the defaults', () => {
     ['extensions'],
     ['source-control'],
     ['search'],
+    ['worktrail'],
     ['webhooks'],
     ['ports'],
   ]);

@@ -10,6 +10,7 @@ import { createBridgeToolHandlers } from './internal-tool-executor/bridge-tools.
 import { createFeatureToolHandlers } from './internal-tool-executor/feature-tools.mjs';
 import { createKnowledgeToolHandlers } from './internal-tool-executor/knowledge-tools.mjs';
 import { createWorkspaceToolHandlers } from './internal-tool-executor/workspace-tools.mjs';
+import { executeUserQuestion } from '../runtime/user-questions/tool.mjs';
 
 export function createInternalToolExecutor({
   rt,
@@ -34,6 +35,7 @@ export function createInternalToolExecutor({
   getWorkspaceApi,
 }) {
   const handlers = {
+    request_user_input: (args, { callerCtx }) => executeUserQuestion(args, callerCtx),
     ...createBridgeToolHandlers({ rt }),
     ...createFeatureToolHandlers({ rt, setupTool, officeToolsEnabled, mediaToolEnabled, tidyToolEnabled }),
     ...createKnowledgeToolHandlers({
@@ -72,6 +74,10 @@ export function createInternalToolExecutor({
 
   return async (name, args, callerCtx = {}) => {
     const callerCwd = clean(callerCtx?.callerCwd) || rt.currentCwd;
+    if (callerCtx?.invocationSource === 'model-tool' && rt.session?.deferredSurfaceMode === 'none')
+      throw new Error('No-tools chat cannot execute tools; enter work mode explicitly.');
+    if (callerCtx?.invocationSource === 'model-tool' && rt.session?.deferredSurfaceMode === 'questions' && name !== 'request_user_input')
+      throw new Error('Question-only chat can only request user input; enter work mode explicitly.');
     if (callerCtx?.invocationSource === 'model-tool') guardModelCall(name);
     if (Object.hasOwn(handlers, name)) return handlers[name](args, { name, callerCtx, callerCwd });
     if (channels.isChannelTool(name)) {

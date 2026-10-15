@@ -87,6 +87,18 @@ export function normalizeRendererDiagnostic(input: unknown): Record<string, unkn
   return details;
 }
 
+function sessionActivityDiagnostic(record: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  if (Array.isArray(record.sessionKeys)) {
+    result.sessionKeys = [...new Set(record.sessionKeys.filter((key): key is string =>
+      typeof key === 'string' && /^[A-Za-z0-9_.:|/-]{1,160}$/.test(key)))].slice(0, 4);
+  }
+  for (const key of ['visibleTranscripts', 'toolGroups', 'expandedToolGroups']) {
+    if (typeof record[key] === 'number' && Number.isFinite(record[key])) result[key] = Math.max(0, Math.min(10_000, Math.round(record[key])));
+  }
+  return result;
+}
+
 export function normalizeRendererLongTaskDiagnostic(input: unknown): Record<string, unknown> | null {
   const record = input && typeof input === 'object' ? (input as Record<string, unknown>) : {};
   if (record.kind !== 'long-task') return null;
@@ -94,9 +106,18 @@ export function normalizeRendererLongTaskDiagnostic(input: unknown): Record<stri
   if (!Number.isFinite(durationMs) || durationMs < 50) return null;
   return {
     durationMs: Math.min(60_000, Math.round(durationMs)),
+    ...sessionActivityDiagnostic(record),
   };
 }
 
+export function normalizeRendererInputDelayDiagnostic(input: unknown): Record<string, unknown> | null {
+  const record = input && typeof input === 'object' ? (input as Record<string, unknown>) : {};
+  if (record.kind !== 'input-delay') return null;
+  const delay = Number(record.inputDelayMs);
+  const eventType = typeof record.eventType === 'string' ? record.eventType : '';
+  if (!Number.isFinite(delay) || delay < 50 || !['click', 'keydown', 'keyup', 'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'input', 'beforeinput', 'touchstart', 'touchend'].includes(eventType)) return null;
+  return { inputDelayMs: Math.min(60_000, Math.round(delay)), eventType, ...sessionActivityDiagnostic(record) };
+}
 export function normalizeRendererWhatsNewDiagnostic(input: unknown): Record<string, unknown> | null {
   const record = input && typeof input === 'object' ? (input as Record<string, unknown>) : {};
   if (record.kind !== 'whats-new') return null;

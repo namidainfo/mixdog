@@ -38,6 +38,7 @@ import { ensureCodexWireSessionId, mintSessionId } from './session-id.mjs';
 import { providerCacheKey } from './provider-cache-key.mjs';
 import { buildSessionRecord, normalizeDesktopSessionMetadata, sessionOriginFields } from './session-record.mjs';
 import { refreshSessionBp3Environment } from './prompt-utils.mjs';
+import { reserveSessionTitle } from '../store/title-sequence.mjs';
 import { isWorktreeBound } from '../../../../shared/worktrees/contract.mjs';
 
 // Owner liveness (attach-on-resume guard) and the durable turn-checkpoint
@@ -244,6 +245,11 @@ export function createSession(opts) {
   });
   session.providerCacheOptsOverride = Boolean(resolved.providerCacheOpts);
   refreshSessionBp3Environment(session, opts.cwd);
+  const titleReservation = opts.titleReservation || reserveSessionTitle(session);
+  if (titleReservation) {
+    session.createdAt = titleReservation.createdAt;
+    session.generatedTitlePrefix = titleReservation.prefix;
+  }
   // In-process registry + async debounced save: same-process create → load
   // reads live memory; disk flush is for cross-process / restart durability.
   setLiveSession(session);
@@ -493,6 +499,7 @@ function _attachViewerSession(session, sessionId) {
   const attached = { ...session, remoteAttached: true };
   delete attached.liveTurnMessages;
   delete attached.toolApprovalHook;
+  delete attached.userQuestionHook;
   if (process.env.MIXDOG_DEBUG_SESSION_LOG) {
     try {
       process.stderr.write(`[session] attach-on-resume: ${sessionId} is live elsewhere → viewer attach\n`);
