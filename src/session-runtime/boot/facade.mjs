@@ -8,6 +8,9 @@ import { bootProfile } from '../boot-profile.mjs';
 import { assertAdmissionOpen, bindSessionAddress } from '../session-address.mjs';
 import { dataDirOf, workflowHelpers } from './shared.mjs';
 import { reserveSessionTitle } from '../../runtime/agent/orchestrator/session/store/title-sequence.mjs';
+import { saveSessionAsync } from '../../runtime/agent/orchestrator/session/store.mjs';
+import { normalizeSlackExecutionPolicy } from '../../runtime/shared/slack-execution-policy.mjs';
+import path from 'node:path';
 
 export function buildFacade(boot) {
   const { rt, setupTool } = boot;
@@ -29,6 +32,23 @@ export function buildFacade(boot) {
       ...boot.modelRouteApi,
       ...boot.workflowAgentsApi,
       ...boot.sessionTurnApi,
+      setSlackExecutionPolicy: async (value) => {
+        const policy = normalizeSlackExecutionPolicy(value);
+        if (rt.reservedSessionId && !rt.session?.id) await boot.createCurrentSession('reservation');
+        const session = rt.session;
+        if (!session?.id || path.relative(policy.root, session.cwd) !== '') {
+          throw new Error('Slack 실행 정책은 현재 SOFTON 세션에만 적용할 수 있습니다.');
+        }
+        const previous = session.slackExecutionPolicy;
+        if (previous && (previous.teamId !== policy.teamId || previous.userId !== policy.userId)) {
+          throw new Error('Slack 세션의 소유자를 변경할 수 없습니다.');
+        }
+        if (JSON.stringify(previous) !== JSON.stringify(policy)) {
+          session.slackExecutionPolicy = policy;
+          await saveSessionAsync(session);
+        }
+        return policy;
+      },
       // A surface registers its idle auto-clear here; returns an unregister.
       setCompletionWakeGate: (gate) => {
         const next = typeof gate === 'function' ? gate : null;
@@ -119,6 +139,16 @@ function facadeGetters(boot) {
     getOutputStyle: () => boot.getOutputStyleStatusCached().current,
     getContextStatus: boot.computeContextStatus,
     getContextStatusForSession: boot.computeContextStatusForSession,
-    renameSessionTitle: (sessionId, title) => mgr.updateSessionManualTitle(sessionId, title),
+    renameSessionTitle: async (sessionId, title, options = {}) => {
+      if (options.preservePrefix !== true) return mgr.updateSessionManualTitle(sessionId, title);
+      // Naming a reserved session materializes its existing address and number,
+      // without submitting a prompt or starting a model response.
+      if (sessionId === rt.reservedSessionId && !rt.session?.id) {
+        await boot.createCurrentSession('reservation');
+      }
+      const session = mgr.getSession(sessionId);
+      if (!session?.generatedTitlePrefix) return false;
+      return mgr.updateSessionManualTitle(sessionId, `${session.generatedTitlePrefix}${title}`);
+    },
   };
 }

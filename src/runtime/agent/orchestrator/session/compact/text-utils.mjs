@@ -307,7 +307,7 @@ function redactToolArgValueOnly(value, key = '') {
 // scrub messages that survive compaction VERBATIM (preserved tail / mandatory
 // context), where prompt-side redaction does not apply. Redaction-only — no
 // truncation, summarization, key sorting, or depth/array caps.
-function redactToolCallArgumentsValue(rawArgs) {
+export function redactToolCallArgumentsValue(rawArgs) {
   if (rawArgs == null) return rawArgs;
   if (typeof rawArgs === 'string') {
     const trimmed = rawArgs.trim();

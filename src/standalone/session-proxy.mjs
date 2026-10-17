@@ -33,6 +33,7 @@ export function createSessionProxyFactory({ attachSession, ensureDaemon, closeId
       provider: options.provider,
       model: options.model,
       effort: options.effort,
+      ...(options.contextTokens !== undefined ? { contextTokens: options.contextTokens } : {}),
       toolMode: options.toolMode || 'full',
       remote: options.remote === true,
       desktopSession: options.desktopSession ?? null,

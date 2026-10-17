@@ -36,15 +36,17 @@ function reservedRuntime(id, sessionProfile = null) {
     sessionProfile,
     reservedSessionId: null,
   };
-  const facade = buildFacade({
+  const boot = {
     rt,
+    mgr: { getSession, updateSessionManualTitle },
     setupTool: {},
     workspaceApi: {},
     bindRuntimeNotificationSession: () => {},
     createCurrentSession: async () => {},
-  });
+  };
+  const facade = buildFacade(boot);
   facade.reserveSessionId(id);
-  return { rt, facade };
+  return { rt, facade, boot };
 }
 
 function materialize(rt) {
@@ -103,6 +105,26 @@ test('reservation fixes creation order and date before delayed materialization o
   assert.equal(materialize(third.rt).generatedTitlePrefix, '260102-002 | ');
   now = new Date(2026, 0, 3, 0, 2).getTime();
   assert.equal(reservedRuntime('sess_next_day').rt.reservedSessionTitle.prefix, '260103-000 | ');
+});
+
+test('prefix-preserving manual titles materialize the reservation once and resist generated-title replacement', async (t) => {
+  t.mock.method(Date, 'now', () => new Date(2026, 9, 16, 9).getTime());
+  const { rt, facade, boot } = reservedRuntime('sess_slack_named');
+  let creations = 0;
+  boot.createCurrentSession = async () => {
+    creations += 1;
+    rt.session = materialize(rt);
+  };
+  assert.equal(await facade.renameSessionTitle(
+    rt.reservedSessionId, 'softon_박수한 | 연결 폴더의 최신 프로젝트', { preservePrefix: true },
+  ), true);
+  assert.equal(creations, 1);
+  assert.equal(getSession(rt.session.id).title, '261016-000 | softon_박수한 | 연결 폴더의 최신 프로젝트');
+  assert.equal(getSession(rt.session.id).titleLocked, true);
+  assert.equal(await updateSessionGeneratedTitle(rt.session.id, 'Do not replace', 'first'), false);
+  assert.equal(await facade.renameSessionTitle(rt.session.id, 'Custom title'), true);
+  assert.equal(getSession(rt.session.id).title, 'Custom title');
+  assert.equal(creations, 1);
 });
 
 test('agent-owned reservations are excluded and direct ordinary creation still receives a number', (t) => {

@@ -67,9 +67,10 @@ export function createSessionLifecycleApi(bag, { restoreTranscriptItems, oauthFl
     listSessions: (options) => {
       return runtime.listSessions(options);
     },
-    renameSessionTitle: (id, title) => {
-      return runtime.renameSessionTitle?.(id, title) ?? false;
+    renameSessionTitle: (id, title, options) => {
+      return runtime.renameSessionTitle?.(id, title, options) ?? false;
     },
+    setSlackExecutionPolicy: (policy) => runtime.setSlackExecutionPolicy(policy),
     // Quota escape hatch: re-route THIS session onto another model, in place,
     // only after its latest settled turn failed on exhausted provider quota.
     // Starts no turn — the caller resubmits through retryFailedTurn.

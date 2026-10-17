@@ -26,3 +26,33 @@ export function createBackgroundWindow(options: BackgroundWindowOptions): Backgr
     },
   };
 }
+
+export const SOFTON_BACKGROUND_ARGUMENT = '--softon-hub-background';
+
+export function isSoftonBackgroundRequest(argv: readonly string[]): boolean {
+  return argv.includes(SOFTON_BACKGROUND_ARGUMENT);
+}
+
+/** Hide only the first local window, never a later user-opened connection. */
+export function createBackgroundStartup(argv: readonly string[]) {
+  let pending = isSoftonBackgroundRequest(argv);
+  return {
+    takeForWindow(local: boolean): boolean {
+      if (!local || !pending) return false;
+      pending = false;
+      return true;
+    },
+  };
+}
+
+export function restoreStartupMaximization(
+  window: { maximize(): void; once(event: 'show', listener: () => void): unknown },
+  maximized: boolean,
+  startHidden: boolean
+): void {
+  if (!maximized) return;
+  // Electron maximize() also shows a hidden window. Defer it until an
+  // explicit user reveal rather than undoing the background launch.
+  if (startHidden) window.once('show', () => window.maximize());
+  else window.maximize();
+}

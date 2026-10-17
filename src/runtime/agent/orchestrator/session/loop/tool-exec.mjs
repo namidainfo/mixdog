@@ -49,6 +49,7 @@ async function executeToolOwned(name, args, cwd, callerSessionId, sessionRef, ex
     executeOpts,
     beforeToolHook: hookFrom(executeOpts, sessionRef, 'beforeToolHook'),
     toolApprovalHook,
+    sessionRef,
   });
   if (hooked.denial) return hooked.denial;
   // A decision can settle after its turn was cancelled. It must never
@@ -59,7 +60,7 @@ async function executeToolOwned(name, args, cwd, callerSessionId, sessionRef, ex
   // role scoping and also applies built-in web_fetch transport routing.
   const finalCall = { name: hooked.name, arguments: hooked.args };
   routeWebFetchCall(finalCall);
-  const denial = preDispatchDenyForSession(sessionRef, finalCall);
+  const denial = preDispatchDenyForSession(sessionRef, finalCall, hooked);
   if (denial !== null) return denial;
   const call = { name: finalCall.name, args: finalCall.arguments, cwd: prepared.cwd };
   if (isMcpTool(call.name)) refreshDeferredMcpToolCatalog(sessionRef);

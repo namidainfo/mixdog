@@ -53,7 +53,7 @@ import {
 } from './connections';
 import { readDesktopModelBootstrapSnapshot } from './model-bootstrap';
 import { AgentAwakeService } from './agent-awake';
-import { createBackgroundWindow } from './background-window';
+import { createBackgroundWindow, createBackgroundStartup, isSoftonBackgroundRequest, restoreStartupMaximization } from './background-window';
 import { createDesktopTray, type DesktopTray } from './desktop-tray';
 import { loginShellOverrides, readLoginShellEnvironment, withHomebrewPath } from './login-shell-environment';
 import { createTurnAttention, type TurnAttention } from './turn-attention';
@@ -994,6 +994,7 @@ const backgroundWindow = createBackgroundWindow({
   enabled: () => runInBackground,
   quitting: () => quitApproved || quitAfterDispose,
 });
+const backgroundStartup = createBackgroundStartup(process.argv);
 
 function trayIconPath(): string | null {
   const name = process.platform === 'win32' ? 'mixdog.ico' : 'mixdog.png';
@@ -1657,7 +1658,7 @@ function installNavigationGuards(window: BrowserWindow, isAllowedNavigation: (ca
  * plus did-finish-load is therefore sufficient; ready-to-show remains the
  * preferred compositor signal when it arrives first, and an absolute deadline
  * shows the window either way. */
-function createWindowPresentation(window: BrowserWindow, startupStartedAt: number, afterRendererReady: () => void) {
+function createWindowPresentation(window: BrowserWindow, startupStartedAt: number, afterRendererReady: () => void, startHidden = false) {
   let readyToShow = false;
   let rendererCommitted = false;
   let rendererLoaded = false;
@@ -1695,7 +1696,7 @@ function createWindowPresentation(window: BrowserWindow, startupStartedAt: numbe
     announceVisibleFrame();
   });
   const showWhenComposed = (force = false, reason = 'composed') => {
-    if (shown || window.isDestroyed()) return;
+    if (shown || window.isDestroyed() || startHidden) return;
     if (!force && !(rendererCommitted && (readyToShow || rendererLoaded))) return;
     shown = true;
     if (showDeadline) clearTimeout(showDeadline);
@@ -1728,6 +1729,14 @@ function createWindowPresentation(window: BrowserWindow, startupStartedAt: numbe
     afterRendererReady();
   };
   ipcMain.on(DESKTOP_IPC.rendererReady, onRendererReady);
+  // A tray click or a normal second launch still reveals a background-started
+  // window and releases renderer work that waits for its first visible frame.
+  window.once('show', () => {
+    if (shown || window.isDestroyed()) return;
+    shown = true;
+    if (window.webContents.isLoadingMainFrame()) window.webContents.once('did-finish-load', announceVisibleFrame);
+    else announceVisibleFrame();
+  });
   window.once('ready-to-show', () => {
     readyToShow = true;
     diagnostics?.write('ready-to-show', {
@@ -1735,11 +1744,13 @@ function createWindowPresentation(window: BrowserWindow, startupStartedAt: numbe
     });
     showWhenComposed();
   });
-  showDeadline = setTimeout(
-    () => showWhenComposed(true, 'absolute-deadline'),
-    Math.max(0, DESKTOP_WINDOW_SHOW_DEADLINE_MS - (Date.now() - startupStartedAt))
-  );
-  showDeadline.unref();
+  if (!startHidden) {
+    showDeadline = setTimeout(
+      () => showWhenComposed(true, 'absolute-deadline'),
+      Math.max(0, DESKTOP_WINDOW_SHOW_DEADLINE_MS - (Date.now() - startupStartedAt))
+    );
+    showDeadline.unref();
+  }
   return {
     /** The document finished loading: one of the two signals that compose. */
     markRendererLoaded(): void {
@@ -1915,6 +1926,7 @@ const showConnectionWindow = createConnectionWindowOpener<DesktopConnection, Bro
 
 async function createWindow(connection: DesktopConnection): Promise<void> {
   const local = connection.kind === 'local';
+  const startHidden = backgroundStartup.takeForWindow(local);
   // The main window measures against process start; a server window opens later.
   const startupStartedAt = local ? desktopProcessStartedAt : Date.now();
   const { developmentUrl, packagedRendererPath, rendererUrl, brandIconPath, isAllowedNavigation } =
@@ -1941,7 +1953,7 @@ async function createWindow(connection: DesktopConnection): Promise<void> {
   windowRoutes.register(window.webContents, connection.id);
   connectionWindows.set(connection.id, window);
   installDesktopWindowMaterial(window);
-  if (savedState?.maximized) window.maximize();
+  restoreStartupMaximization(window, savedState?.maximized === true, startHidden);
   const windowState = persistWindowState(window, statePath);
   windowStates.set(window, windowState);
   const windowBrowserHost = local ? installLocalWindowFeatures(window) : null;
@@ -2011,7 +2023,8 @@ async function createWindow(connection: DesktopConnection): Promise<void> {
           startDaemonService();
           scheduleDeferredDesktopServices(window);
         }
-      : () => {}
+      : () => {},
+    startHidden
   );
   installWindowCloseCleanup(window, connection, windowState, presentation, onRendererDiagnostic);
 
@@ -2159,8 +2172,8 @@ if (!app.requestSingleInstanceLock()) {
   quitApproved = true;
   app.quit();
 } else {
-  app.on('second-instance', () => {
-    activatePrimaryWindow();
+  app.on('second-instance', (_event, commandLine) => {
+    if (!isSoftonBackgroundRequest(commandLine)) activatePrimaryWindow();
   });
 
   // Fork the daemon NOW, while Chromium is still bringing the app up and the

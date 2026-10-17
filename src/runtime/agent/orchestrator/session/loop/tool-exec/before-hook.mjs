@@ -5,6 +5,7 @@
 import { resolvePreToolAskApproval } from '../tool-helpers.mjs';
 import { runAbortable, throwIfAborted } from '../../../../../shared/abort-race.mjs';
 import { beginSessionApprovalWait } from '../../manager/runtime-liveness.mjs';
+import { slackToolDecision, rememberSlackToolApproval } from '../../../../../shared/slack-execution-policy.mjs';
 
 const isArgsObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
 
@@ -46,11 +47,11 @@ export async function applyBeforeToolHook({
   executeOpts,
   beforeToolHook,
   toolApprovalHook,
+  sessionRef,
 }) {
   const call = { name, args, cwd };
-  if (!beforeToolHook) return call;
   try {
-    const decision = await runAbortable(executeOpts.signal, () =>
+    const decision = beforeToolHook ? await runAbortable(executeOpts.signal, () =>
       beforeToolHook(
         {
           name,
@@ -61,7 +62,7 @@ export async function applyBeforeToolHook({
         },
         { signal: executeOpts.signal }
       )
-    );
+    ) : null;
     const action = String(decision?.action || decision?.decision || '').toLowerCase();
     if (action === 'deny' || action === 'block') {
       const reason = decision?.reason ? `: ${decision.reason}` : '';
@@ -74,6 +75,15 @@ export async function applyBeforeToolHook({
     if (action === 'ask') {
       const denied = await askApproval(call, { callerSessionId, executeOpts, toolApprovalHook, decision });
       if (denied) return denied;
+    }
+    const slack = slackToolDecision(sessionRef, call);
+    if (slack?.action === 'deny') return { denial: `Error: tool "${call.name}" denied: ${slack.reason}` };
+    if (slack?.action === 'ask') {
+      const policy = sessionRef.slackExecutionPolicy;
+      const denied = await askApproval(call, { callerSessionId, executeOpts, toolApprovalHook, decision: slack });
+      if (denied) return denied;
+      if (sessionRef.slackExecutionPolicy !== policy) return { denial: 'Error: Slack 실행 정책이 변경되어 승인을 취소했습니다.' };
+      rememberSlackToolApproval(sessionRef, call);
     }
   } catch (error) {
     throwIfAborted(executeOpts.signal);

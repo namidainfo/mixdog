@@ -83,6 +83,23 @@ async function openView(daemon) {
   return createSession({ cwd: 'C:/p', log: () => {} });
 }
 
+test('an explicit context token limit stays scoped to the created session and its replacements', async () => {
+  const daemon = fakeDaemon();
+  const createSession = createSessionProxyFactory({
+    attachSession: daemon.attachSession,
+    ensureDaemon: async () => ({ port: 1, token: 't' }),
+  });
+  const view = await createSession({ cwd: 'C:/slack', contextTokens: 500000 });
+  await view.newSession();
+  const ordinary = await createSession({ cwd: 'C:/ordinary' });
+  const creates = daemon.calls.filter((call) => call.name === 'session.create');
+  assert.equal(creates[0].params.contextTokens, 500000);
+  assert.equal(creates[1].params.contextTokens, 500000);
+  assert.equal(Object.hasOwn(creates[2].params, 'contextTokens'), false);
+  await view.dispose();
+  await ordinary.dispose();
+});
+
 test('create seeds the projection and frames advance it only at the expected base revision', async () => {
   const daemon = fakeDaemon();
   const view = await openView(daemon);

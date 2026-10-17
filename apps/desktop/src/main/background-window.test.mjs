@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { createBackgroundWindow } from './background-window.ts';
+import { createBackgroundWindow, createBackgroundStartup, isSoftonBackgroundRequest, restoreStartupMaximization } from './background-window.ts';
 
 function harness({ enabled = true, quitting = false } = {}) {
   const state = { hides: 0, prevented: 0 };
@@ -33,4 +33,27 @@ test('quit on close, or an approved quit, lets the window close', () => {
     close();
     assert.deepEqual([state.prevented, state.hides], [0, 0]);
   }
+});
+
+test('background startup hides only its first local window and leaves normal launches unchanged', () => {
+  const startup = createBackgroundStartup(['Mixdog Personal.exe', '--softon-hub-background']);
+  assert.equal(startup.takeForWindow(false), false);
+  assert.equal(startup.takeForWindow(true), true);
+  assert.equal(startup.takeForWindow(true), false);
+  assert.equal(createBackgroundStartup(['Mixdog Personal.exe']).takeForWindow(true), false);
+  assert.equal(isSoftonBackgroundRequest(['Mixdog Personal.exe', '--softon-hub-background']), true);
+  assert.equal(isSoftonBackgroundRequest(['Mixdog Personal.exe']), false);
+});
+
+test('a previously maximized background window stays hidden until the user reveals it', () => {
+  let maximized = 0; const shown = [];
+  const window = { maximize: () => maximized++, once: (_event, listener) => shown.push(listener) };
+  restoreStartupMaximization(window, true, true);
+  assert.equal(maximized, 0);
+  shown[0]();
+  assert.equal(maximized, 1);
+  restoreStartupMaximization(window, true, false);
+  assert.equal(maximized, 2);
+  restoreStartupMaximization(window, false, false);
+  assert.equal(maximized, 2);
 });

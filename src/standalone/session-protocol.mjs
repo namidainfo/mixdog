@@ -202,6 +202,7 @@ export const SESSION_CONFIGURE_ACTIONS = Object.freeze([
   'setSystemShell',
   'setTheme',
   'setToolMode',
+  'setSlackExecutionPolicy',
   'setWebSearchEnabled',
   'setInstructionFiles',
   'setWebhookConfig',

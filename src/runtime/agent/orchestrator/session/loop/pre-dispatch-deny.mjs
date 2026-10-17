@@ -13,6 +13,7 @@
 // registry knows its name.
 import { isAgentOwner } from '../../agent-owner.mjs';
 import { isOffReadonlySurface } from './deferred-call-through.mjs';
+import { slackToolDecision } from '../../../../shared/slack-execution-policy.mjs';
 
 const WORKER_DENIED_TOOLS = new Set(['agent']);
 
@@ -92,7 +93,7 @@ export function routeWebFetchCall(call) {
 /**
  * Exported for smoke tests — same runtime deny as the agent loop.
  */
-export function preDispatchDenyForSession(sessionRef, call) {
+export function preDispatchDenyForSession(sessionRef, call, approvalHandle) {
   const name = call?.name;
   if (typeof name !== 'string' || !name) return null;
   const schemaName = String(call?.schemaName || name);
@@ -119,5 +120,7 @@ export function preDispatchDenyForSession(sessionRef, call) {
   if (_agentOwned && _controlPlaneTool) {
     return `Error: control-plane tool "${name}" is Lead-only and not available to agent workers.`;
   }
+  const slack = slackToolDecision(sessionRef, call, approvalHandle);
+  if (slack) return `Error: tool "${name}" denied: ${slack.reason}`;
   return null;
 }
