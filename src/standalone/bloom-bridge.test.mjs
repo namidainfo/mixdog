@@ -12,7 +12,11 @@ import { createSessionProxyFactory } from './session-proxy.mjs';
 import { createSessionOps } from '../session-runtime/turn/session-ops.mjs';
 import { createSessionService } from './session-service.mjs';
 
-function harness({ submit, makePrompt, initialQuestion } = {}) {
+function harness({
+  submit, makePrompt, initialQuestion, projectPath = 'C:/Bloom',
+  projects = [{ path: 'C:/project-a', name: 'A' }, { path: 'C:/project-b', name: 'B' }],
+  sessionRows = [{ id: 'existing-a', title: 'A', cwd: 'C:/project-a', provider: 'openai-oauth', model: 'gpt-test' }],
+} = {}) {
   const calls = [], created = [], events = [];
   const catalog = [
     { provider: 'openai-oauth', id: 'gpt-test', display: 'Test model', effortOptions: [{ value: 'low' }, { value: 'high' }], config: { apiKey: 'private' } },
@@ -50,9 +54,9 @@ function harness({ submit, makePrompt, initialQuestion } = {}) {
           config: { accessToken: 'private' }, password: 'private',
         }], config: { apiKey: 'private' } }], config: { refreshToken: 'private' } };
       },
-      async listProjects() { calls.push(['projects']); return [{ path: 'C:/project-a', name: 'A' }, { path: 'C:/project-b', name: 'B' }]; },
+      async listProjects() { calls.push(['projects']); return projects; },
       async searchConversations(query, options) { calls.push(['search', query, options]); return 'Project A match\nProject B match'; },
-      async listSessions() { calls.push(['sessions']); return [{ id: 'existing-a', title: 'A', cwd: 'C:/project-a', provider: 'openai-oauth', model: 'gpt-test' }]; },
+      async listSessions() { calls.push(['sessions']); return sessionRows; },
       async readSessionSnapshot(id) { calls.push(['read', id]); return { ...state, sessionId: id }; },
       async submitAsync(prompt, options) {
         calls.push(['submit', options.id, prompt, state.sessionId]);
@@ -74,7 +78,7 @@ function harness({ submit, makePrompt, initialQuestion } = {}) {
     return instance;
   }
   const bridge = createBloomBridge({
-    cwd: 'C:/bloom', createSession: async (options) => api(options), emit: (event) => events.push(event),
+    cwd: 'C:/bloom', projectPath, createSession: async (options) => api(options), emit: (event) => events.push(event),
     ...(makePrompt ? { makePrompt } : {}),
   });
   const open = (mode = 'chat', sessionId = null) => bridge.call('open', {
@@ -82,6 +86,93 @@ function harness({ submit, makePrompt, initialQuestion } = {}) {
   });
   return { bridge, open, calls, created, events, catalog };
 }
+
+test('new Bloom conversations receive a catalog home without changing their execution cwd', async (t) => {
+  const h = harness();
+  t.after(() => h.bridge.dispose());
+  await h.open();
+  assert.deepEqual(h.created[0].options.desktopSession, {
+    classification: 'task', projectPath: null, source: 'bloom', purpose: 'gateway',
+  });
+  const options = h.created.at(-1).options;
+  assert.equal(options.cwd, 'C:/bloom');
+  assert.deepEqual(options.desktopSession, {
+    classification: 'project', projectPath: 'C:/Bloom', source: 'bloom', purpose: 'chat',
+  });
+  assert.equal(h.calls.some(([name]) => name === 'submit'), false);
+});
+
+test('the registered Bloom alias is resolved, and a missing home never silently reroutes work', async (t) => {
+  const h = harness({ projectPath: null, projects: [{ path: 'C:/managed/Bloom', alias: 'Bloom', name: 'Bloom' }] });
+  const missing = harness({ projectPath: null });
+  const ambiguous = harness({ projectPath: null, projects: [
+    { path: 'C:/one', alias: 'Bloom' }, { path: 'C:/two', alias: 'Bloom' },
+  ] });
+  t.after(async () => { await h.bridge.dispose(); await missing.bridge.dispose(); await ambiguous.bridge.dispose(); });
+  await h.open('work');
+  assert.equal(h.created.at(-1).options.desktopSession.projectPath, 'C:/managed/Bloom');
+  assert.equal(h.created.at(-1).options.cwd, 'C:/bloom');
+  for (const rejected of [missing, ambiguous]) {
+    await assert.rejects(rejected.open(), /exactly one project named Bloom/);
+    assert.equal(rejected.created.length, 1);
+    assert.equal(rejected.calls.some(([name]) => name === 'submit'), false);
+  }
+});
+
+test('attaching an existing session does not migrate it or replace its metadata', async (t) => {
+  const h = harness({ projectPath: null });
+  t.after(() => h.bridge.dispose());
+  const state = await h.open('chat', 'existing-a');
+  assert.equal(state.sessionId, 'existing-a');
+  assert.equal(Object.hasOwn(h.created.at(-1).options, 'desktopSession'), false);
+  assert.equal(h.calls.some(([name]) => name === 'projects'), false);
+});
+
+test('Bloom migration preview uses exact links and makes no session changes', async (t) => {
+  const rows = [
+    { id: 'legacy', title: '', cwd: 'C:/work', generatedTitlePrefix: '260102-006 | ' },
+    { id: 'manual', title: 'Keep my title', titleLocked: true, cwd: 'C:/work' },
+    { id: 'unverified', title: '', cwd: 'C:/work' },
+  ];
+  const before = structuredClone(rows);
+  const h = harness({ sessionRows: rows });
+  t.after(() => h.bridge.dispose());
+  const preview = await h.bridge.call('previewSessions', { links: [
+    { sessionId: 'legacy', firstUserText: '릴레이 메모리 진단' },
+    { sessionId: 'manual', firstUserText: 'Do not rename this' },
+    { sessionId: 'missing', firstUserText: 'Missing' },
+  ] });
+  assert.equal(preview.readOnly, true);
+  assert.equal(preview.changes[0].proposedTitle, '260102-006 | [Bloom] 릴레이 메모리 진단');
+  assert.equal(preview.changes[0].needsProjectMove, true);
+  assert.equal(preview.changes[1].proposedTitle, 'Keep my title');
+  assert.equal(preview.changes[1].manualTitle, true);
+  assert.equal(preview.unverifiedUntitledCount, 1);
+  assert.deepEqual(preview.unmatchedSessionIds, ['missing']);
+  assert.deepEqual(rows, before);
+  assert.equal(h.calls.some(([name]) => ['submit', 'mode', 'approve', 'handoff'].includes(name)), false);
+});
+
+test('structured text carries its actual input as a title hint, not schema boilerplate', async (t) => {
+  const h = harness({ submit: async (api) => {
+    api.update({ busy: false, items: [
+      { id: 'answer', kind: 'assistant', text: '{"ok":true}' },
+      { id: 'done', kind: 'turndone', status: 'done' },
+    ] });
+    return true;
+  } });
+  t.after(() => h.bridge.dispose());
+  const result = await h.bridge.call('structuredText', {
+    modelKey: 'mixdog:openai-oauth/gpt-test', text: '릴레이 메모리 진단',
+    system: 'Internal extraction instructions',
+    schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] },
+  });
+  assert.deepEqual(result, { ok: true });
+  assert.deepEqual(h.created.at(-1).options.desktopSession, {
+    classification: 'project', projectPath: 'C:/Bloom', source: 'bloom',
+    purpose: 'structured-text', titleHint: '릴레이 메모리 진단',
+  });
+});
 
 async function jsonlHarness(t, mode = 'chat', outputFailure = false) {
   const h = harness();
@@ -469,16 +560,16 @@ test('late handoff success after cancellation cannot leave plain chat in work mo
 });
 
 test('Bloom requires its minimum session API, not an application version or the latest unrelated API revision', () => {
-  for (const revision of [8, 9, 100]) {
+  for (const revision of [9, 10, 100]) {
     for (const version of ['1.1.2', '1.2.0', '1.2.2', '99.0.0']) {
       requireBloomRuntime({ protocol: 1, revision, version });
     }
   }
   for (const health of [
-    null, {}, { protocol: 2, revision: 8 },
-    ...[undefined, null, '8', 7, 8.5, NaN, Infinity].map(revision => ({ protocol: 1, revision })),
+    null, {}, { protocol: 2, revision: 9 },
+    ...[undefined, null, '9', 8, 9.5, NaN, Infinity].map(revision => ({ protocol: 1, revision })),
   ]) {
-    assert.throws(() => requireBloomRuntime(health), /protocol 1, revision 8.*compatible runtime/);
+    assert.throws(() => requireBloomRuntime(health), /protocol 1, revision 9.*compatible runtime/);
   }
 });
 

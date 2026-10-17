@@ -10,29 +10,9 @@ import { positiveInt } from '../../../../shared/numbers.mjs';
 import { mintUuidV7 } from './session-id.mjs';
 import { providerCacheKey } from './provider-cache-key.mjs';
 import { IMPLICIT_APPROVAL_MODE } from '../approval-mode.mjs';
+import { bloomSessionPurpose, normalizeDesktopSessionMetadata } from '../../../../shared/desktop-session-metadata.mjs';
 
-export function normalizeDesktopSessionMetadata(value, cwd = null) {
-  if (!value || typeof value !== 'object') return null;
-  if (value.classification === 'task') {
-    return { classification: 'task', projectPath: null };
-  }
-  if (value.classification === 'project') {
-    const cleanPath = (path) => {
-      if (typeof path !== 'string') return null;
-      const trimmed = path.trim();
-      return trimmed && !trimmed.includes('\0') ? trimmed : null;
-    };
-    // Older bridge rows may omit projectPath and rely on the session cwd.
-    // Do not, however, stringify arbitrary persisted values into paths.
-    const projectPath = cleanPath(value.projectPath) || cleanPath(cwd);
-    if (!projectPath) return null;
-    return {
-      classification: 'project',
-      projectPath,
-    };
-  }
-  return null;
-}
+export { normalizeDesktopSessionMetadata };
 
 function initialCompactionConfig(compaction = {}, contextMeta = {}) {
   return {
@@ -68,8 +48,8 @@ export function sessionOriginFields(opts, { profile, presetObj, providerCacheOpt
     // Origin tag written into every agent-trace usage row so analytics
     // can slice by (sourceType, sourceName) — e.g. maintenance/cycle1,
     // scheduler/daily-standup, webhook/github-push, lead/worker.
-    sourceType: opts.sourceType || null,
-    sourceName: opts.sourceName || null,
+    sourceType: opts.sourceType || (bloomSessionPurpose(opts.desktopSession) ? 'bloom' : null),
+    sourceName: opts.sourceName || (bloomSessionPurpose(opts.desktopSession) ? 'Bloom' : null),
     // Provider-scoped unified cache key — one shard per provider,
     // shared across all roles / sources (agent/maintenance/mcp/
     // scheduler/webhook). Role or source-specific context must be

@@ -5,6 +5,7 @@ import type {
   DesktopWorkspaceTransitionState,
 } from '../shared/contract';
 import { compactedSessionTitle, generatedSessionTitle, normalizeSessionTitle } from '../shared/session-title.mjs';
+import { bloomSessionPurpose } from '../../../../src/runtime/shared/desktop-session-metadata.mjs';
 
 const SESSION_WORKING_HEARTBEAT_MS = 2 * 60 * 1000;
 // A user prompt plus an assistant reply: the smallest persisted conversation.
@@ -116,6 +117,8 @@ export function desktopSessionSummaries(
       if (rawMeta != null && (typeof rawMeta !== 'object' || Array.isArray(rawMeta))) return [];
       const meta = rawMeta && typeof rawMeta === 'object' ? (row.desktopSession as Record<string, unknown>) : null;
       if (meta && meta.classification !== 'project' && meta.classification !== 'task') return [];
+      const bloomPurpose = bloomSessionPurpose(meta);
+      if (bloomPurpose === 'gateway') return [];
       const cwd = String(row.cwd || '').trim();
       if (cwd.includes('\0')) return [];
       // Runtime listSessions already removes worker/agent sessions. Preserve
@@ -130,7 +133,9 @@ export function desktopSessionSummaries(
       // grouped under its registered Project: the workspace record, then the
       // stored classification, outrank the execution root.
       const workspace = sessionWorkspace(row.workspace);
-      const projectPath = classification === 'project' ? workspace?.projectPath || cwd || storedProjectPath : '';
+      const projectPath = classification === 'project'
+        ? bloomPurpose ? storedProjectPath : workspace?.projectPath || cwd || storedProjectPath
+        : '';
       if (classification === 'project' && (!projectPath || projectPath.includes('\0'))) return [];
       const preview = String(row.preview || '').trim();
       const id = String(row.id || '');

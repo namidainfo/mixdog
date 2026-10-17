@@ -139,3 +139,19 @@ test('number-only titles are rejected and a numbered session still protects manu
   assert.equal(await updateSessionGeneratedTitle(id, 'Automatic replacement', 'first'), false);
   assert.equal(getSession(id).title, 'Custom numbered task');
 });
+
+test('Bloom generated titles keep their project marker and manual names remain protected', async () => {
+  const id = 'sess_title_bloom';
+  await plantSession(id, {
+    desktopSession: { classification: 'project', projectPath: 'C:/Bloom', source: 'bloom', purpose: 'chat' },
+    generatedTitlePrefix: '260102-009 | ', title: '260102-009 | [Bloom] 새 대화', bloomTitlePending: true,
+  });
+  assert.equal(await updateSessionGeneratedTitle(id, '메모리 진단', 'first'), true);
+  assert.equal(getSession(id).title, '260102-009 | [Bloom] 메모리 진단');
+  assert.equal(Object.hasOwn(getSession(id), 'bloomTitlePending'), false);
+  assert.equal(await updateSessionGeneratedTitle(id, '진단 결과 검토', 'third'), true);
+  assert.equal(getSession(id).title, '260102-009 | [Bloom] 진단 결과 검토');
+  assert.equal(await updateSessionManualTitle(id, '직접 정한 이름'), true);
+  assert.equal(await updateSessionGeneratedTitle(id, '덮어쓰면 안 됨', 'third'), false);
+  assert.equal(getSession(id).title, '직접 정한 이름');
+});

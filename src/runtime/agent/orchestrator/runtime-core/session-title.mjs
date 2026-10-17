@@ -2,6 +2,7 @@ import { appendFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { cleanSessionPreview, isSessionPreviewNoise, sessionMessageText } from './session-text.mjs';
+import { bloomSessionPurpose } from '../../../shared/desktop-session-metadata.mjs';
 
 // Title generation runs beside the main turn and may include a cold provider
 // start. Keep it bounded, but allow enough time for the first-turn title to
@@ -237,7 +238,9 @@ export function createSessionTitleController(deps = {}) {
       (message) => message?.role === 'user' && titleMessageText(message, 'user')
     );
     if (priorMeaningfulUser) return false;
-    const source = firstTurnTitleSource(prompt);
+    const source = firstTurnTitleSource(
+      bloomSessionPurpose(session.desktopSession) === 'structured-text' ? session.desktopSession.titleHint || '자동 처리' : prompt
+    );
     if (!source) return false;
     rememberAttempt(firstAttempts, sessionId);
     const greeting = greetingTitle(source);
@@ -267,6 +270,7 @@ export function createSessionTitleController(deps = {}) {
   }
 
   function observeThird(session) {
+    if (bloomSessionPurpose(session?.desktopSession) === 'structured-text') return false;
     const sessionId = String(session?.id || '');
     if (
       disposed ||

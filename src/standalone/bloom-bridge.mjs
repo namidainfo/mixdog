@@ -10,6 +10,9 @@ import { schemaValueError } from '../runtime/shared/schema-value-error.mjs';
 import { safeErrorDetails } from '../runtime/shared/error-presentation.mjs';
 import { SESSION_PROTOCOL } from './session-wire.mjs';
 import bloomContract from './bloom-contract.json' with { type: 'json' };
+import { BLOOM_PROJECT_ALIAS, bloomSessionPurpose } from '../runtime/shared/desktop-session-metadata.mjs';
+import { compactSessionTitle } from '../runtime/agent/orchestrator/runtime-core/session-title.mjs';
+import { previewBloomSessionChanges } from './bloom-session-preview.mjs';
 
 export function requireBloomRuntime(health) {
   if (!health || health.protocol !== SESSION_PROTOCOL || !Number.isSafeInteger(health.revision) || health.revision < bloomContract.revision)
@@ -85,14 +88,33 @@ async function imagePrompt(prompt, images) {
   return parts;
 }
 
-export function createBloomBridge({ createSession, emit = () => {}, cwd = process.cwd(), makePrompt = imagePrompt }) {
+export function createBloomBridge({ createSession, emit = () => {}, cwd = process.cwd(), projectPath = null, makePrompt = imagePrompt }) {
   const views = new Map();
   let gatewayPromise;
-  const gateway = () => gatewayPromise ??= createSession({ cwd, toolMode: 'none' }).catch((error) => {
+  let bloomProjectPath = text(projectPath).trim();
+  const gateway = () => gatewayPromise ??= createSession({
+    cwd, toolMode: 'none',
+    desktopSession: { classification: 'task', projectPath: null, source: 'bloom', purpose: 'gateway' },
+  }).catch((error) => {
     // A failed discovery is not a permanent connection. Retry only on the next caller's request.
     gatewayPromise = undefined;
     throw error;
   });
+  async function bloomMetadata(purpose, titleHint = '') {
+    if (!bloomProjectPath) {
+      const projects = array(await (await gateway()).listProjects())
+        .filter((row) => (row.alias || row.name) === BLOOM_PROJECT_ALIAS);
+      if (projects.length !== 1 || !text(projects[0].path).trim()) {
+        throw new Error('Register exactly one project named Bloom in Mixdog Personal before starting a Bloom conversation.');
+      }
+      bloomProjectPath = projects[0].path.trim();
+    }
+    if (bloomProjectPath.includes('\0')) throw new TypeError('Bloom project path is invalid.');
+    return {
+      classification: 'project', projectPath: bloomProjectPath, source: 'bloom', purpose,
+      ...(titleHint ? { titleHint } : {}),
+    };
+  }
   const modeFor = (mode) => {
     if (!['chat', 'work'].includes(mode)) throw new TypeError('Chat mode must be chat or work.');
     return mode === 'work' ? 'full' : 'questions';
@@ -146,6 +168,7 @@ export function createBloomBridge({ createSession, emit = () => {}, cwd = proces
     const api = await createSession({
       cwd, sessionId: args.sessionId || undefined, provider: model.provider, model: model.model,
       effort: args.effort || undefined, toolMode,
+      ...(!args.sessionId ? { desktopSession: await bloomMetadata(args.mode) } : {}),
     });
     try {
       if (signal?.aborted) throw new Error('Session attachment cancelled.');
@@ -184,7 +207,10 @@ export function createBloomBridge({ createSession, emit = () => {}, cwd = proces
   async function structuredText(args, signal) {
     const model = await route(args.modelKey, args.effort);
     if (!args.schema || args.schema.type !== 'object') throw new TypeError('Structured text requires an object schema.');
-    const api = await createSession({ cwd, provider: model.provider, model: model.model, effort: args.effort || undefined, toolMode: 'none' });
+    const api = await createSession({
+      cwd, provider: model.provider, model: model.model, effort: args.effort || undefined, toolMode: 'none',
+      desktopSession: await bloomMetadata('structured-text', compactSessionTitle(args.text)),
+    });
     let unsubscribe = () => {};
     let timer;
     let abort;
@@ -236,7 +262,17 @@ export function createBloomBridge({ createSession, emit = () => {}, cwd = proces
         case 'sessions': return array(await (await gateway()).listSessions()).map((row) => ({
           sessionId: text(row.sessionId) || text(row.id), title: text(row.title), cwd: text(row.cwd),
           provider: text(row.provider), model: text(row.model),
+          ...(bloomSessionPurpose(row.desktopSession) ? {
+            source: 'bloom', purpose: row.desktopSession.purpose, projectPath: row.desktopSession.projectPath,
+          } : {}),
         }));
+        case 'previewSessions': {
+          const api = await gateway();
+          const metadata = await bloomMetadata('chat');
+          return previewBloomSessionChanges(await api.listSessions(), {
+            projectPath: metadata.projectPath, links: args.links, manualTitles: args.manualTitles,
+          });
+        }
         case 'session': {
           const state = await (await gateway()).readSessionSnapshot(args.sessionId);
           if (state.sessionId !== args.sessionId) throw new Error('Session read returned another identity.');

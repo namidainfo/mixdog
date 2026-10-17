@@ -68,13 +68,4 @@ export function importKey(value) {
   return typeof key === 'string' && key.trim() ? key : null;
 }
 
-export function desktopSession(value, cwd = '') {
-  if (!value || typeof value !== 'object') return null;
-  if (value.classification === 'task') return { classification: 'task', projectPath: null };
-  if (value.classification !== 'project') return null;
-  const projectPath =
-    typeof value.projectPath === 'string' && value.projectPath.trim()
-      ? value.projectPath.trim()
-      : String(cwd || '').trim();
-  return projectPath ? { classification: 'project', projectPath } : null;
-}
+export { normalizeDesktopSessionMetadata as desktopSession } from '../../../shared/desktop-session-metadata.mjs';

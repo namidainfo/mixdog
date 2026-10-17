@@ -27,6 +27,7 @@ import {
   workspaceSummary,
 } from './store-summary-fields.mjs';
 import { isRealTurnMessage } from './compact/user-message-kind.mjs';
+import { normalizeDesktopSessionMetadata as _desktopSessionSummary } from '../../../shared/desktop-session-metadata.mjs';
 
 export const SESSION_SUMMARY_INDEX_VERSION = 2;
 
@@ -145,21 +146,6 @@ function _sessionMessageProjection(session) {
     });
   }
   return { count, real, preview };
-}
-
-function _desktopSessionSummary(value, cwd = null) {
-  if (!value || typeof value !== 'object') return null;
-  if (value.classification === 'task') {
-    return { classification: 'task', projectPath: null };
-  }
-  if (value.classification !== 'project') return null;
-  const cleanPath = (path) => {
-    if (typeof path !== 'string') return null;
-    const trimmed = path.trim();
-    return trimmed && !trimmed.includes('\0') ? trimmed : null;
-  };
-  const projectPath = cleanPath(value.projectPath) || cleanPath(cwd);
-  return projectPath ? { classification: 'project', projectPath } : null;
 }
 
 export function _sessionSummary(session) {

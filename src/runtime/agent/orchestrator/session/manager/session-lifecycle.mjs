@@ -41,6 +41,8 @@ import { applyPendingWorkspaceReroot, refreshSessionBp3Environment } from './pro
 import { reserveSessionTitle } from '../store/title-sequence.mjs';
 import { isWorktreeBound } from '../../../../shared/worktrees/contract.mjs';
 import { applyAgentToolExposure } from '../loop/tool-exposure-migration.mjs';
+import { retainBloomProjectMetadata } from '../../../../shared/desktop-session-metadata.mjs';
+import { initializeBloomSessionTitle } from '../../../../shared/bloom-session-title.mjs';
 
 // Owner liveness (attach-on-resume guard) and the durable turn-checkpoint
 // recovery it gates; re-exported so prior importers of this module stay
@@ -253,6 +255,7 @@ export function createSession(opts) {
     session.createdAt = titleReservation.createdAt;
     session.generatedTitlePrefix = titleReservation.prefix;
   }
+  initializeBloomSessionTitle(session);
   // In-process registry + async debounced save: same-process create → load
   // reads live memory; disk flush is for cross-process / restart durability.
   setLiveSession(session);
@@ -489,7 +492,8 @@ function _applyDesktopResumeScope(session, options) {
   const workspace = session.workspace;
   const executionProject =
     isWorktreeBound(workspace) && typeof workspace.projectPath === 'string' ? workspace.projectPath : session.cwd;
-  session.desktopSession =
+  session.desktopSession = retainBloomProjectMetadata(
+    storedDesktop,
     expectedDesktop.classification === 'project'
       ? normalizeDesktopSessionMetadata(
           {
@@ -498,7 +502,8 @@ function _applyDesktopResumeScope(session, options) {
           },
           session.cwd
         )
-      : expectedDesktop;
+      : expectedDesktop
+  );
   return true;
 }
 

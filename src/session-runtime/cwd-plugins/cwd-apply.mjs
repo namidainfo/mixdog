@@ -3,6 +3,7 @@
 // CwdChanged hook) without recreating the session.
 import { setWorkspaceCwdLock } from '../workspace/admission-gate.mjs';
 import { workspaceForProjectSelection } from '../workspace/workspace-state.mjs';
+import { retainBloomProjectMetadata } from '../../runtime/shared/desktop-session-metadata.mjs';
 
 export function createCwdApply({
   getCurrentCwd,
@@ -43,15 +44,20 @@ export function createCwdApply({
       session.workspace = workspace;
       setWorkspaceCwdLock(session.id, null);
     }
-    const desktop = getDesktopSession?.() || session?.desktopSession;
+    const desktop = retainBloomProjectMetadata(
+      session?.desktopSession,
+      getDesktopSession?.() || session?.desktopSession
+    );
     if (desktop && typeof desktop === 'object') {
       // A desktop/remote move (classifyByMembership) names a registered
       // Project or the task workspace: outside every registered Project it is
       // a task again. The model's own set-project keeps any folder it picked.
-      const nextDesktop =
+      const nextDesktop = retainBloomProjectMetadata(
+        desktop,
         classifyByMembership && !isProjectFolder(projectPath)
           ? { classification: 'task', projectPath: null }
-          : { classification: 'project', projectPath };
+          : { classification: 'project', projectPath }
+      );
       setDesktopSession?.(nextDesktop);
       if (session) session.desktopSession = nextDesktop;
     }

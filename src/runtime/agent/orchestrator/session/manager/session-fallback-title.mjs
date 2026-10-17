@@ -7,6 +7,7 @@ import { compactSessionTitle } from '../../runtime-core/session-title.mjs';
 import { cleanSessionPreview, isSessionPreviewNoise, sessionMessageText } from '../../runtime-core/session-text.mjs';
 import { IMPORTED_MESSAGE_SOURCE } from '../imported-message.mjs';
 import { isActualUserInstructionMessage } from '../compact/messages.mjs';
+import { bloomSessionTitle, hasPendingBloomTitle } from '../../../../shared/bloom-session-title.mjs';
 
 const UNTITLED_PLACEHOLDER = /^untitled(?:\s+session)?$/i;
 const MEDIA_PLACEHOLDER = /^\[(?:image|video|file)\]$/i;
@@ -69,14 +70,15 @@ export function fallbackTitleFromMessages(messages) {
  *  or generated title, and leaves generatedTitleStage unset so
  *  updateSessionGeneratedTitle can still upgrade it. The caller persists. */
 export function applyFallbackSessionTitle(session, title) {
-  if (!session || !isUsableTitle(title) || isUsableTitle(session.title)) return false;
+  if (!session || !isUsableTitle(title) || (isUsableTitle(session.title) && !hasPendingBloomTitle(session))) return false;
   if (session.titleLocked === true || session.generatedTitleStage) return false;
-  session.title = title;
+  session.title = bloomSessionTitle(session, title);
+  delete session.bloomTitlePending;
   session.titleUpdatedAt = Date.now();
   return true;
 }
 
 export function backfillFallbackSessionTitle(session, messages) {
-  if (!session || isUsableTitle(session.title)) return false;
+  if (!session || (isUsableTitle(session.title) && !hasPendingBloomTitle(session))) return false;
   return applyFallbackSessionTitle(session, fallbackTitleFromMessages(messages));
 }

@@ -31,6 +31,7 @@ import { reserveSessionTitle } from '../store/title-sequence.mjs';
 import { hideCompactionArchive } from '../compaction-archive-capture.mjs';
 import { writeStderrBestEffort } from '../../../../shared/best-effort-stderr.mjs';
 import { forgetSideQuestion } from '../side-question-store.mjs';
+import { bloomSessionTitle } from '../../../../shared/bloom-session-title.mjs';
 
 /** Force-flush session metrics to disk. Used by watchdog terminal-reap (fix B). */
 export async function flushSessionMetrics(sessionId) {
@@ -83,10 +84,11 @@ export async function updateSessionGeneratedTitle(id, title, stage) {
   if (session.titleLocked === true) return false;
   if (session.generatedTitleStage === 'third') return false;
   if (normalizedStage === 'first' && session.generatedTitleStage === 'first') return false;
-  const normalized = `${session.generatedTitlePrefix || sessionTitleDatePrefix(session.createdAt)}${body}`;
+  const normalized = bloomSessionTitle(session, `${session.generatedTitlePrefix || sessionTitleDatePrefix(session.createdAt)}${body}`);
   if (session.title === normalized && session.generatedTitleStage === normalizedStage) return false;
   session.title = normalized;
   session.generatedTitleStage = normalizedStage;
+  delete session.bloomTitlePending;
   session.titleUpdatedAt = Date.now();
   await saveSessionAsync(session, { expectedGeneration: session.generation });
   return true;
@@ -100,6 +102,7 @@ export async function updateSessionManualTitle(id, title) {
   session.title = normalized;
   session.titleLocked = true;
   session.titleSource = 'user';
+  delete session.bloomTitlePending;
   session.titleUpdatedAt = Date.now();
   await saveSessionAsync(session, { expectedGeneration: session.generation });
   return true;
@@ -116,6 +119,7 @@ export async function updateSessionAiTitle(id, title) {
   session.title = normalized;
   session.titleLocked = true;
   session.titleSource = 'ai';
+  delete session.bloomTitlePending;
   session.titleUpdatedAt = Date.now();
   await saveSessionAsync(session, { expectedGeneration: session.generation });
   return { ok: true, title: normalized };
