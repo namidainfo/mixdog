@@ -55,6 +55,7 @@ import { readDesktopModelBootstrapSnapshot } from './model-bootstrap';
 import { AgentAwakeService } from './agent-awake';
 import { createBackgroundWindow, createBackgroundStartup, isSoftonBackgroundRequest, restoreStartupMaximization } from './background-window';
 import { createDesktopTray, type DesktopTray } from './desktop-tray';
+import { createDesktopQuitSequence, DESKTOP_DAEMON_STOP_TIMEOUT_MS } from './quit-sequence';
 import { loginShellOverrides, readLoginShellEnvironment, withHomebrewPath } from './login-shell-environment';
 import { createTurnAttention, type TurnAttention } from './turn-attention';
 import { createDesktopTurnNotifier } from './desktop-turn-notifier';
@@ -80,12 +81,14 @@ import { registerSshHostIpc } from './ipc-ssh-hosts';
 import { createBrowserHost, type BrowserHost } from './browser/host';
 import { createComputerHost, type ComputerHost } from './computer';
 import { bridgeDiscoveryDirectory } from './bridge/discovery-file';
+import type { DesktopTerminalRunRequest } from '../shared/terminal-command';
 import { TerminalBridgeServer } from './terminal/bridge-server';
 import { requiredVisualizeTabCommand } from './ipc-validation';
 import { VisualizeBridgeServer } from './visualize/bridge-server';
 import { createDesktopVisualize } from './visualize/host';
 import { localPageOrigin } from './local-page-server';
 import { createTerminalCommandExecutor, type TerminalBridgeCommand } from './terminal/commands';
+import { createTerminalRunRequests } from './terminal/run-requests';
 import type { SessionTerminalTab } from './terminal-manager';
 import { readComputerPermissions, requestComputerPermissions } from './computer/host/permission-reads';
 import { applyGnomeExtensionSetting } from './computer/host/gnome-extension';
@@ -678,15 +681,27 @@ let pendingPrimaryActivation = false;
 function activatePrimaryWindow(): void {
   pendingPrimaryActivation = !activateDesktopWindow(mainWindow);
 }
-// Agent `terminal` tool: a read-only loopback bridge over the daemon-owned
-// PTYs. A hidden always-on built-in (like Media Studio): it runs for the app's
-// lifetime, so headless runs without the desktop app never see the tool. It
-// serves this PC's agents, so it reads this PC's daemon.
+// Agent `terminal` tool: a loopback bridge over the daemon-owned PTYs that
+// lists, reads and runs commands in a session's side terminal. A hidden
+// always-on built-in (like Media Studio): it runs for the app's lifetime, so
+// headless runs without the desktop app never see the tool. It serves this
+// PC's agents, so it uses this PC's daemon.
+const requestTerminalRun = (request: DesktopTerminalRunRequest): boolean => {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return false;
+  mainWindow.webContents.send(DESKTOP_IPC.terminalRunRequested, request);
+  return true;
+};
+const terminalRuns = createTerminalRunRequests(requestTerminalRun);
 const terminalBridge = new TerminalBridgeServer<TerminalBridgeCommand>({
   dataDirectory: bridgeDiscoveryDirectory,
   execute: createTerminalCommandExecutor({
     sessionTabs: async (sessionId) =>
       (await localService.invokeDesktopOperation('termSessionTabs', [sessionId])) as SessionTerminalTab[],
+    write: async (id, data) => {
+      await localService.invokeDesktopOperation('termWrite', [id, data]);
+    },
+    revealTerminal: (sessionId) => requestTerminalRun({ sessionId }),
+    openTerminal: (sessionId, command, signal) => terminalRuns.open(sessionId, command, signal),
     snapshot: async (id, since) =>
       (await localService.invokeDesktopOperation('termSnapshot', since === undefined ? [id] : [id, since])) as {
         text: string;
@@ -786,7 +801,7 @@ const turnNotifier = createDesktopTurnNotifier({
       silent: process.platform === 'win32',
     }),
   ...(process.platform === 'win32' ? { playSound: playNotificationSound } : {}),
-  readFinalAnswer: (sessionId, startedAt) => localService.readSessionFinalAnswer(sessionId, startedAt),
+  readFinalAnswer: (sessionId, startedAt, signal) => localService.readSessionFinalAnswer(sessionId, startedAt, signal),
   diagnostic: (event, details) => {
     diagnostics?.write(`turn-notification-${event}`, details);
     if (event === 'failed' || event === 'read-failed') console.error(`[mixdog-turn-notification] ${event}`, details);
@@ -809,7 +824,7 @@ function createServerWindowNotifier(window: BrowserWindow, connection: DesktopCo
       subscribeAgentPool: (listener) => client.subscribeAgentPool(listener),
       subscribeSessionStates: (listener) => client.subscribeSessionStates(listener),
       subscribeLink: (listener) => link?.subscribe(listener) ?? (() => {}),
-      readFinalAnswer: (sessionId, startedAt) => client.readSessionFinalAnswer(sessionId, startedAt),
+      readFinalAnswer: (sessionId, startedAt, signal) => client.readSessionFinalAnswer(sessionId, startedAt, signal),
     },
     isEnabled: () => turnNotificationsEnabled,
     isSupported: () => Notification.isSupported(),
@@ -1280,12 +1295,39 @@ function disposeDesktopResources(): Promise<void> {
         resolve();
       }, DESKTOP_DISPOSE_TIMEOUT_MS);
     });
-    disposalPromise = Promise.race([cleanup, deadline]).finally(() => {
-      if (timeout) clearTimeout(timeout);
-    });
+    disposalPromise = Promise.race([cleanup, deadline])
+      .finally(() => {
+        if (timeout) clearTimeout(timeout);
+      })
+      // The view is detached; an in-tree daemon still has to stop before the
+      // exit kills it mid-teardown (it would leave PostgreSQL running).
+      .then(() => localConnection.transport()?.stopInTreeDaemon(DESKTOP_DAEMON_STOP_TIMEOUT_MS))
+      .then(
+        () => undefined,
+        (error: unknown) => {
+          console.error('Failed to stop the Mixdog daemon during quit:', error);
+        }
+      );
   }
   return disposalPromise;
 }
+
+// Windows vanish the moment a quit begins; detach, daemon stop and the
+// PostgreSQL behind it finish in this still-running main process afterwards.
+const quitSequence = createDesktopQuitSequence({
+  windows: () => BrowserWindow.getAllWindows(),
+  teardown: async () => {
+    for (const removeWindowIpc of windowIpcDisposers.values()) removeWindowIpc();
+    windowIpcDisposers.clear();
+    await disposeDesktopResources();
+  },
+  exit: () => {
+    quitAfterDispose = true;
+    app.quit();
+  },
+  relaunch: () => app.relaunch(),
+  onError: (error) => console.error('Mixdog desktop quit step failed:', error),
+});
 
 function handleGpuChildCrash(reason: string, exitCode: number): void {
   if (gpuFallbackScheduled || quitAfterDispose) return;
@@ -1837,6 +1879,9 @@ function installLocalWindowFeatures(window: BrowserWindow): BrowserHost {
   // agent bridge (the runtime's `browser` tool) is opt-in and only serves
   // while the Browser Use setting is on, mirroring Computer Use.
   const windowBrowserHost = createBrowserHost(window, {
+    // Only this PC's own window has a browser host (server windows refuse the
+    // browser pane and agent bridge), so its sessions always work locally.
+    remoteSession: false,
     onDiagnostic: (event, data) => diagnostics?.write(event, data),
     // Live frames and explicit reveal/hide requests reach paired clients
     // through the service, which owns the relay and per-client pacing.
@@ -2081,6 +2126,7 @@ function installWindowIpc(
         }
       : {}),
     terminals: connection.terminals,
+    terminalRuns,
     remoteHosts: remoteHostsHandle(),
   });
   return () => {
@@ -2173,7 +2219,14 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on('second-instance', (_event, commandLine) => {
-    if (!isSoftonBackgroundRequest(commandLine)) activatePrimaryWindow();
+    if (isSoftonBackgroundRequest(commandLine)) return;
+    // During a quit's teardown this instance still holds the lock: the new
+    // launch exits, and this one relaunches the app on its way out.
+    if (quitSequence.secondInstance()) {
+      diagnostics?.write('second-instance-during-quit-relaunch', {});
+      return;
+    }
+    activatePrimaryWindow();
   });
 
   // Fork the daemon NOW, while Chromium is still bringing the app up and the
@@ -2394,12 +2447,7 @@ app.on('before-quit', (event) => {
   desktopTray = null;
   if (quitAfterDispose) return;
   event.preventDefault();
-  for (const removeWindowIpc of windowIpcDisposers.values()) removeWindowIpc();
-  windowIpcDisposers.clear();
-  void disposeDesktopResources().finally(() => {
-    quitAfterDispose = true;
-    app.quit();
-  });
+  void quitSequence.begin();
 });
 
 app.on('window-all-closed', () => {

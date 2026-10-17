@@ -123,9 +123,10 @@ export {
   updateSessionStatus,
   updateSessionGeneratedTitle,
   updateSessionManualTitle,
+  updateSessionAiTitle,
   flushSessionMetrics,
 } from './manager/session-crud.mjs';
-export { deleteSession, listOwnedAgentSessionIds } from './store.mjs';
+export { deleteSession, listOwnedAgentSessionIds, fenceSessionWrites } from './store.mjs';
 // Read-only parsed-session access (desktop pane peek): no resume, no
 // ownership, no liveness side effects.
 export { loadSession } from './store.mjs';

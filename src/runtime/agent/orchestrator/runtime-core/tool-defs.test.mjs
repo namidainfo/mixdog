@@ -34,7 +34,7 @@ test('only admitted tool names from the optional modules reach the session surfa
     'load_tool',
     'request_user_input',
     'Skill',
-    'cwd',
+    'session',
     'web_search',
     'memory',
     'recall',

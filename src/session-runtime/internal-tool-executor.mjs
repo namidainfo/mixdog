@@ -6,11 +6,13 @@
  * to channel tools.
  */
 import { clean } from '../runtime/agent/orchestrator/runtime-core/session-text.mjs';
+import { createAskUserToolHandlers } from './internal-tool-executor/ask-user-tool.mjs';
 import { createBridgeToolHandlers } from './internal-tool-executor/bridge-tools.mjs';
 import { createFeatureToolHandlers } from './internal-tool-executor/feature-tools.mjs';
 import { createKnowledgeToolHandlers } from './internal-tool-executor/knowledge-tools.mjs';
 import { createWorkspaceToolHandlers } from './internal-tool-executor/workspace-tools.mjs';
 import { executeUserQuestion } from '../runtime/user-questions/tool.mjs';
+import { isUserQuestionTool } from '../runtime/user-questions/contract.mjs';
 
 export function createInternalToolExecutor({
   rt,
@@ -30,13 +32,15 @@ export function createInternalToolExecutor({
   runNativeWebSearch,
   activeToolSurface,
   mcpStatus,
-  applyResolvedCwd,
   skillToolContent,
   getWorkspaceApi,
+  getSessionManager,
+  getLifecycleApi,
 }) {
   const handlers = {
     request_user_input: (args, { callerCtx }) => executeUserQuestion(args, callerCtx),
     ...createBridgeToolHandlers({ rt }),
+    ...createAskUserToolHandlers({ rt }),
     ...createFeatureToolHandlers({ rt, setupTool, officeToolsEnabled, mediaToolEnabled, tidyToolEnabled }),
     ...createKnowledgeToolHandlers({
       rt,
@@ -54,8 +58,9 @@ export function createInternalToolExecutor({
       goalRuntime,
       agentTool,
       notifyFnForSession,
-      applyResolvedCwd,
       getWorkspaceApi,
+      getSessionManager,
+      getLifecycleApi,
     }),
   };
 
@@ -76,7 +81,7 @@ export function createInternalToolExecutor({
     const callerCwd = clean(callerCtx?.callerCwd) || rt.currentCwd;
     if (callerCtx?.invocationSource === 'model-tool' && rt.session?.deferredSurfaceMode === 'none')
       throw new Error('No-tools chat cannot execute tools; enter work mode explicitly.');
-    if (callerCtx?.invocationSource === 'model-tool' && rt.session?.deferredSurfaceMode === 'questions' && name !== 'request_user_input')
+    if (callerCtx?.invocationSource === 'model-tool' && rt.session?.deferredSurfaceMode === 'questions' && !isUserQuestionTool(name))
       throw new Error('Question-only chat can only request user input; enter work mode explicitly.');
     if (callerCtx?.invocationSource === 'model-tool') guardModelCall(name);
     if (Object.hasOwn(handlers, name)) return handlers[name](args, { name, callerCtx, callerCwd });

@@ -25,6 +25,22 @@ const hook = (session, tool, extra = {}) => applyBeforeToolHook({
   callerSessionId: session.id, sessionRef: session, executeOpts: {}, ...extra,
 });
 
+test('question APIs retain their hook contracts and live Slack authorization', async (t) => {
+  const { session } = await fixture(t);
+  const hooked = [];
+  for (const name of ['ask_user', 'request_user_input']) {
+    const tool = call(name);
+    const result = await hook(session, tool, { beforeToolHook: () => { hooked.push(name); return null; } });
+    assert.equal(result.denial, undefined);
+    assert.equal(preDispatchDenyForSession(session, tool), null);
+  }
+  assert.deepEqual(hooked, ['request_user_input']);
+  session.slackExecutionPolicy = { ...session.slackExecutionPolicy, active: false };
+  for (const name of ['ask_user', 'request_user_input']) {
+    assert.match((await hook(session, call(name))).denial, /승인.*해제/u);
+  }
+});
+
 test('members read only literal private paths and generate images only inside their own workspace', async (t) => {
   const { session, workspace, other, root } = await fixture(t);
   for (const tool of [

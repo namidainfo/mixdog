@@ -2,13 +2,19 @@ import assert from 'node:assert/strict';
 import test, { mock } from 'node:test';
 
 const secrets = new Map();
+const deleted = [];
+let deleteFailure = null;
 const original = await import('../../runtime/shared/config.mjs');
 mock.module('../../runtime/shared/config.mjs', {
   namedExports: {
     ...original,
     saveSecret: (account, value) => secrets.set(account, value),
     saveSecretAsync: async (account, value) => secrets.set(account, value),
-    deleteSecretAsync: async (account) => secrets.delete(account),
+    deleteSecretAsync: async (account) => {
+      deleted.push(account);
+      if (deleteFailure) throw deleteFailure;
+      secrets.delete(account);
+    },
     hasStoredSecret: (account) => secrets.has(account),
     getAgentApiKey: (id) => secrets.get(`agent.${id}.apiKey`) || null,
   },
@@ -45,6 +51,7 @@ mock.module('../../runtime/agent/orchestrator/providers/custom-provider.mjs', {
         baseURL: input.baseURL,
         enabled: true,
         auth: input.auth === 'none' ? 'none' : 'key',
+        ...(input.apiKeyEnv && input.auth !== 'none' ? { apiKeyEnv: input.apiKeyEnv } : {}),
         discovery: {
           newModelsHidden: legacy ? (input.models || []).length > 0 : input.discovery?.newModelsHidden === true,
         },
@@ -140,6 +147,55 @@ test('remove deletes config and secret, and only custom providers', async () => 
   assert.equal(cfg.peek().providers.openai.enabled, true);
   await assert.rejects(() => admin.removeCustomProvider(cfg, 'openai'), /unknown custom provider/);
   await assert.rejects(() => admin.removeCustomProvider(cfg, id), /unknown custom provider/);
+});
+
+test('removing a keyless provider succeeds and drops its settings and routes', async () => {
+  const cfg = makeCfg();
+  const { id } = await admin.saveCustomProvider(cfg, { ...input, auth: 'none', apiKey: undefined });
+  assert.equal(secrets.has(`agent.${id}.apiKey`), false);
+  cfg.saveConfig({
+    ...cfg.loadConfig(),
+    modelSettings: { [`${id}/m1`]: { fast: true }, 'openai/gpt': { fast: true } },
+    agents: { worker: { provider: id, model: 'm1' }, other: { provider: 'openai', model: 'gpt' } },
+    webSearchRoute: { provider: id, model: 'm1' },
+    presets: [
+      { id: 'mine', provider: id, model: 'm1' },
+      { id: 'keep', provider: 'openai', model: 'gpt' },
+    ],
+    default: 'mine',
+  });
+  deleted.length = 0;
+  await admin.removeCustomProvider(cfg, id);
+  assert.deepEqual(deleted, [`agent.${id}.apiKey`]);
+  assert.deepEqual(cfg.peek(), {
+    providers: { openai: { enabled: true } },
+    modelSettings: { 'openai/gpt': { fast: true } },
+    agents: { other: { provider: 'openai', model: 'gpt' } },
+    presets: [{ id: 'keep', provider: 'openai', model: 'gpt' }],
+  });
+});
+
+test('removing a keyed provider deletes its secret', async () => {
+  const cfg = makeCfg();
+  const { id } = await admin.saveCustomProvider(cfg, input);
+  assert.equal(secrets.has(`agent.${id}.apiKey`), true);
+  await admin.removeCustomProvider(cfg, id);
+  assert.equal(secrets.has(`agent.${id}.apiKey`), false);
+  assert.equal(cfg.peek().providers[id], undefined);
+});
+
+test('a keychain failure on removal is reported and keeps the provider for retry', async () => {
+  const cfg = makeCfg();
+  const { id } = await admin.saveCustomProvider(cfg, input);
+  deleteFailure = new Error('[keychain] the keyring is locked');
+  try {
+    await assert.rejects(() => admin.removeCustomProvider(cfg, id), /keyring is locked/);
+  } finally {
+    deleteFailure = null;
+  }
+  assert.ok(cfg.peek().providers[id]);
+  await admin.removeCustomProvider(cfg, id);
+  assert.equal(cfg.peek().providers[id], undefined);
 });
 
 test('failed config edits restore the previous API key', async () => {
@@ -368,6 +424,69 @@ test('keyless providers save, test and report authenticated without a key', asyn
   assert.equal(created.at(-1).config.apiKey, '');
   const setup = await admin.providerSetup(cfg.peek());
   assert.equal(setup.api.find((r) => r.id === row.id).authenticated, true);
+});
+
+test('apiKeyEnv: save without key, keep/clear on edit, env-only key, status and check', async () => {
+  const cfg = makeCfg();
+  const NAME = 'MIXDOG_TEST_CUSTOM_KEY';
+  delete process.env[NAME];
+  const envInput = { ...v2Input, apiKey: '', apiKeyEnv: NAME };
+  const secretsBefore = secrets.size;
+  const row = await admin.saveCustomProvider(cfg, envInput);
+  assert.equal(secrets.size, secretsBefore);
+  assert.equal(cfg.peek().providers[row.id].apiKeyEnv, NAME);
+  assert.equal(row.apiKeyEnv, NAME);
+  assert.equal(row.authenticated, false);
+  process.env[NAME] = 'env-key-value';
+  try {
+    const setup = await admin.providerSetup(cfg.peek());
+    const listed = setup.api.find((r) => r.id === row.id);
+    assert.equal(listed.authenticated, true);
+    assert.equal(listed.apiKeyEnv, NAME);
+    // Omitted keeps the stored name; a keychain key is never used in env mode.
+    secrets.set(`agent.${row.id}.apiKey`, 'keychain-key');
+    const { apiKeyEnv: _e, ...omitted } = envInput;
+    await admin.saveCustomProvider(cfg, { ...omitted, id: row.id, name: 'Renamed' });
+    assert.equal(cfg.peek().providers[row.id].apiKeyEnv, NAME);
+    behavior = { listModels: async () => [{ id: 'k' }], send: async () => ({}) };
+    await admin.testCustomProvider(cfg, { ...omitted, id: row.id });
+    assert.equal(created.at(-1).config.apiKey, 'env-key-value');
+    // A key rotated during the operation (auth retry) is redacted too.
+    behavior = {
+      listModels: async () => {
+        process.env[NAME] = 'rotatedvalue4821';
+        throw new Error('rejected rotatedvalue4821');
+      },
+      send: async () => {
+        process.env[NAME] = 'rotatedvalue4821';
+        throw new Error('rejected rotatedvalue4821');
+      },
+    };
+    await assert.rejects(admin.testCustomProvider(cfg, { ...omitted, id: row.id }), (error) => {
+      assert.equal(error.message.includes('rotatedvalue4821'), false);
+      return true;
+    });
+    process.env[NAME] = 'env-key-value';
+    const discovered = await admin.discoverCustomProviderModels(cfg, { ...omitted, id: row.id });
+    assert.equal(discovered.error.message.includes('rotatedvalue4821'), false);
+    process.env[NAME] = 'env-key-value';
+    // Both a typed key and a name is rejected.
+    await assert.rejects(admin.saveCustomProvider(cfg, { ...envInput, apiKey: 'x' }), /mutually exclusive/);
+    await assert.rejects(admin.saveCustomProvider(cfg, { ...envInput, apiKeyEnv: 'bad name' }), /apiKeyEnv is invalid/);
+    await assert.rejects(admin.saveCustomProvider(cfg, { ...envInput, apiKey: '   ' }), /mutually exclusive/);
+    await assert.rejects(admin.saveCustomProvider(cfg, { ...envInput, auth: 'none' }), /requires key auth/);
+    await assert.rejects(admin.testCustomProvider(cfg, { ...envInput, auth: 'none' }), /requires key auth/);
+    await assert.rejects(admin.discoverCustomProviderModels(cfg, { ...envInput, apiKey: ' ' }), /mutually exclusive/);
+    // null clears back to the direct key.
+    await admin.saveCustomProvider(cfg, { ...omitted, id: row.id, apiKeyEnv: null });
+    assert.equal('apiKeyEnv' in cfg.peek().providers[row.id], false);
+    assert.deepEqual(admin.checkCustomProviderKeyEnv(NAME), { found: true });
+    process.env[NAME] = '';
+    assert.deepEqual(admin.checkCustomProviderKeyEnv(NAME), { found: false });
+    assert.throws(() => admin.checkCustomProviderKeyEnv('1bad'), TypeError);
+  } finally {
+    delete process.env[NAME];
+  }
 });
 
 test('edits that omit auth or v2 settings keep the stored ones; stated values replace them', async () => {

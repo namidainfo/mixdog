@@ -25,6 +25,7 @@ export interface UserQuestionResult {
 }
 
 export const USER_QUESTION_SCHEMA: Record<string, unknown>;
+export function isUserQuestionTool(name: unknown): boolean;
 export function normalizeUserQuestions(input: unknown): UserQuestion[];
 export function normalizeUserQuestionResponse(input: unknown): UserQuestionResponse;
 export function userQuestionResult(questions: UserQuestion[], input: unknown): UserQuestionResult;

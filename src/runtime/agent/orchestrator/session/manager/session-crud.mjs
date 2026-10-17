@@ -30,6 +30,7 @@ import { sessionTitleDatePrefix, splitSessionTitleDatePrefix } from '../../../..
 import { reserveSessionTitle } from '../store/title-sequence.mjs';
 import { hideCompactionArchive } from '../compaction-archive-capture.mjs';
 import { writeStderrBestEffort } from '../../../../shared/best-effort-stderr.mjs';
+import { forgetSideQuestion } from '../side-question-store.mjs';
 
 /** Force-flush session metrics to disk. Used by watchdog terminal-reap (fix B). */
 export async function flushSessionMetrics(sessionId) {
@@ -95,12 +96,29 @@ export async function updateSessionManualTitle(id, title) {
   if (!session || session.closed === true) return false;
   const normalized = normalizeSessionTitle(title);
   if (!normalized) return false;
-  if (session.title === normalized && session.titleLocked === true) return false;
+  if (session.title === normalized && session.titleLocked === true && session.titleSource === 'user') return false;
   session.title = normalized;
   session.titleLocked = true;
+  session.titleSource = 'user';
   session.titleUpdatedAt = Date.now();
   await saveSessionAsync(session, { expectedGeneration: session.generation });
   return true;
+}
+// A title the model chose (session tool). Never overwrites a user title; a
+// legacy locked session without titleSource counts as user-titled. It locks
+// the title against auto-generated ones but stays replaceable by the model.
+export async function updateSessionAiTitle(id, title) {
+  const session = loadSession(id);
+  if (!session || session.closed === true) return { ok: false, reason: 'not-found' };
+  const normalized = normalizeSessionTitle(title);
+  if (!normalized) return { ok: false, reason: 'empty-title' };
+  if (session.titleLocked === true && session.titleSource !== 'ai') return { ok: false, reason: 'user-title' };
+  session.title = normalized;
+  session.titleLocked = true;
+  session.titleSource = 'ai';
+  session.titleUpdatedAt = Date.now();
+  await saveSessionAsync(session, { expectedGeneration: session.generation });
+  return { ok: true, title: normalized };
 }
 // --- Clear messages (keep system prompt + provider/model/cwd) ---
 // Token/provider accounting a cleared transcript starts from; shared by the
@@ -273,8 +291,10 @@ export async function clearSessionMessages(sessionId, options = {}) {
 
   session.messages = keep;
   // Clear truncates the transcript wholesale; drop the provider prefix
-  // snapshot so the next send re-baselines instead of history_shrink.
+  // snapshot so the next send re-baselines instead of history_shrink, and
+  // the request a /btw side question would fork.
   delete session._providerPrefixGuardState;
+  forgetSideQuestion(sessionId);
   resetSessionBp3Environment(session);
   Object.assign(session, clearedTokenAccounting(now));
   session.compaction = {
@@ -383,9 +403,11 @@ export async function rewindSessionMessagesTo(sessionId, options = {}) {
   const removed = messages.length - start;
   session.messages = messages.slice(0, start);
   // The provider cache is keyed on the exact prefix we just truncated;
-  // the prefix-guard snapshot describes it too and must go with it.
+  // the prefix-guard snapshot and the /btw fork request describe it too and
+  // must go with it.
   session.providerState = undefined;
   delete session._providerPrefixGuardState;
+  forgetSideQuestion(sessionId);
   session.updatedAt = Date.now();
   session.lastUsedAt = Date.now();
   await saveSessionAsync(session, { expectedGeneration: session.generation });

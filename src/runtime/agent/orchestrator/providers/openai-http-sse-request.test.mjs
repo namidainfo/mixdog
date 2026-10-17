@@ -287,7 +287,9 @@ for (const [label, wrap] of [
       assert.equal(sleeps.length, resetFirst ? 1 : 0);
       assert.equal(cleanups, 1);
       assert.equal(current.cause, originalCause);
-      assert.deepEqual(stages, resetFirst ? [['requesting', 1], ['requesting', 2]] : [['requesting', 1]]);
+      assert.deepEqual(stages, resetFirst
+        ? [['requesting', 1], ['reconnecting', 2], ['requesting', 2]]
+        : [['requesting', 1]]);
     });
   }
 }

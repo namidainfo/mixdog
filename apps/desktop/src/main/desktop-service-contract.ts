@@ -33,6 +33,7 @@ export interface DesktopService {
   listProjects(): Promise<DesktopProjectSummary[]>;
   addProject(projectPath: string): unknown;
   projectDirectory(projectPath: string): Promise<string>;
+  projectRecoveryDirectory?(projectPath: string): Promise<string>;
   renameProject(projectPath: string, alias: string): unknown;
   removeProject(projectPath: string): unknown;
   listProjectDir(projectPath: string, relDir: string): unknown;
@@ -52,7 +53,9 @@ export interface DesktopService {
   projectEntryPath(projectPath: string, relPath: string): Promise<string>;
   codeGraphQuery(projectPath: string, mode: 'find_symbol' | 'references' | 'symbols', query: string): unknown;
   listSessions(): Promise<DesktopSessionSummary[]>;
-  readSessionFinalAnswer(sessionId: string, startedAt: number): Promise<SessionFinalAnswer | null>;
+  /** `signal` stops the read when aborted (rejects with the signal's reason);
+   *  it is local to the caller and never travels over the service IPC. */
+  readSessionFinalAnswer(sessionId: string, startedAt: number, signal?: AbortSignal): Promise<SessionFinalAnswer | null>;
   /** Base64 of a stored attachment blob; null when it is permanently unreadable. */
   readAttachmentImage(attachmentRef: string): Promise<string | null>;
   /** The session's transcript as this host holds it (the window its views
@@ -71,7 +74,7 @@ export interface DesktopService {
   setQuotaAutoResume(enabled: boolean): Promise<boolean>;
   setSessionArchived(sessionId: string, archived: boolean): unknown;
   setSessionFavorite(sessionId: string, favorite: boolean): unknown;
-  setSessionProject(sessionId: string, projectPath: string | null): unknown;
+  setSessionProject(sessionId: string, projectPath: string): unknown;
   deleteSession(sessionId: string): unknown;
   prefetchSession(sessionId: string, transcriptItemLimit?: number, readTraceId?: string): Promise<boolean>;
   /** Transport-only recovery: capture current projections after refreshing
@@ -141,6 +144,7 @@ export const DESKTOP_SERVICE_METHODS = [
   'listProjects',
   'addProject',
   'projectDirectory',
+  'projectRecoveryDirectory',
   'renameProject',
   'removeProject',
   'listProjectDir',

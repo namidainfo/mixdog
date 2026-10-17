@@ -12,7 +12,7 @@ interface DesktopTurnNotifierOptions {
   isForeground(): boolean;
   /** Personal local host only; ordinary and server windows keep click-to-open. */
   focusOnNotify?: boolean;
-  readFinalAnswer(sessionId: string, startedAt: number): Promise<SessionFinalAnswer | null>;
+  readFinalAnswer(sessionId: string, startedAt: number, signal?: AbortSignal): Promise<SessionFinalAnswer | null>;
   createNotification(content: { title: string; body: string }): NativeNotification;
   playSound?(): Promise<string>;
   openSession(sessionId: string): void;
@@ -119,7 +119,8 @@ export function createDesktopTurnNotifier(options: DesktopTurnNotifierOptions) {
         if (update.laneEnd === 'gone') questions.delete(update.sessionId);
         return;
       }
-      const key = update.snapshot.userQuestion?.id || null;
+      const key = update.snapshot.userQuestion?.id
+        || (update.snapshot.toolApproval?.kind === 'question' ? String(update.snapshot.toolApproval.id) : null);
       const previous = questions.get(update.sessionId) ?? null;
       // A late replay must not replace a newer live identity or clear it.
       if (update.frameSource === 'replay') {

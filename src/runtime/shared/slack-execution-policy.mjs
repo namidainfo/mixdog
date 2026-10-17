@@ -2,6 +2,7 @@ import path from 'node:path';
 import { realpathSync } from 'node:fs';
 import { normalizeToolName, parseToolArgs, isSelfMcpToolName } from './tool-primitives.mjs';
 import { sensitive } from '../../integrations/slack-session/hub/files.mjs';
+import { isUserQuestionTool } from '../user-questions/contract.mjs';
 
 const approvals = new WeakMap();
 const imageExtension = /\.(?:png|jpe?g|webp|gif)$/iu;
@@ -65,6 +66,7 @@ function callArgs(call) {
 
 function safeCall(policy, call) {
   const name = normalizeToolName(call.name), args = callArgs(call);
+  if (isUserQuestionTool(name)) return true;
   if (['skill', 'skill_view', 'load_tool'].includes(name)) return true;
   if (name === 'read') {
     const entries = Array.isArray(args.file_path) ? args.file_path : [args.file_path];

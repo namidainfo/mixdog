@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, sep } from 'node:path';
+import { basename, dirname, join, sep } from 'node:path';
 import test from 'node:test';
 import { DesktopProjectRegistry } from './desktop-project-registry.ts';
 import { SessionHost } from './session-host.ts';
@@ -53,7 +53,7 @@ async function fixture(t, { registerProject = true, entryFor, containing = false
     await host.dispose().catch(() => {});
     await rm(root, { recursive: true, force: true });
   });
-  return { host, root, project, worktree, arbitrary, nested };
+  return { host, root, project, worktree, arbitrary, nested, projects };
 }
 
 test('a managed worktree of a registered project resolves with the main project identity', async (t) => {
@@ -219,7 +219,7 @@ test('inheriting a session whose Project is not registered starts the heir in th
   assert.deepEqual(created[3].desktopSession, { classification: 'task', projectPath: null });
 });
 
-test('inheriting a session the user moved to a Project starts the heir in that Project', async (t) => {
+test('a legacy stored sidebar assignment never decides where the heir starts', async (t) => {
   const { host, root, project, arbitrary } = await fixture(t, { strict: true });
   const created = [];
   host.sessionClient.create = async (input) => {
@@ -235,20 +235,62 @@ test('inheriting a session the user moved to a Project starts the heir in that P
   ];
   const taskWorkspace = join(root, 'workspace', 'unclassified');
 
-  // Moved into a registered Project: the heir starts there.
+  // Assigned to a registered Project while working outside one: still a task.
   await host.inheritSession('sess_moved_in', null, null);
-  assert.equal(created[0].cwd, project);
-  assert.deepEqual(created[0].desktopSession, { classification: 'project', projectPath: project });
+  assert.equal(created[0].cwd, taskWorkspace);
+  assert.deepEqual(created[0].desktopSession, { classification: 'task', projectPath: null });
 
-  // Moved out to "no Project": the heir is a task.
+  // Assigned to "no Project" while working in a Project: still that Project.
   await host.inheritSession('sess_moved_out', null, null);
-  assert.equal(created[1].cwd, taskWorkspace);
-  assert.deepEqual(created[1].desktopSession, { classification: 'task', projectPath: null });
+  assert.equal(created[1].cwd, project);
+  assert.deepEqual(created[1].desktopSession, { classification: 'project', projectPath: project });
 
-  // Moved to a Project removed since: the source's own Project applies.
+  // Assigned to a Project removed since: the source's own Project applies.
   await host.inheritSession('sess_moved_to_removed', null, null);
   assert.equal(created[2].cwd, project);
   assert.deepEqual(created[2].desktopSession, { classification: 'project', projectPath: project });
+});
+
+test('moving a session to a project changes its working folder through the runtime project switch', async (t) => {
+  const { host, root, project, arbitrary, worktree } = await fixture(t, { strict: true });
+  const invoked = [];
+  host.transport.invokeSession = async (sessionId, method, args) => {
+    invoked.push([sessionId, method, args]);
+    return { value: args[0], snapshot: null, result: {} };
+  };
+  let published = 0;
+  host.catalog.publishCatalogs = async () => {
+    published += 1;
+  };
+  host.listSessions = async () => [
+    { id: 'sess_free', cwd: arbitrary, projectPath: null },
+    { id: 'sess_in_project', cwd: join(project, 'src'), projectPath: project },
+    { id: 'sess_busy', cwd: arbitrary, projectPath: null, working: true, leadWorking: true },
+    {
+      id: 'sess_worktree',
+      cwd: worktree,
+      projectPath: project,
+      workspace: { projectPath: project, cwd: worktree, worktreeId: 'fix-login' },
+    },
+  ];
+  const taskWorkspace = join(root, 'workspace', 'unclassified');
+
+  await host.setSessionProject('sess_free', project);
+  await host.setSessionProject('sess_in_project', '');
+  // Already working in that project (or in none): nothing changes.
+  await host.setSessionProject('sess_in_project', project);
+  await host.setSessionProject('sess_free', '');
+  assert.deepEqual(invoked, [
+    ['sess_free', 'setCwd', [project]],
+    ['sess_in_project', 'setCwd', [taskWorkspace]],
+  ]);
+  assert.equal(published, 2);
+
+  await assert.rejects(host.setSessionProject('sess_busy', project), /running a turn/);
+  await assert.rejects(host.setSessionProject('sess_worktree', ''), /managed worktree/);
+  await assert.rejects(host.setSessionProject('sess_free', arbitrary), /Project is not available/);
+  await assert.rejects(host.setSessionProject('sess_missing', project), /Session is not available/);
+  assert.equal(invoked.length, 2, 'refused moves never reach the runtime');
 });
 
 test('inheritance considers all sidebar paths and selects the deepest registered Project', async (t) => {
@@ -258,7 +300,7 @@ test('inheritance considers all sidebar paths and selects the deepest registered
     [{ projectPath: null, cwd: join(nested, 'src') }, nested],
     [{ projectPath: arbitrary, cwd: worktree, workspace: { projectPath: project, cwd: worktree } }, project],
     [{ projectPath: project, workspace: { projectPath: project, cwd: join(nested, 'src') } }, nested],
-    [{ projectPath: project, cwd: nested, projectAssignment: project }, project],
+    [{ projectPath: project, cwd: nested, projectAssignment: project }, nested],
     [{ projectPath: arbitrary, cwd: join(nested, 'src'), projectAssignment: arbitrary }, nested],
   ];
   host.listSessions = async () => cases.map(([row], index) => ({ id: `sess_case_${index}`, ...row }));
@@ -309,4 +351,66 @@ test('open hints carry the worktree cwd under the main project identity', async 
   const hints = host.openHints('sess_a');
   assert.equal(hints.cwd, worktree);
   assert.deepEqual(hints.desktopSession, { classification: 'project', projectPath: project });
+});
+
+
+test('recovery lookup retains a registered missing folder without granting general file access', async (t) => {
+  const { host, project, worktree, arbitrary } = await fixture(t);
+  await rm(project, { recursive: true });
+  await rm(worktree, { recursive: true });
+  assert.equal(await host.projectRecoveryDirectory(project), project);
+  assert.equal(await host.projectRecoveryDirectory(worktree), worktree);
+  await assert.rejects(host.projectDirectory(project));
+  await assert.rejects(host.projectDirectory(worktree));
+  await assert.rejects(host.projectRecoveryDirectory(arbitrary));
+});
+
+test('recovery lookup accepts a deleting managed record but never an unregistered parent', async (t) => {
+  const f = await fixture(t, { entryFor: ({ project, worktree }) => ({ projectPath: project, path: worktree, state: 'deleting' }) });
+  assert.equal(await f.host.projectRecoveryDirectory(f.worktree), f.worktree);
+  await assert.rejects(f.host.projectDirectory(f.worktree));
+  await assert.rejects(f.host.projectRecoveryDirectory(f.arbitrary));
+  const removed = await fixture(t, { registerProject: false });
+  await assert.rejects(removed.host.projectRecoveryDirectory(removed.worktree));
+});
+
+
+test('recovery resolves a registered parent alias consistently before and after checkout removal', async (t) => {
+  let aliasEntry;
+  const f = await fixture(t, {
+    entryFor: ({ project, worktree }) => ({ projectPath: project, path: aliasEntry ?? worktree, state: 'ready' }),
+  });
+  const alias = join(f.root, 'checkout-parent-alias');
+  await symlink(dirname(f.worktree), alias, process.platform === 'win32' ? 'junction' : 'dir');
+  aliasEntry = join(alias, basename(f.worktree));
+  const nested = join(f.worktree, 'packages', 'app');
+  const aliasNested = join(aliasEntry, 'packages', 'app');
+  await mkdir(nested, { recursive: true });
+  assert.equal(await f.host.projectDirectory(aliasEntry), f.worktree);
+  assert.equal(await f.host.projectRecoveryDirectory(aliasEntry), f.worktree);
+  assert.equal(await f.host.projectRecoveryDirectory(f.worktree), f.worktree);
+  assert.equal(await f.host.projectRecoveryDirectory(aliasNested), nested);
+  await assert.rejects(f.host.projectRecoveryDirectory(f.arbitrary));
+  await rm(f.worktree, { recursive: true });
+  assert.equal(await f.host.projectRecoveryDirectory(aliasEntry), f.worktree);
+  assert.equal(await f.host.projectRecoveryDirectory(aliasNested), nested);
+  await assert.rejects(f.host.projectDirectory(aliasEntry));
+  // A replacement checkout cannot redirect inventory to a sibling's scope.
+  await symlink(f.arbitrary, f.worktree, process.platform === 'win32' ? 'junction' : 'dir');
+  assert.equal(await f.host.projectRecoveryDirectory(aliasEntry), f.worktree);
+});
+
+
+test('registered project aliases resolve the same recovery store as workspace edits', async (t) => {
+  const f = await fixture(t);
+  const alias = join(f.root, 'registered-alias');
+  await symlink(f.project, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  f.projects[0].path = alias;
+  const editRoot = await f.host.projectDirectory(alias);
+  const recoveryRoot = await f.host.projectRecoveryDirectory(alias);
+  assert.equal(editRoot, f.project);
+  assert.equal(recoveryRoot, editRoot);
+  const { projectRecoveryStorePath } = await import('./project-recovery-store.ts');
+  assert.equal(projectRecoveryStorePath(f.root, recoveryRoot), projectRecoveryStorePath(f.root, editRoot));
+  await assert.rejects(f.host.projectRecoveryDirectory(f.arbitrary));
 });

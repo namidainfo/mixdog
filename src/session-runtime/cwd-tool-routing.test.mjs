@@ -91,6 +91,7 @@ test('cwd internal tool stays bound to its caller when another runtime owns the 
   let runtimeB;
   let restored;
   let drainSessionStore;
+  let settleSummaryIndexWrites;
   t.after(async () => {
     try {
       await Promise.all([
@@ -99,6 +100,7 @@ test('cwd internal tool stays bound to its caller when another runtime owns the 
         restored?.close('cwd-routing-test', { waitForExit: false }),
       ]);
       drainSessionStore?.();
+      await settleSummaryIndexWrites?.();
       assert.equal(fetchMock.mock.callCount(), 0, 'no network requests during runtime creation or teardown');
     } finally {
       for (const key of Object.keys(process.env)) delete process.env[key];
@@ -109,6 +111,7 @@ test('cwd internal tool stays bound to its caller when another runtime owns the 
   const { createMixdogSessionRuntime } = await import('./runtime-core.mjs');
   const { executeTool } = await import('../runtime/agent/orchestrator/session/loop/tool-exec.mjs');
   ({ drainSessionStore } = await import('../runtime/agent/orchestrator/session/store.mjs'));
+  ({ settleSummaryIndexWrites } = await import('../runtime/agent/orchestrator/session/store-summary-index.mjs'));
   const options = {
     provider: 'openai',
     model: 'gpt-4o-mini',
@@ -129,11 +132,11 @@ test('cwd internal tool stays bound to its caller when another runtime owns the 
   // call still belongs to runtimeA and must neither report nor mutate B.
   const callerSession = runtimeA.session;
   callerSession.messages.push({ role: 'user', content: 'Keep this conversation across reentry.' });
-  const getResult = JSON.parse(await executeTool('cwd', {}, cwdA, callerSession.id, callerSession));
+  const getResult = JSON.parse(await executeTool('session', {}, cwdA, callerSession.id, callerSession));
   assert.equal(getResult.cwd, cwdA);
   assert.equal(getResult.sessionId, callerSession.id);
 
-  const setResult = JSON.parse(await executeTool('cwd', { path: cwdNext }, cwdA, callerSession.id, callerSession));
+  const setResult = JSON.parse(await executeTool('session', { path: cwdNext }, cwdA, callerSession.id, callerSession));
   assert.equal(setResult.cwd, cwdNext);
   assert.equal(setResult.sessionId, callerSession.id);
   assert.equal(runtimeA.cwd, cwdNext);
@@ -158,7 +161,7 @@ test('cwd internal tool stays bound to its caller when another runtime owns the 
   await restored.resume(callerSession.id);
   assert.equal(restored.cwd, cwdNext);
   assert.deepEqual(restored.session.desktopSession, { classification: 'project', projectPath: cwdNext });
-  const returned = JSON.parse(await executeTool('cwd', { path: cwdA }, cwdNext, restored.id, restored.session));
+  const returned = JSON.parse(await executeTool('session', { path: cwdA }, cwdNext, restored.id, restored.session));
   assert.equal(returned.cwd, cwdA);
   assert.equal(restored.cwd, cwdA);
   assert.deepEqual(restored.session.desktopSession, { classification: 'project', projectPath: cwdA });

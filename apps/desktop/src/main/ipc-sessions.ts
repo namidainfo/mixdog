@@ -4,6 +4,7 @@ import { DESKTOP_IPC, type DesktopRemoteAccessInfo } from '../shared/contract';
 import type { BrowserHost } from './browser/host';
 import { readAttachmentThumbnail } from './attachment-thumbnail';
 import { optionalSessionId, requiredSessionId } from './desktop-state';
+import { isSessionMissingError } from './session-final-answer';
 import type { DesktopService } from './desktop-service-contract';
 import {
   requiredAbortOptions,
@@ -22,6 +23,7 @@ import {
 } from './ipc-validation';
 import type { IpcHandle as Handle } from './ipc';
 import { hostDeviceName } from './session-device';
+import { sessionSidebarActions } from './session-sidebar-actions';
 import type { RemoteHostWindows } from './remote-host-windows';
 
 interface SessionIpcOptions {
@@ -79,21 +81,25 @@ export function registerSessionIpc({
   handle(DESKTOP_IPC.renameSession, (_event, sessionId, title) =>
     host.renameSession(requiredSessionId(sessionId), sessionDisplayName(title))
   );
-  handle(DESKTOP_IPC.setSessionArchived, (_event, sessionId, archived) => {
-    if (typeof archived !== 'boolean') throw new TypeError('archived must be a boolean.');
-    return host.setSessionArchived(requiredSessionId(sessionId), archived);
-  });
-  handle(DESKTOP_IPC.setSessionFavorite, (_event, sessionId, favorite) => {
-    if (typeof favorite !== 'boolean') throw new TypeError('favorite must be a boolean.');
-    return host.setSessionFavorite(requiredSessionId(sessionId), favorite);
-  });
-  handle(DESKTOP_IPC.setSessionProject, (_event, sessionId, projectPath) => {
-    if (projectPath !== null && typeof projectPath !== 'string') throw new TypeError('projectPath must be a string.');
-    return host.setSessionProject(requiredSessionId(sessionId), projectPath);
-  });
+  const sidebar = sessionSidebarActions(host);
+  handle(DESKTOP_IPC.setSessionArchived, (_event, sessionId, archived) =>
+    sidebar.setSessionArchived(sessionId, archived)
+  );
+  handle(DESKTOP_IPC.setSessionFavorite, (_event, sessionId, favorite) =>
+    sidebar.setSessionFavorite(sessionId, favorite)
+  );
+  handle(DESKTOP_IPC.setSessionProject, (_event, sessionId, projectPath) =>
+    sidebar.setSessionProject(sessionId, projectPath)
+  );
   handle(DESKTOP_IPC.deleteSession, async (_event, sessionId) => {
     const ownerSessionId = requiredSessionId(sessionId);
-    const snapshot = await host.deleteSession(ownerSessionId);
+    // A session that is already gone is a no-op, not an error for the UI.
+    let snapshot: unknown = null;
+    try {
+      snapshot = await host.deleteSession(ownerSessionId);
+    } catch (error) {
+      if (!isSessionMissingError(error)) throw error;
+    }
     browserHost?.releaseSession(ownerSessionId);
     return snapshot;
   });

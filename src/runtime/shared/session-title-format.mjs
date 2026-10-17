@@ -13,7 +13,9 @@ export function splitSessionTitleDatePrefix(value) {
 }
 
 export function sessionTitleDateKey(createdAt) {
+  if (createdAt == null) return '';
   const date = new Date(createdAt);
+  if (!Number.isFinite(date.getTime())) return '';
   const year = String(date.getFullYear()).padStart(4, '0');
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
@@ -21,6 +23,8 @@ export function sessionTitleDateKey(createdAt) {
 }
 
 export function sessionTitleDatePrefix(createdAt, sequence) {
-  const date = sessionTitleDateKey(createdAt).slice(-6);
+  const key = sessionTitleDateKey(createdAt);
+  if (!key) return '';
+  const date = key.slice(-6);
   return sequence === undefined ? `[${date}] ` : `${date}-${String(sequence).padStart(3, '0')} | `;
 }

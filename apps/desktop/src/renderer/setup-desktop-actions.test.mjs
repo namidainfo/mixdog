@@ -79,6 +79,8 @@ test('activity rail pins: setup accepts exactly the Desktop pin ids and replaces
   assert.equal(result.scope, 'desktop-host');
   const status = await run({ action: 'status', domain: 'desktop' });
   assert.deepEqual(status.activityRailPins, ['search', 'sessions']);
+  const personal = await run({ action: 'set_activity_rail_pins', activityRailPins: ['worktrail', 'sessions'] });
+  assert.deepEqual(personal.activityRailPins, ['worktrail', 'sessions']);
   await assert.rejects(run({ action: 'set_activity_rail_pins', activityRailPins: ['nope'] }), /known activity rail/);
 });
 

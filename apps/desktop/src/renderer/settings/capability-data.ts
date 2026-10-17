@@ -129,7 +129,8 @@ export interface SettingsConfirmation {
   description: string;
   confirmLabel?: string;
   danger?: boolean;
-  onConfirm(): void | Promise<void>;
+  /** Absent: a notice (a failure to read) with one Close button. */
+  onConfirm?(): void | Promise<void>;
 }
 
 // Ordered by what the user sees first, cheapest first: the sweep runs in
@@ -143,6 +144,7 @@ export const SECTION_READS: ReadonlyArray<readonly [string, DesktopCapability, u
   ['outputStyles', 'listOutputStyles'],
   ['providerSetup', 'getProviderSetup'],
   ['recap', 'getRecapSettings'],
+  ['sessionTitles', 'getSessionTitleSettings'],
   ['toolModules', 'getToolModuleSettings'],
   ['update', 'getUpdateSettings'],
   ['updateStatus', 'getUpdateStatus'],

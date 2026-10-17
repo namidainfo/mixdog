@@ -100,3 +100,41 @@ test('missing identity fails before creation and failed naming disposes the new 
   assert.equal(h.calls.at(-1)[0], 'dispose');
   assert.equal(h.client.views.size, 0);
 });
+
+const upstreamQuestions = () => Array.from({ length: 4 }, (_, index) => ({
+  question: `Question ${index + 1}`, header: `Q${index + 1}`, multi_select: index === 0,
+  options: [{ label: 'A', description: 'First choice' }, { label: 'B', description: 'Second choice' }],
+}));
+
+test('members answer four upstream questions without gaining ordinary tool approval', async () => {
+  const h = harness();
+  await h.client.open({ sessionId: 'native-1' });
+  h.state.toolApproval = { id: 'question-1', name: 'ask_user', kind: 'question', args: { questions: upstreamQuestions() } };
+  const snapshot = (await h.client.state({ sessionId: 'native-1' })).state;
+  assert.equal(snapshot.toolApproval, null);
+  assert.equal(snapshot.userQuestion.source, 'ask_user');
+  assert.deepEqual(snapshot.userQuestion.questions.map((question) => question.id), ['q1', 'q2', 'q3', 'q4']);
+  const answers = [{ selected: ['A', 'B'] }, { selected: ['B'] }, { selected: [], text: 'Typed answer' }, { selected: ['A'] }];
+  await assert.rejects(h.client.answer({ sessionId: 'native-1', questionId: 'stale', response: { answers } }), /현재 세션의 질문/u);
+  await assert.rejects(h.client.answer({ sessionId: 'native-1', questionId: 'question-1', response: { answers: [] } }), /질문 응답/u);
+  assert.deepEqual(await h.client.answer({ sessionId: 'native-1', questionId: 'question-1', response: { answers } }), { accepted: true });
+  assert.deepEqual(h.calls.find(([kind]) => kind === 'approve'), ['approve', 'question-1', {
+    approved: true, answers, device: 'Slack',
+  }]);
+  h.state.toolApproval = { id: 'shell-1', name: 'shell', args: { command: 'must not run' } };
+  await assert.rejects(h.client.answer({ sessionId: 'native-1', questionId: 'shell-1', response: { answers } }), /현재 세션의 질문/u);
+  assert.equal(h.calls.filter(([kind]) => kind === 'approve').length, 1);
+  await h.client.close();
+});
+
+test('upstream questions support cancellation and recheck revoked Slack access', async () => {
+  const h = harness();
+  await h.client.open({ sessionId: 'native-1' });
+  h.state.toolApproval = { id: 'question-1', name: 'ask_user', kind: 'question', args: { questions: upstreamQuestions() } };
+  await h.client.answer({ sessionId: 'native-1', questionId: 'question-1', response: { cancelled: true } });
+  assert.equal(h.calls.find(([kind]) => kind === 'approve')[2].approved, false);
+  h.policy.active = false;
+  await assert.rejects(h.client.answer({ sessionId: 'native-1', questionId: 'question-1', response: { cancelled: true } }), /승인.*해제/u);
+  assert.equal(h.calls.filter(([kind]) => kind === 'approve').length, 1);
+  await h.client.close();
+});

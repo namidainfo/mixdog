@@ -42,7 +42,9 @@ export function questionResponse(request, value) {
   if (text === '--cancel') return { cancelled: true };
   if (text.startsWith('{')) return JSON.parse(text);
   if (request.questions.length !== 1) {
-    throw new Error('여러 질문에는 JSON으로 답하세요: {"answers":{"질문ID":{"text":"답변"}}}');
+    throw new Error(request.source === 'ask_user'
+      ? '여러 질문에는 순서대로 JSON으로 답하세요: {"answers":[{"selected":["보기"],"text":"추가 답변"}]}'
+      : '여러 질문에는 JSON으로 답하세요: {"answers":{"질문ID":{"text":"답변"}}}');
   }
   const question = request.questions[0];
   let answer = { text };
@@ -50,6 +52,11 @@ export function questionResponse(request, value) {
     const index = Number(text) - 1;
     if (index < 0 || index >= question.options.length) throw new Error('보기 번호가 올바르지 않습니다.');
     answer = { option: index };
+  }
+  if (request.source === 'ask_user') {
+    return { answers: [Object.hasOwn(answer, 'option')
+      ? { selected: [question.options[answer.option].label] }
+      : { selected: [], text: answer.text }] };
   }
   return { cancelled: false, answers: { [question.id]: answer } };
 }
@@ -64,7 +71,9 @@ export function questionText(request) {
   }
   lines.push(`\`!answer ${request.id} 답변\`으로 응답하세요.`);
   if (request.questions.length === 1) lines.push('이 스레드에 답변만 입력해도 같은 질문에 전달됩니다.');
-  else lines.push('여러 질문은 {"answers":{"질문ID":{"text":"답변"}}} 형식으로 전달하세요.');
+  else lines.push(request.source === 'ask_user'
+    ? '여러 질문은 순서대로 {"answers":[{"selected":["보기"],"text":"추가 답변"}]} 형식으로 전달하세요.'
+    : '여러 질문은 {"answers":{"질문ID":{"text":"답변"}}} 형식으로 전달하세요.');
   return lines.join('\n');
 }
 

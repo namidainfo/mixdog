@@ -7,21 +7,30 @@
  */
 import { createTurnRunner } from './turn/turn-run.mjs';
 import { createSessionOps } from './turn/session-ops.mjs';
+import { createCompactionGate } from './turn/compaction-gate.mjs';
 import { createShareOps } from './turn/share-ops.mjs';
 import { createAgentOps } from './turn/agent-ops.mjs';
+import { createSideQuestionOps } from './turn/side-question-ops.mjs';
 
 export function createSessionTurnApi(deps) {
-  const runner = createTurnRunner(deps);
+  // A model-scheduled compaction runs chained after its turn; the next turn
+  // and any manual compact/clear/rewind wait on it so nothing races it.
+  const gate = createCompactionGate({ getSessionId: () => deps.getSession()?.id, compact: () => session.compact() });
+  const afterCompaction = gate.after;
+  const runner = createTurnRunner({ ...deps, runPendingCompact: gate.run });
   const session = createSessionOps(deps);
   const share = createShareOps(deps);
   const agent = createAgentOps(deps);
+  const side = createSideQuestionOps(deps);
   return {
+    askSide: side.askSide,
+    cancelSide: side.cancelSide,
     enqueueRemoteAttachedPrompt: runner.enqueueRemoteAttachedPrompt,
     getTurnLiveness: runner.getTurnLiveness,
-    ask: runner.ask,
-    clear: session.clear,
-    rewindMessages: session.rewindMessages,
-    compact: session.compact,
+    ask: afterCompaction(runner.ask),
+    clear: afterCompaction(session.clear),
+    rewindMessages: afterCompaction(session.rewindMessages),
+    compact: afterCompaction(session.compact),
     setToolMode: session.setToolMode,
     agentStatus: session.agentStatus,
     interruptTaskWait: session.interruptTaskWait,

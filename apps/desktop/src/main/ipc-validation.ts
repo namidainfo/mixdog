@@ -42,7 +42,7 @@ import {
   VISUALIZE_INLINE_KINDS,
   type VisualizeInlineContent,
 } from '../shared/visualize';
-import { requiredSessionId } from './desktop-state';
+import { requiredSessionId, requiredSessionIds } from './desktop-state';
 export { normalizeUserQuestionResponse as requiredUserQuestionResponse } from '../../../../src/runtime/user-questions/contract.mjs';
 import { hasControlCharacter } from './ipc-control-chars';
 import { isWorktreeCapability, validateWorktreeCapabilityArgs, WORKTREE_CAPABILITY_ARITY } from './worktree-validation';
@@ -246,6 +246,7 @@ const READ_CAPABILITY_SET = new Set<string>(DESKTOP_READ_CAPABILITIES);
 const BOOLEAN_FIRST_CAPABILITIES = new Set<DesktopCapability>([
   'setAutoUpdate',
   'setRecapEnabled',
+  'setAiSessionTitles',
   'setWebSearchEnabled',
   'setMemoryToolsEnabled',
   'toggleVoice',
@@ -284,7 +285,7 @@ const MODEL_SELECTION_KEYS = new Set([
 const MODEL_CATALOG_OPTION_KEYS = new Set(['force', 'refresh', 'quick']);
 const PROVIDER_SETUP_OPTION_KEYS = new Set(['force', 'refresh', 'unlockKeychain', 'recheckKeychain']);
 const SKILLS_STATUS_OPTION_KEYS = new Set(['projectPath']);
-const TOOL_APPROVAL_KEYS = new Set(['approved', 'reason']);
+const TOOL_APPROVAL_KEYS = new Set(['approved', 'reason', 'answers']);
 const TOGGLEABLE_BUILTIN_TOOLS = new Set(['git', 'office', 'localProvider', 'tidy', 'autoEffort', 'visualize']);
 const INSTALLABLE_BUILTIN_FEATURES = new Set(['git', 'memory', 'office', 'localProvider', 'tidy', 'autoEffort']);
 
@@ -307,6 +308,8 @@ const CAPABILITY_ARITY = {
   setCompactionSettings: [0, 1],
   getRecapSettings: [0, 0],
   setRecapEnabled: [1, 1],
+  getSessionTitleSettings: [0, 0],
+  setAiSessionTitles: [1, 1],
   getToolModuleSettings: [0, 0],
   setWebSearchEnabled: [1, 1],
   setInstructionFiles: [1, 1],
@@ -372,6 +375,8 @@ const CAPABILITY_ARITY = {
   recall: [1, 2],
   runDoctor: [0, 0],
   compact: [0, 0],
+  askSide: [1, 1],
+  cancelSide: [0, 0],
   listPresets: [0, 0],
   setModel: [1, 1],
   getWebSearchRoute: [0, 0],
@@ -404,11 +409,13 @@ const CAPABILITY_ARITY = {
   getUsageDashboard: [0, 1],
   getUsageStats: [0, 1],
   getQuotaHistory: [0, 1],
-  getSessionUsage: [0, 0],
+  getSessionUsage: [0, 1],
   consumeCodexRateLimitResetCredit: [1, 1],
   requestConnectedAccountQuotaWindows: [0, 0],
   getSessionReviewDiff: [0, 0],
+  getSessionReviewFilePatch: [1, 2],
   getTurnReviewDiff: [0, 1],
+  getTurnReviewFilePatch: [1, 1],
   revertTurnReview: [0, 1],
   revertTurnReviewFile: [1, 2],
   getTurnChanges: [1, 1],
@@ -429,6 +436,7 @@ const CAPABILITY_ARITY = {
   removeCustomProvider: [1, 1],
   updateCustomProviderModel: [3, 3],
   testCustomProvider: [1, 1],
+  checkCustomProviderKeyEnv: [1, 1],
   discoverCustomProviderModels: [1, 1],
   saveOpenCodeGoUsageAuth: [1, 1],
   saveOpenAIUsageSessionKey: [1, 1],
@@ -502,14 +510,19 @@ const CUSTOM_PROVIDER_KEYS = new Set([
   'protocol',
   'baseURL',
   'apiKey',
+  'apiKeyEnv',
   'models',
   'schemaVersion',
   'enabled',
   'auth',
   'discovery',
   'modelOverrides',
+  'wires',
+  'modelWires',
   'type',
 ]);
+// Wires a custom OpenAI-compatible endpoint can serve (custom-provider-config.mjs).
+const CUSTOM_WIRES = new Set(['chat', 'responses', 'messages']);
 const CUSTOM_MODEL_KEYS = new Set(['id', 'name', 'contextWindow', 'maxOutputTokens']);
 const CUSTOM_PROTOCOLS = new Set(['openai-chat', 'openai-responses', 'anthropic']);
 const CUSTOM_DISCOVERY_KEYS = new Set(['newModelsHidden']);
@@ -527,6 +540,7 @@ export const CUSTOM_MAX_WIRE_VALUE = 64;
 // Same transport rules as provider-admin.mjs (validateCustomTransportFields).
 export const CUSTOM_MAX_API_KEY = 65_536;
 const CUSTOM_PROVIDER_ID = /^custom-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const CUSTOM_API_KEY_ENV = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const CUSTOM_LEVEL_ALIASES: Readonly<Record<string, string>> = { ultra: 'max' };
 
@@ -564,6 +578,15 @@ export function requiredCustomProviderInput(value: unknown, modelsOptional = fal
   if (input.apiKey !== undefined && (typeof input.apiKey !== 'string' || input.apiKey.length > CUSTOM_MAX_API_KEY)) {
     throw new TypeError('custom provider apiKey is invalid.');
   }
+  if (input.apiKeyEnv !== undefined && input.apiKeyEnv !== null) {
+    if (typeof input.apiKeyEnv !== 'string' || !CUSTOM_API_KEY_ENV.test(input.apiKeyEnv)) {
+      throw new TypeError('custom provider apiKeyEnv is invalid.');
+    }
+    if (input.auth === 'none') throw new TypeError('custom provider apiKeyEnv requires key auth.');
+    if (typeof input.apiKey === 'string' && input.apiKey !== '') {
+      throw new TypeError('custom provider apiKey and apiKeyEnv are mutually exclusive.');
+    }
+  }
   if (input.schemaVersion !== undefined && input.schemaVersion !== 2) {
     throw new TypeError('custom provider schemaVersion is invalid.');
   }
@@ -576,8 +599,37 @@ export function requiredCustomProviderInput(value: unknown, modelsOptional = fal
   if (input.type !== undefined && input.type !== 'custom') {
     throw new TypeError('custom provider type is invalid.');
   }
-  if ((input.discovery !== undefined || input.modelOverrides !== undefined) && input.schemaVersion !== 2) {
+  if (
+    (input.discovery !== undefined ||
+      input.modelOverrides !== undefined ||
+      input.wires !== undefined ||
+      input.modelWires !== undefined) &&
+    input.schemaVersion !== 2
+  ) {
     throw new TypeError('custom provider schemaVersion is invalid.');
+  }
+  // Shape only; the runtime ties them to the protocol and to each other.
+  if (input.wires !== undefined) {
+    if (
+      !Array.isArray(input.wires) ||
+      input.wires.length === 0 ||
+      input.wires.length > CUSTOM_WIRES.size ||
+      input.wires.some((wire) => typeof wire !== 'string' || !CUSTOM_WIRES.has(wire))
+    ) {
+      throw new TypeError('custom provider wires are invalid.');
+    }
+  }
+  if (input.modelWires !== undefined) {
+    const modelWires = plainRecord(input.modelWires, 'custom provider modelWires');
+    const ids = Object.keys(modelWires);
+    if (ids.length > CUSTOM_MAX_OVERRIDES) throw new TypeError('custom provider modelWires are too large.');
+    for (const modelId of ids) {
+      requireSafeModelId(modelId);
+      const wire = modelWires[modelId];
+      if (typeof wire !== 'string' || !CUSTOM_WIRES.has(wire)) {
+        throw new TypeError('custom provider modelWires are invalid.');
+      }
+    }
   }
   // v2 states models as modelOverrides; a legacy `models` list is unversioned only.
   if (input.schemaVersion === 2 && input.models !== undefined) {
@@ -1009,6 +1061,7 @@ export function requiredDesktopCapabilityRequest(value: unknown): DesktopCapabil
   if (isWorktreeCapability(capability)) validateWorktreeCapabilityArgs(capability, args);
   if (isImportCapability(capability)) validateImportCapabilityArgs(capability, args);
   if (capability === 'contextStatus' && args.length) validateContextStatusArgs(args[0]);
+  if (capability === 'getSessionUsage' && args.length) validateSessionUsageArgs(args[0]);
   validateSettingCapabilityArgs(capability, args);
   validateLocalProviderCapabilityArgs(capability, args);
   validateCredentialCapabilityArgs(capability, args);
@@ -1057,6 +1110,15 @@ function validateContextStatusArgs(options: unknown): void {
   } else if (inspection.revision !== undefined) {
     throw new TypeError('context revision requires an entry id.');
   }
+}
+
+/** The agent sessions whose ledger totals the composer island reads beside its own. */
+const MAX_SESSION_USAGE_IDS = 64;
+function validateSessionUsageArgs(options: unknown): void {
+  const request = optionalPlainRecord(options);
+  if (!request) throw new TypeError('session usage options must be an object.');
+  requireAllowedKeys(request, new Set(['sessionIds']), 'session usage options');
+  if (request.sessionIds !== undefined) requiredSessionIds(request.sessionIds, MAX_SESSION_USAGE_IDS);
 }
 
 function validateSettingCapabilityArgs(capability: DesktopCapability, args: readonly unknown[]): void {
@@ -1129,6 +1191,7 @@ function validateCredentialCapabilityArgs(capability: DesktopCapability, args: r
   ) {
     requiredCustomProviderInput(args[0], capability === 'discoverCustomProviderModels');
   }
+  if (capability === 'checkCustomProviderKeyEnv') requiredString(args[0], 'environment variable name', 128);
   if (capability === 'saveStarterGuideState') requiredStarterGuideState(args[0]);
   if (capability === 'updateCustomProviderModel') requiredCustomModelPatch(args[0], args[1], args[2]);
   if (capability === 'removeCustomProvider') requiredString(args[0], 'custom provider id', 128);
@@ -1143,6 +1206,8 @@ function validateCredentialCapabilityArgs(capability: DesktopCapability, args: r
 }
 
 function validateTurnCapabilityArgs(capability: DesktopCapability, args: readonly unknown[]): void {
+  // A /btw side question: one non-empty question text.
+  if (capability === 'askSide') requiredString(args[0], 'side question', MAX_PROMPT_LENGTH);
   if (capability === 'getTurnReviewDiff' && args[0] !== undefined) {
     // The turn review bar asks for `{ refresh, known, summary, poll }`: whether
     // to re-read the worktree before diffing, the tag of the review it already
@@ -1160,6 +1225,11 @@ function validateTurnCapabilityArgs(capability: DesktopCapability, args: readonl
     ) {
       throw new TypeError('turn review options are invalid.');
     }
+  }
+  if (capability === 'getSessionReviewFilePatch' || capability === 'getTurnReviewFilePatch') {
+    // `[file, oldPath?]`: one listed file (and a rename's source) of a review.
+    requiredString(args[0], 'file', 4_096);
+    if (args[1] !== undefined) requiredString(args[1], 'oldPath', 4_096);
   }
   if (capability === 'getTurnChanges') {
     // `{ checkpointId, patch?, file? }`: one turn's recorded changes.
@@ -1282,7 +1352,30 @@ export function requiredToolApprovalDecision(value: unknown): ToolApprovalDecisi
   if (decision.reason !== undefined && (typeof decision.reason !== 'string' || decision.reason.length > 4_096)) {
     throw new TypeError('decision.reason is invalid.');
   }
-  return { approved: decision.approved, reason: decision.reason };
+  const result: ToolApprovalDecision = { approved: decision.approved, reason: decision.reason };
+  if (decision.answers !== undefined) result.answers = requiredQuestionAnswers(decision.answers);
+  return result;
+}
+
+function requiredQuestionAnswers(value: unknown): NonNullable<ToolApprovalDecision['answers']> {
+  if (!Array.isArray(value) || value.length > 4) throw new TypeError('decision.answers is invalid.');
+  return value.map((entry) => {
+    if (entry === null) return null;
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new TypeError('decision.answers is invalid.');
+    requireAllowedKeys(entry as Record<string, unknown>, new Set(['selected', 'text']), 'decision.answers');
+    const { selected, text } = entry as { selected?: unknown; text?: unknown };
+    if (
+      !Array.isArray(selected) ||
+      selected.length > 4 ||
+      selected.some((label) => typeof label !== 'string' || label.length > 200)
+    ) {
+      throw new TypeError('decision.answers is invalid.');
+    }
+    if (text !== undefined && (typeof text !== 'string' || text.length > 4_000)) {
+      throw new TypeError('decision.answers is invalid.');
+    }
+    return text === undefined ? { selected: selected as string[] } : { selected: selected as string[], text };
+  });
 }
 
 export function requiredGitPaths(value: unknown): string[] {
@@ -1290,6 +1383,15 @@ export function requiredGitPaths(value: unknown): string[] {
     throw new TypeError('git paths are invalid.');
   }
   return value.map(requiredGitPath);
+}
+
+export function requiredReviewDiffFiles(value: unknown): { path: string; untracked: boolean }[] {
+  if (!Array.isArray(value) || value.length > 512) throw new TypeError('git review files are invalid.');
+  return value.map((entry) => {
+    if (typeof entry !== 'object' || entry === null) throw new TypeError('git review file is invalid.');
+    const { path, untracked } = entry as { path?: unknown; untracked?: unknown };
+    return { path: requiredGitPath(path), untracked: untracked === true };
+  });
 }
 
 export function requiredGitPath(value: unknown): string {

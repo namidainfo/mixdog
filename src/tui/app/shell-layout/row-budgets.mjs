@@ -5,7 +5,9 @@
  */
 import { isLiveSpinnerMetaVisible } from '../live-spinner-visibility.mjs';
 import { promptContentRows, wrappedDetailRows, queuedBandRows } from '../text-layout.mjs';
+import { questionPanelRows, questionsOf } from '../../components/question-panel-model.mjs';
 import { CORE_MULTILINE_TEXT_ENTRY_KINDS } from '../panel-signature.mjs';
+import { btwPanelRows } from '../btw-controller.mjs';
 
 const SCROLL_HINT_ROWS = 0;
 const LIVE_STATUS_ROWS = 0;
@@ -114,20 +116,25 @@ function floatingPanelBudget({
   picker,
   contextPanel,
   usagePanel,
+  btwPanel,
   slashPaletteOpen,
   hasTextEntryPrompt,
   TEXT_ENTRY_ROWS,
   OPTION_PANEL_EXTRA_ROWS,
   maxFloatingPanelRows,
+  frameColumns,
 }) {
   let desiredFloatingPanelRows = 0;
-  if (toolApproval) desiredFloatingPanelRows = PANEL_CHROME_ROWS + 2 + OPTION_PANEL_EXTRA_ROWS;
+  if (toolApproval?.kind === 'question' && questionsOf(toolApproval).length > 0) {
+    desiredFloatingPanelRows = questionPanelRows(questionsOf(toolApproval), frameColumns);
+  } else if (toolApproval) desiredFloatingPanelRows = PANEL_CHROME_ROWS + 2 + OPTION_PANEL_EXTRA_ROWS;
   else if (picker?.fillAvailable) desiredFloatingPanelRows = maxFloatingPanelRows;
   else if (picker) desiredFloatingPanelRows = PANEL_BASE_ROWS + OPTION_PANEL_EXTRA_ROWS;
   else if (contextPanel) desiredFloatingPanelRows = PANEL_BASE_ROWS + OPTION_PANEL_EXTRA_ROWS + 3;
   else if (usagePanel) desiredFloatingPanelRows = PANEL_BASE_ROWS + OPTION_PANEL_EXTRA_ROWS;
   else if (slashPaletteOpen) desiredFloatingPanelRows = SLASH_PALETTE_ROWS;
   else if (hasTextEntryPrompt) desiredFloatingPanelRows = TEXT_ENTRY_ROWS;
+  else if (btwPanel) desiredFloatingPanelRows = btwPanelRows(btwPanel, frameColumns);
   const floatingPanelRows = desiredFloatingPanelRows > 0 ? Math.min(desiredFloatingPanelRows, maxFloatingPanelRows) : 0;
   // Give the list every content row the panel exposes. The panel already grew
   // by OPTION_PANEL_EXTRA_ROWS; previously that growth was subtracted back out
@@ -174,6 +181,7 @@ export function computeRowBudgets({
   picker,
   contextPanel,
   usagePanel,
+  btwPanel,
   slashPaletteOpen,
 }) {
   const { textEntryPrompt, hasTextEntryPrompt, hasFloatingPanel, expandedOptionPanel, inputBoxHidden } = surfaces;
@@ -211,11 +219,13 @@ export function computeRowBudgets({
     picker,
     contextPanel,
     usagePanel,
+    btwPanel,
     slashPaletteOpen,
     hasTextEntryPrompt,
     TEXT_ENTRY_ROWS: textEntry.TEXT_ENTRY_ROWS,
     OPTION_PANEL_EXTRA_ROWS,
     maxFloatingPanelRows,
+    frameColumns,
   });
   const rows = {
     floatingPanelRows: panel.floatingPanelRows,

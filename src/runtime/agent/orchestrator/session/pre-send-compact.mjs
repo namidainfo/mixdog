@@ -31,6 +31,8 @@ import { bumpUsageMetricsEpoch } from './manager/usage-metrics.mjs';
 import { resetReadStateAfterCompaction } from './read-dedup.mjs';
 import { scheduleCompactionArchive, stampCompactionMessageIds } from './compaction-archive-capture.mjs';
 import { writeStderrBestEffort } from '../../../shared/best-effort-stderr.mjs';
+import { applyPendingWorkspaceReroot } from './manager/prompt-utils.mjs';
+import { backfillFallbackSessionTitle } from './manager/session-fallback-title.mjs';
 import {
   acknowledgePendingGoalReminder,
   markPendingGoalReminder,
@@ -378,6 +380,7 @@ function adoptCompactedTranscript(ctx, run) {
   const { state } = ctx;
   const { messages, sessionRef, sessionId, opts } = state;
   const replaced = messages.slice();
+  if (sessionRef) backfillFallbackSessionTitle(sessionRef, replaced);
   messages.length = 0;
   messages.push(...run.compacted);
   // Display-only archive of the dropped conversation; the projection and the
@@ -388,6 +391,9 @@ function adoptCompactedTranscript(ctx, run) {
   ctx.droppedMessages = archived?.dropped ?? 0;
   ctx.droppedIdentities = archived?.identities ?? null;
   acknowledgeGoalReminder(sessionRef, run);
+  // The compacted transcript breaks the cache anyway: a staged working-folder
+  // change re-roots the system prompt now and needs no notice any more.
+  if (sessionRef) applyPendingWorkspaceReroot(sessionRef, messages);
   resetReadStateAfterCompaction(sessionId);
   // Cross-turn receipts reference tool results that compaction just removed
   // from context; a stub for them would point at nothing. Clear in place so

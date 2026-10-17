@@ -302,6 +302,25 @@ test('ordinary hosts do not activate for questions', t => {
   assert.equal(ordinary.notifications.length, 0);
 });
 
+test('Personal focuses upstream question approvals without activating ordinary tool approvals', t => {
+  const h = harness(t, { focusOnNotify: true });
+  h.notifier.onSessions([{ id: 'a', title: '원본 질문' }]);
+  const frame = (kind, id) => ({
+    sessionId: 'a', frameSource: 'live', snapshot: { toolApproval: { kind, id } },
+  });
+  h.notifier.onSessionState(frame('tool', 'shell-1'));
+  assert.deepEqual(h.opened, []);
+  h.notifier.onSessionState(frame('question', 'ask-1'));
+  h.notifier.onSessionState(frame('question', 'ask-1'));
+  assert.deepEqual(h.opened, ['a']);
+  assert.equal(h.notifications.length, 1);
+  assert.deepEqual(h.notifications[0].content, { title: '원본 질문', body: '사용자의 답변이 필요합니다.' });
+  h.notifier.onSessionState(frame('question', 0));
+  h.notifier.onSessionState(frame('question', 0));
+  assert.deepEqual(h.opened, ['a', 'a']);
+  assert.equal(h.notifications.length, 2);
+});
+
 test('disabled notifications do not activate or redeliver an existing question when enabled', t => {
   const personal = harness(t, { focusOnNotify: true });
   personal.state.enabled = false;

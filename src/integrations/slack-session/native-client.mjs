@@ -12,6 +12,8 @@ import { createSessionProxyFactory } from '../../standalone/session-proxy.mjs';
 import { estimateTokens } from '../../runtime/agent/orchestrator/session/token-estimate.mjs';
 import { redactToolCallArgumentsValue } from '../../runtime/agent/orchestrator/session/compact/text-utils.mjs';
 import { normalizeUserQuestionResponse } from '../../runtime/user-questions/contract.mjs';
+import { validateAskUserQuestions } from '../../runtime/agent/orchestrator/runtime-core/ask-user-tool-defs.mjs';
+import { normalizeAskUserAnswers } from '../../session-runtime/internal-tool-executor/ask-user-tool.mjs';
 import { SLACK_PROJECT_CWD } from './project.mjs';
 import { projectHubState } from './hub/projection.mjs';
 import { HubFiles } from './hub/files.mjs';
@@ -19,7 +21,8 @@ import { slackSessionOwners } from './identity.mjs';
 import { normalizeSlackExecutionPolicy, slackWorkspace, isPrivateSlackPath } from '../../runtime/shared/slack-execution-policy.mjs';
 
 export function slackSessionState(state) {
-  const approval = state.toolApproval;
+  const questionApproval = state.toolApproval?.kind === 'question' ? state.toolApproval : null;
+  const approval = questionApproval ? null : state.toolApproval;
   return {
     sessionId: state.sessionId,
     cwd: state.cwd,
@@ -38,7 +41,12 @@ export function slackSessionState(state) {
       cwd: approval.cwd,
       expiresAt: approval.expiresAt,
     } : null,
-    userQuestion: state.userQuestion || null,
+    userQuestion: state.userQuestion || (questionApproval ? {
+      id: questionApproval.id,
+      sessionId: state.sessionId,
+      source: 'ask_user',
+      questions: questionApproval.args.questions.map((question, index) => ({ ...question, id: `q${index + 1}` })),
+    } : null),
     items: (state.items || []).filter((item) =>
       ['user', 'assistant', 'turndone', 'error'].includes(item.kind)
       && item.streaming !== true
@@ -245,10 +253,29 @@ export class NativeSlackClient {
   }
 
   async answer({ sessionId, questionId, response }) {
+    await this.open({ sessionId });
+    if (!this.policies.get(sessionId).active) throw new Error('Slack 사용자 승인이 해제되었습니다.');
     const view = this.view(sessionId);
-    const pending = view.getState().userQuestion;
-    if (!pending || pending.id !== questionId) throw new Error('현재 세션의 질문이 아닙니다.');
-    const accepted = await view.resolveUserQuestion(questionId, normalizeUserQuestionResponse(response));
+    const state = view.getState();
+    if (state.userQuestion?.id === questionId) {
+      const accepted = await view.resolveUserQuestion(questionId, normalizeUserQuestionResponse(response));
+      return { accepted };
+    }
+    const pending = state.toolApproval;
+    if (pending?.kind !== 'question' || pending.id !== questionId) throw new Error('현재 세션의 질문이 아닙니다.');
+    const questions = validateAskUserQuestions(pending.args);
+    let decision;
+    if (response?.cancelled === true) {
+      normalizeUserQuestionResponse(response);
+      decision = { approved: false, reason: 'dismissed by Slack user', device: 'Slack' };
+    } else {
+      const answers = normalizeAskUserAnswers(response?.answers, questions);
+      if (!Array.isArray(response?.answers) || response.answers.length !== questions.length || answers.some((answer) => !answer)) {
+        throw new TypeError('현재 질문 모두에 유효한 질문 응답을 전달해 주세요.');
+      }
+      decision = { approved: true, answers, device: 'Slack' };
+    }
+    const accepted = await view.approveAsync(questionId, decision);
     return { accepted };
   }
 

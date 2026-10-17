@@ -94,6 +94,7 @@ import {
 } from '../../runtime/shared/provider-accounts.mjs';
 import { currentProviderAccountId, withProviderAccount } from '../../runtime/shared/provider-auth-binding.mjs';
 import {
+  CUSTOM_API_KEY_ENV_RE,
   effectiveCustomModelRows,
   normalizeCustomProviderConfig as normalizeStoredCustomConfig,
 } from '../../runtime/agent/orchestrator/providers/custom-provider-config.mjs';
@@ -439,14 +440,22 @@ function customProviderRow(id, entry, checkSecrets = true) {
   const { config, error: configError } = inspectStoredCustomConfig(entry);
   const configuredEnabled = entry.enabled !== false;
   const keyless = (config?.auth ?? entry.auth) === 'none';
+  const apiKeyEnv = keyless ? '' : config?.apiKeyEnv || '';
+  const envSet = Boolean(apiKeyEnv && process.env[apiKeyEnv]);
   const stored = checkSecrets ? hasStoredSecret(SECRET_ACCOUNTS.agentApiKey(id)) : false;
   const unstoredStatus = configuredEnabled ? 'No Key' : 'Off';
   let status = stored ? 'Set' : unstoredStatus;
   let detail = stored ? 'stored in keychain' : 'custom endpoint';
+  if (apiKeyEnv) {
+    status = envSet ? 'Env' : unstoredStatus;
+    detail = apiKeyEnv;
+  }
   if (keyless) {
     status = configuredEnabled ? 'Keyless' : 'Off';
     detail = 'no API key required';
   }
+  let keyAuthenticated = checkSecrets ? stored : configuredEnabled;
+  if (apiKeyEnv) keyAuthenticated = envSet;
   const row = {
     id,
     name: entry.name,
@@ -457,17 +466,20 @@ function customProviderRow(id, entry, checkSecrets = true) {
     group: 'api',
     type: 'api-key',
     enabled: configuredEnabled,
-    authenticated: keyless || (checkSecrets ? stored : configuredEnabled),
+    authenticated: keyless || keyAuthenticated,
     stored,
-    env: false,
-    envName: null,
+    env: envSet,
+    envName: apiKeyEnv || null,
     status,
     detail,
   };
+  if (apiKeyEnv) row.apiKeyEnv = apiKeyEnv;
   row.schemaVersion = config?.schemaVersion ?? entry.schemaVersion;
   row.auth = keyless ? 'none' : 'key';
   row.discovery = structuredClone(config?.discovery ?? entry.discovery ?? { newModelsHidden: false });
   row.modelOverrides = structuredClone(config?.modelOverrides ?? entry.modelOverrides ?? {});
+  if (config?.wires) row.wires = [...config.wires];
+  if (config?.modelWires) row.modelWires = { ...config.modelWires };
   // A stored config that does not normalize cannot run (the registry skips
   // it): say so explicitly instead of listing it as connected.
   // Every readiness flag consumers read says "not ready" (`stored` stays the
@@ -547,8 +559,8 @@ export function providerStatus(config = {}) {
       enabled: row.enabled,
       authenticated: row.authenticated,
       stored: row.stored,
-      env: false,
-      envName: null,
+      env: row.env,
+      envName: row.envName,
       label: row.name,
     })),
     ...availableOAuthProviders().map((p) => oauthProviderStatusRow(p, config)),
@@ -869,6 +881,20 @@ function validateCustomTransportFields(input) {
     throw new TypeError('custom provider id is invalid');
   if (input.apiKey !== undefined && (typeof input.apiKey !== 'string' || input.apiKey.length > CUSTOM_API_KEY_MAX))
     throw new TypeError('custom provider apiKey is invalid');
+  if (input.apiKeyEnv !== undefined && input.apiKeyEnv !== null) {
+    if (typeof input.apiKeyEnv !== 'string' || !CUSTOM_API_KEY_ENV_RE.test(input.apiKeyEnv))
+      throw new TypeError('custom provider apiKeyEnv is invalid');
+    if (input.auth === 'none') throw new TypeError('custom provider apiKeyEnv requires key auth');
+    if (typeof input.apiKey === 'string' && input.apiKey !== '')
+      throw new TypeError('custom provider apiKey and apiKeyEnv are mutually exclusive');
+  }
+}
+
+/** Whether the named environment variable is set to a non-empty value. */
+export function checkCustomProviderKeyEnv(name) {
+  if (typeof name !== 'string' || !CUSTOM_API_KEY_ENV_RE.test(name))
+    throw new TypeError('environment variable name is invalid');
+  return { found: Boolean(process.env[name]) };
 }
 
 function inputObject(input) {
@@ -888,9 +914,16 @@ function withStoredSettings(input, entry) {
   }
   const out = { ...input };
   if (out.auth === undefined) out.auth = stored.auth;
+  if (out.apiKeyEnv === undefined && stored.apiKeyEnv) out.apiKeyEnv = stored.apiKeyEnv;
   if (out.schemaVersion === stored.schemaVersion) {
     if (out.discovery === undefined) out.discovery = stored.discovery;
     if (out.modelOverrides === undefined) out.modelOverrides = stored.modelOverrides;
+    // Served wires and per-model wires have no setup field yet: an edit on
+    // the same protocol keeps them (another protocol serves other wires).
+    if ((out.protocol ?? stored.protocol) === stored.protocol) {
+      if (out.wires === undefined && stored.wires) out.wires = stored.wires;
+      if (out.modelWires === undefined && stored.modelWires) out.modelWires = stored.modelWires;
+    }
   }
   return out;
 }
@@ -906,9 +939,11 @@ async function resolveCustomInput(cfgMod, rawInput, options) {
   const config = normalizeCustomProviderConfig(input, options);
   const typed = typeof input.apiKey === 'string' ? input.apiKey.trim() : '';
   const keyless = config.auth === 'none';
+  const envName = keyless ? '' : config.apiKeyEnv || '';
   let apiKey = '';
-  if (!keyless) apiKey = typed || (id ? getAgentApiKey(id) || '' : '');
-  return { id, config, typed: keyless ? '' : typed, apiKey, keyless };
+  if (envName) apiKey = process.env[envName] || '';
+  else if (!keyless) apiKey = typed || (id ? getAgentApiKey(id) || '' : '');
+  return { id, config, typed: keyless || envName ? '' : typed, apiKey, keyless, envName };
 }
 
 export async function saveCustomProvider(cfgMod, rawInput) {
@@ -918,8 +953,9 @@ export async function saveCustomProvider(cfgMod, rawInput) {
     typed,
     apiKey,
     keyless,
+    envName,
   } = await resolveCustomInput(cfgMod, rawInput, { requireModels: false });
-  if (!keyless && !apiKey) throw new Error('API key is required');
+  if (!keyless && !envName && !apiKey) throw new Error('API key is required');
   const id = existingId || `custom-${randomUUID()}`;
   const entry = { ...config, type: 'custom', enabled: config.enabled !== false };
   const account = SECRET_ACCOUNTS.agentApiKey(id);
@@ -1023,13 +1059,37 @@ export async function updateCustomProviderModel(cfgMod, rawId, rawModelId, patch
   return customProviderRow(id, saved);
 }
 
+// Drops every stored model setting and route that names the provider.
+function withoutProviderReferences(config, id) {
+  const next = { ...config };
+  const names = (route) => route?.provider === id;
+  if (next.modelSettings) {
+    next.modelSettings = Object.fromEntries(
+      Object.entries(next.modelSettings).filter(([key]) => !key.startsWith(`${id}/`))
+    );
+  }
+  if (next.agents) {
+    next.agents = Object.fromEntries(Object.entries(next.agents).filter(([, route]) => !names(route)));
+  }
+  if (names(next.webSearchRoute)) delete next.webSearchRoute;
+  if (Array.isArray(next.presets)) {
+    const dropped = new Set(next.presets.filter(names).map((preset) => preset.id));
+    next.presets = next.presets.filter((preset) => !names(preset));
+    if (dropped.has(next.default)) delete next.default;
+  }
+  return next;
+}
+
 export async function removeCustomProvider(cfgMod, rawId) {
   const id = String(rawId || '').trim();
   existingCustomEntry(cfgMod, id);
+  // Secret first: a real keychain failure (locked, permission) leaves the
+  // provider registered so the removal can be retried. A missing secret
+  // (keyless provider) is not an error.
+  await deleteSecretAsync(SECRET_ACCOUNTS.agentApiKey(id));
   const current = cfgMod.loadConfig();
   const { [id]: _removed, ...providers } = current.providers || {};
-  cfgMod.saveConfig({ ...current, providers }, { baseConfig: current });
-  await deleteSecretAsync(SECRET_ACCOUNTS.agentApiKey(id));
+  cfgMod.saveConfig(withoutProviderReferences({ ...current, providers }, id), { baseConfig: current });
   return { provider: id, type: 'custom', removed: true };
 }
 
@@ -1059,8 +1119,14 @@ export async function testCustomProvider(cfgMod, rawInput) {
     );
     return { ok: true };
   } catch (error) {
-    throw sanitizeCustomError(error, [apiKey]);
+    throw sanitizeCustomError(error, customSecrets(apiKey, config));
   }
+}
+
+// Every key the operation may have sent: env mode re-reads the variable on an
+// auth retry, so its current value is redacted alongside the initial key.
+function customSecrets(apiKey, config) {
+  return [apiKey, config.apiKeyEnv ? process.env[config.apiKeyEnv] : ''];
 }
 
 export async function discoverCustomProviderModels(cfgMod, rawInput) {
@@ -1072,19 +1138,19 @@ export async function discoverCustomProviderModels(cfgMod, rawInput) {
     const models = publicCustomModelRows(listed);
     // A failed discovery that still left manual rows reports its error too.
     const failure = provider.customDiscoveryError;
-    return failure ? { models, error: discoveryErrorView(failure, apiKey) } : { models };
+    return failure ? { models, error: discoveryErrorView(failure, customSecrets(apiKey, config)) } : { models };
   } catch (error) {
-    return { models: [], error: discoveryErrorView(error, apiKey) };
+    return { models: [], error: discoveryErrorView(error, customSecrets(apiKey, config)) };
   }
 }
 
-function discoveryErrorView(error, apiKey) {
+function discoveryErrorView(error, secrets) {
   const status = Number.isInteger(error?.status) ? error.status : undefined;
   const authKind = status === 401 || status === 403 ? 'authentication' : 'request';
   return {
     kind: status === 404 || status === 405 ? 'unavailable' : authKind,
     ...(status === undefined ? {} : { status }),
-    message: sanitizeCustomError(error, [apiKey]).message,
+    message: sanitizeCustomError(error, secrets).message,
   };
 }
 

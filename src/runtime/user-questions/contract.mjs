@@ -1,5 +1,9 @@
 import { schemaValueError } from '../shared/schema-value-error.mjs';
 
+export function isUserQuestionTool(name) {
+  return name === 'request_user_input' || name === 'ask_user';
+}
+
 const text = (maxLength) => ({ type: 'string', minLength: 1, maxLength, pattern: '\\S' });
 
 export const USER_QUESTION_SCHEMA = {

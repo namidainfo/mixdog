@@ -1,8 +1,9 @@
 // slash-dispatch/session-commands.mjs
 // Slash commands that act on the session itself: clear/new, compact, goal,
-// resume, inherit, doctor and quit. Busy guards refuse the destructive ones
+// resume, fork (alias inherit), doctor and quit. Busy guards refuse the destructive ones
 // while a turn or session command is running.
 import { presentErrorText } from '../../../runtime/shared/err-text.mjs';
+import { BTW_USAGE_HINT } from '../btw-controller.mjs';
 
 function compactFailureNotice(error) {
   if (error == null || String(error).trim() === '') return 'Compact failed.';
@@ -63,6 +64,18 @@ export const sessionCommands = {
     return true;
   },
 
+  // Side question: allowed mid-turn; never queued, steered, or interrupting.
+  btw(ctx, arg) {
+    const { store, deps } = ctx;
+    const question = String(arg || '').trim();
+    if (!question) {
+      store.pushNotice(BTW_USAGE_HINT, 'warn');
+      return true;
+    }
+    deps.btw.ask(question);
+    return true;
+  },
+
   goal(ctx, arg) {
     const { store } = ctx;
     void Promise.resolve(store.goalControl?.({ command: arg }))
@@ -91,18 +104,18 @@ export const sessionCommands = {
     return true;
   },
 
-  inherit(ctx) {
+  fork(ctx, _arg, rawName) {
     const { state, store } = ctx;
-    if (state.busy) return refuseWhileBusy(store, 'inherit');
+    if (state.busy) return refuseWhileBusy(store, rawName === 'inherit' ? 'inherit' : 'fork');
     void Promise.resolve(store.inheritSession?.())
       .then((result) => {
         if (!result) {
-          store.pushNotice('nothing to inherit', 'warn');
+          store.pushNotice('nothing to fork', 'warn');
           return;
         }
-        store.pushNotice(`inherited ${result.messages} messages into ${result.sessionId}`, 'info');
+        store.pushNotice(`forked ${result.messages} messages into ${result.sessionId}`, 'info');
       })
-      .catch((e) => store.pushNotice(`inherit failed: ${e?.message || e}`, 'error'));
+      .catch((e) => store.pushNotice(`fork failed: ${e?.message || e}`, 'error'));
     return true;
   },
 

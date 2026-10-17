@@ -16,6 +16,12 @@ export const SLASH_COMMANDS = [
   },
   { name: 'compact', usage: '/compact', description: 'Compact older conversation context' },
   {
+    name: 'btw',
+    usage: '/btw',
+    params: '<question>',
+    description: 'Ask a quick side question without interrupting the current work',
+  },
+  {
     name: 'goal',
     usage: '/goal',
     params: '[objective --time 1h --time-mode max|status|pause|resume|edit|stop]',
@@ -30,9 +36,12 @@ export const SLASH_COMMANDS = [
   { name: 'resume', usage: '/resume', params: '[id]', description: 'Resume a saved chat' },
   { name: 'context', usage: '/context', description: 'Show current context surface' },
   {
-    name: 'inherit',
-    usage: '/inherit',
-    description: 'Carry this conversation into a new session on the current model',
+    name: 'fork',
+    usage: '/fork',
+    aliases: ['inherit'],
+    aliasUsage: ['inherit'],
+    showAliasUsage: false,
+    description: 'Fork this conversation into a new session on the current model',
   },
   { name: 'usage', usage: '/usage', params: '[refresh]', description: 'Show total provider quota / balance' },
   { name: 'model', usage: '/model', params: '[name|refresh]', description: 'Switch model for subsequent turns' },
@@ -109,6 +118,7 @@ export function overlayBlocksGlobalTranscriptScroll(owner = {}) {
     owner.toolApproval ||
     owner.contextPanel ||
     owner.usagePanel ||
+    owner.btwPanel ||
     owner.providerPrompt ||
     owner.settingsPrompt
   );

@@ -369,6 +369,106 @@ test('normalizer validates connection fields', () => {
   bad({ models: [{}] });
 });
 
+test('apiKeyEnv: normalize accept/reject, env-only key, missing-variable error', async () => {
+  const cfg = { ...base, schemaVersion: 2, protocol: 'openai-chat' };
+  assert.equal(normalizeCustomProviderConfig({ ...cfg, apiKeyEnv: 'MY_KEY_1' }).apiKeyEnv, 'MY_KEY_1');
+  assert.equal('apiKeyEnv' in normalizeCustomProviderConfig({ ...cfg, apiKeyEnv: null }), false);
+  assert.equal('apiKeyEnv' in normalizeCustomProviderConfig({ ...cfg, auth: 'none', apiKeyEnv: 'MY_KEY_1' }), false);
+  for (const bad of ['1ABC', 'a-b', '', 'a b', 'A'.repeat(129), 5])
+    assert.throws(() => normalizeCustomProviderConfig({ ...cfg, apiKeyEnv: bad }), /apiKeyEnv/);
+
+  const NAME = 'MIXDOG_TEST_PROVIDER_KEY';
+  const id = 'custom-env-1';
+  delete process.env[NAME];
+  const p = await createCustomProvider(id, { ...cfg, apiKey: 'typed-ignored', apiKeyEnv: NAME });
+  let fetched = 0;
+  await withFetch(
+    () => {
+      fetched++;
+      return new Response('{}', { status: 500 });
+    },
+    async () => {
+      await assert.rejects(p.send(prompt, 'm', []), new Error(`API key environment variable ${NAME} is not set`));
+      await assert.rejects(p.listModels({ throwOnError: true }), new RegExp(`${NAME} is not set`));
+    }
+  );
+  assert.equal(fetched, 0);
+  process.env[NAME] = 'env-secret';
+  try {
+    const q = await createCustomProvider(id, { ...cfg, apiKeyEnv: NAME, modelOverrides: { m: { manual: true } } });
+    const requests = mock(q, () => sse(CHAT));
+    await q.send(prompt, 'm', []);
+    assert.equal(requests[0].headers.get('authorization'), 'Bearer env-secret');
+    // The merge overlay takes the env var only, never a keychain/plaintext key.
+    const merged = mergeStoredProviders({
+      raw: { providers: { [id]: { ...cfg, apiKey: 'plain', apiKeyEnv: NAME } } },
+      defaults: {},
+      includeSecrets: true,
+    });
+    assert.equal(merged[id].apiKey, 'env-secret');
+  } finally {
+    delete process.env[NAME];
+  }
+});
+
+for (const [protocol, events] of [
+  ['openai-chat', CHAT],
+  ['openai-responses', RESPONSES],
+  ['anthropic', ANTHROPIC],
+]) {
+  test(`apiKeyEnv: 401 reload re-checks the variable (${protocol})`, async () => {
+    const NAME = 'MIXDOG_TEST_RELOAD_KEY';
+    const cfg = {
+      ...base,
+      schemaVersion: 2,
+      protocol,
+      apiKeyEnv: NAME,
+      modelOverrides: { m1: { manual: true } },
+    };
+    const keyOf = (init) => {
+      const h = new Headers(init.headers);
+      return h.get('x-api-key') || h.get('authorization');
+    };
+    const run = async (afterFirst) => {
+      process.env[NAME] = 'old-key';
+      const seen = [];
+      try {
+        return await withFetch(
+          (href, init) => {
+            if (href.endsWith('/models')) return new Response('{"data":[]}', { status: 200 });
+            seen.push(keyOf(init));
+            if (seen.length === 1) {
+              afterFirst();
+              return new Response('{"error":{"message":"bad key"}}', { status: 401 });
+            }
+            return sse(events);
+          },
+          async () => {
+            const p = await createCustomProvider('custom-reload-1', cfg);
+            const result = await p.send(prompt, 'm1', []).then(
+              () => null,
+              (error) => error
+            );
+            return { result, seen };
+          }
+        );
+      } finally {
+        delete process.env[NAME];
+      }
+    };
+    const unset = await run(() => delete process.env[NAME]);
+    assert.equal(unset.result?.message, `API key environment variable ${NAME} is not set`);
+    assert.equal(unset.seen.length, 1);
+    assert.match(unset.seen[0], /old-key/);
+    const rotated = await run(() => {
+      process.env[NAME] = 'new-key';
+    });
+    assert.equal(rotated.result, null);
+    assert.equal(rotated.seen.length, 2);
+    assert.match(rotated.seen[1], /new-key/);
+  });
+}
+
 test('openai-chat: path, bearer auth, tool calls, configured models, custom identity', async () => {
   const id = 'custom-chat-1';
   const p = await createCustomProvider(id, {
@@ -550,6 +650,89 @@ test('openai-responses: generic /responses path, bearer auth, tool calls', async
   assert.equal(res.toolCalls[0].name, 'lookup');
   assert.deepEqual(res.toolCalls[0].arguments, { q: 'x' });
   assert.equal(p.defaultModel, 'm1');
+});
+
+test('custom wires: modelWires picks messages/responses per model; no override sends the unchanged chat request', async () => {
+  const v2 = {
+    ...base,
+    schemaVersion: 2,
+    protocol: 'openai-chat',
+    apiKey: 'sk-wires',
+    preconnect: false,
+    modelOverrides: { m1: { manual: true }, ant: { manual: true }, resp: { manual: true } },
+  };
+  const plain = await createCustomProvider('custom-wires-plain', v2);
+  const routed = await createCustomProvider('custom-wires-1', {
+    ...v2,
+    wires: ['messages', 'chat', 'responses'],
+    modelWires: { ant: 'messages', resp: 'responses' },
+  });
+  assert.deepEqual(routed.customConfig.wires, ['chat', 'responses', 'messages']);
+  assert.equal(Object.hasOwn(plain.customConfig, 'wires'), false);
+  assert.equal(Object.hasOwn(plain.customConfig, 'modelWires'), false);
+  // Without an override the chat request is byte-identical to a provider
+  // without declared wires.
+  const plainRequests = mock(plain, () => sse(CHAT));
+  const routedRequests = mock(routed, () => sse(CHAT));
+  await plain.send(prompt, 'm1', tools, {});
+  await routed.send(prompt, 'm1', tools, {});
+  assert.equal(routedRequests[0].url.pathname, '/v1/chat/completions');
+  assert.deepEqual(routedRequests[0].body, plainRequests[0].body);
+  assert.deepEqual((await routed.resolveWireRoute('m1', { agent: true })).wire, 'chat');
+  // Responses override.
+  const responsesRequests = mock(routed, () => sse(RESPONSES));
+  const viaResponses = await routed.send(prompt, 'resp', tools, {});
+  assert.equal(responsesRequests[0].url.pathname, '/v1/responses');
+  assert.equal(viaResponses.toolCalls[0].name, 'lookup');
+  // Messages override through the bound Anthropic engine.
+  const messagesRequests = mock(routed.messagesEngine, () => sse(ANTHROPIC));
+  const viaMessages = await routed.send(prompt, 'ant', tools, {});
+  assert.equal(messagesRequests[0].url.pathname, '/v1/messages');
+  assert.equal(messagesRequests[0].headers.get('x-api-key'), 'sk-wires');
+  assert.equal(messagesRequests[0].body.model, 'ant');
+  assert.equal(viaMessages.toolCalls[0].name, 'lookup');
+  assert.equal(plain.messagesEngine, null);
+  // A session pins the route like a gateway; one that already answered keeps its wire.
+  const { pinSessionWireRoute } = await import('./wire-route.mjs');
+  const fresh = { provider: 'custom-wires-1', model: 'ant', wireRoute: null, messages: [] };
+  assert.equal((await pinSessionWireRoute(fresh, routed)).wire, 'messages');
+  assert.equal(fresh.wireRoute.source, 'override');
+  const existing = {
+    provider: 'custom-wires-1',
+    model: 'ant',
+    messages: [
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: 'hello' },
+    ],
+  };
+  assert.equal((await pinSessionWireRoute(existing, routed)).wire, 'chat');
+  assert.equal(existing.wireRoute.source, 'legacy');
+  // A pinned chat route wins over a later override for that session.
+  const pinnedRequests = mock(routed, () => sse(CHAT));
+  await routed.send(prompt, 'ant', tools, { session: existing });
+  assert.equal(pinnedRequests[0].url.pathname, '/v1/chat/completions');
+});
+
+test('custom wires: validation', () => {
+  const v2 = { ...base, schemaVersion: 2, protocol: 'openai-chat' };
+  assert.throws(() => normalizeCustomProviderConfig({ ...v2, wires: [] }), /wires must be a non-empty array/);
+  assert.throws(() => normalizeCustomProviderConfig({ ...v2, wires: ['gemini'] }), /unsupported wire/);
+  assert.throws(() => normalizeCustomProviderConfig({ ...v2, wires: ['chat', 'chat'] }), /duplicate wire/);
+  assert.throws(() => normalizeCustomProviderConfig({ ...v2, wires: ['messages'] }), /protocol wire: chat/);
+  assert.throws(() => normalizeCustomProviderConfig({ ...v2, modelWires: { m: 'messages' } }), /served wires: chat/);
+  assert.throws(() => normalizeCustomProviderConfig({ ...v2, modelWires: [] }), /modelWires must be an object/);
+  assert.throws(
+    () => normalizeCustomProviderConfig({ ...v2, protocol: 'anthropic', wires: ['messages'] }),
+    /requires an 'openai-chat' or 'openai-responses' protocol/
+  );
+  assert.throws(
+    () => normalizeCustomProviderConfig({ ...base, protocol: 'openai-chat', modelWires: { m: 'chat' } }),
+    /require schemaVersion 2/
+  );
+  const ok = normalizeCustomProviderConfig({ ...v2, protocol: 'openai-responses', wires: ['responses', 'chat'], modelWires: { m: 'chat' } });
+  assert.deepEqual(ok.wires, ['chat', 'responses']);
+  assert.deepEqual(ok.modelWires, { m: 'chat' });
+  assert.deepEqual(normalizeCustomProviderConfig(ok), ok);
 });
 
 test('anthropic: /v1 base maps to /v1/messages, x-api-key auth, tool use, models', async () => {

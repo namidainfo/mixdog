@@ -151,6 +151,7 @@ bench-results/
 # are regenerated on demand.
 /.runtime/
 /deliverables/
+/design/mockups/
 /dist/
 /output/
 /outputs/

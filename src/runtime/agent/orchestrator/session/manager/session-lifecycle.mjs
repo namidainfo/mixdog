@@ -37,9 +37,10 @@ import { getAgentRuntimeSync, warnAgentRuntimeResolveFailureOnce } from './agent
 import { ensureCodexWireSessionId, mintSessionId } from './session-id.mjs';
 import { providerCacheKey } from './provider-cache-key.mjs';
 import { buildSessionRecord, normalizeDesktopSessionMetadata, sessionOriginFields } from './session-record.mjs';
-import { refreshSessionBp3Environment } from './prompt-utils.mjs';
+import { applyPendingWorkspaceReroot, refreshSessionBp3Environment } from './prompt-utils.mjs';
 import { reserveSessionTitle } from '../store/title-sequence.mjs';
 import { isWorktreeBound } from '../../../../shared/worktrees/contract.mjs';
+import { applyAgentToolExposure } from '../loop/tool-exposure-migration.mjs';
 
 // Owner liveness (attach-on-resume guard) and the durable turn-checkpoint
 // recovery it gates; re-exported so prior importers of this module stay
@@ -244,6 +245,8 @@ export function createSession(opts) {
     origin: sessionOriginFields(opts, { profile, presetObj, providerCacheOpts, surface }),
   });
   session.providerCacheOptsOverride = Boolean(resolved.providerCacheOpts);
+  // A non-native agent sends core + bridge, built from its filtered tools.
+  applyAgentToolExposure(session);
   refreshSessionBp3Environment(session, opts.cwd);
   const titleReservation = opts.titleReservation || reserveSessionTitle(session);
   if (titleReservation) {
@@ -373,6 +376,11 @@ function resetSessionForRouteChange(id, session, previousModel, previousProvider
   session.lastContextTokensUpdatedAt = Date.now();
   session.lastContextTokensStaleAfterCompact = false;
   session.providerState = undefined;
+  // The previous route's prefix snapshot measured another prompt (model line,
+  // stripped replay); the new chain baselines on its first send.
+  delete session._providerPrefixGuardState;
+  // The new route resolves its own wire before its first request.
+  session.wireRoute = null;
   const prepared = _prepareResumeTools(session, session.preset || 'full');
   session.tools = prepared.tools;
   session.toolSpec = prepared.toolSpec;
@@ -390,6 +398,7 @@ function resetSessionForRouteChange(id, session, previousModel, previousProvider
   ]) {
     if (Array.isArray(session[key])) session[key] = filterModelEditToolNames(session[key], session.model);
   }
+  applyAgentToolExposure(session, { existing: true });
   _refreshSessionRuleVariantsForModel(session, previousModel, previousProvider);
   _forgetPreparedResume(id);
 }
@@ -442,6 +451,9 @@ export function updateSessionRoute(id, route = {}, options = {}) {
   // route and set sessionStartMetaInjected, so the ask-time refresh guard
   // skips it and an empty-session route change would otherwise keep the old
   // model line in the system prompt (model self-identity confusion).
+  // A new route starts a cold cache: a staged working-folder change re-roots
+  // the prompt now instead of riding a notice.
+  if (routeChanged) applyPendingWorkspaceReroot(session);
   refreshSessionBp3Environment(session, session.cwd);
   session.updatedAt = Date.now();
   setLiveSession(session);
@@ -520,7 +532,12 @@ function _refreshResumedTools(session, sessionId, preset) {
   // Keep the persisted tool mode in sync on resume (see createSession note).
   session.toolSpec = prepared.toolSpec;
   session.tools = prepared.tools;
-  const missing = oldTools.filter((t) => !session.tools.find((n) => n.name === t.name));
+  applyAgentToolExposure(session, { existing: true });
+  // A bridge surface keeps the rest of its tools in the catalog.
+  const available = new Set(
+    [...session.tools, ...(session.deferredToolCatalog || [])].map((tool) => tool?.name).filter(Boolean)
+  );
+  const missing = oldTools.filter((t) => !available.has(t.name));
   if (missing.length) {
     process.stderr.write(
       `[session] Warning: ${missing.length} tools no longer available: ${missing.map((t) => t.name).join(', ')}\n`

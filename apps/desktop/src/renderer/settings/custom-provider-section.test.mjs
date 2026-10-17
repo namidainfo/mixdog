@@ -478,15 +478,145 @@ test('keyless provider disables the key field and saves auth none without a key'
   await type(field('Base URL'), 'http://localhost:11434/v1');
   await submit();
   assert.match(alerts(), /No API key/);
-  await act(async () =>
-    document.querySelector('input[aria-label="No authentication (local server)"]').click(),
-  );
+  await act(async () => document.querySelector('input[aria-label="No authentication (local server)"]').click());
   assert.equal(field('API key').disabled, true);
   assert.equal(field('API key').required, false);
   await submit();
   const save = calls.find((c) => c.capability === 'saveCustomProvider').args[0];
   assert.equal(save.auth, 'none');
   assert.equal('apiKey' in save, false);
+});
+
+const settle = (ms = 400) => act(async () => new Promise((resolve) => setTimeout(resolve, ms)));
+const hint = () => document.querySelector('.settings-custom-provider-hint');
+
+test('environment variable mode: control, hints, contract-shaped input and invalid name', async (t) => {
+  const calls = [];
+  let found = true;
+  const { render } = mount(t, {
+    calls,
+    handlers: {
+      checkCustomProviderKeyEnv: () => ({ found }),
+      discoverCustomProviderModels: () => ({ models: [{ id: 'm' }] }),
+      saveCustomProvider: (i) => i,
+      testCustomProvider: () => ({ ok: true }),
+    },
+  });
+  await render();
+  await click(button('Add custom provider'));
+  const group = document.querySelector('[role=group][aria-label="API key source"]');
+  assert.ok(group.classList.contains('mx-segmented-compact'));
+  assert.equal(group.closest('.settings-custom-provider-key-row').querySelector('label').textContent, 'API key');
+  assert.equal(button('Direct input').getAttribute('aria-pressed'), 'true');
+  await type(field('Display name'), 'Env');
+  await type(field('Base URL'), 'https://env.test/v1');
+  await click(button('Environment variable'));
+  assert.equal(field('API key environment variable').type, 'text');
+  assert.equal(hint(), null);
+
+  await type(field('API key environment variable'), '1BAD');
+  await settle();
+  assert.equal(hint(), null);
+  await submit();
+  assert.match(alerts(), /valid environment variable name/);
+  assert.equal(
+    calls.some((c) => c.capability === 'saveCustomProvider'),
+    false
+  );
+
+  await type(field('API key environment variable'), 'GROQ_API_KEY');
+  await settle();
+  assert.deepEqual(calls.filter((c) => c.capability === 'checkCustomProviderKeyEnv').at(-1).args, ['GROQ_API_KEY']);
+  assert.equal(hint().textContent, 'Environment variable found. The key is read each time and is not stored.');
+  assert.ok(hint().classList.contains('ok'));
+
+  found = false;
+  await type(field('API key environment variable'), 'GROQ_KEY');
+  await settle();
+  assert.equal(hint().textContent, 'GROQ_KEY was not found yet. If you just set it, restart Mixdog to apply it.');
+  assert.ok(hint().classList.contains('warn'));
+
+  await click(button('Test connection'));
+  const tested = calls.find((c) => c.capability === 'testCustomProvider').args[0];
+  assert.equal(tested.apiKeyEnv, 'GROQ_KEY');
+  assert.equal('apiKey' in tested, false);
+  // Not found is a warning only: save still goes through.
+  await submit();
+  const save = calls.find((c) => c.capability === 'saveCustomProvider').args[0];
+  assert.equal(save.apiKeyEnv, 'GROQ_KEY');
+  assert.equal('apiKey' in save, false);
+  assert.equal(customForm(), null);
+});
+
+test('env mode with an unset variable still saves when discovery fails; direct mode stays blocked', async (t) => {
+  const calls = [];
+  const { render } = mount(t, {
+    calls,
+    handlers: {
+      checkCustomProviderKeyEnv: () => ({ found: false }),
+      discoverCustomProviderModels: () => ({
+        models: [],
+        error: { kind: 'authentication', status: 401, message: 'x' },
+      }),
+      saveCustomProvider: (i) => i,
+    },
+  });
+  await render();
+  await click(button('Add custom provider'));
+  await type(field('Display name'), 'Env');
+  await type(field('Base URL'), 'https://env.test/v1');
+  await type(field('API key'), 'sk-x');
+  await submit();
+  assert.equal(
+    calls.some((c) => c.capability === 'saveCustomProvider'),
+    false
+  );
+  await click(button('Environment variable'));
+  await type(field('API key environment variable'), 'UNSET_KEY');
+  await submit();
+  const save = calls.find((c) => c.capability === 'saveCustomProvider').args[0];
+  assert.equal(save.apiKeyEnv, 'UNSET_KEY');
+  assert.equal(customForm(), null);
+});
+
+test('keyless disables the key source control', async (t) => {
+  const calls = [];
+  const { render } = mount(t, { calls });
+  await render();
+  await click(button('Add custom provider'));
+  assert.equal(button('Direct input').disabled, false);
+  await act(async () => document.querySelector('input[aria-label="No authentication (local server)"]').click());
+  assert.equal(button('Direct input').disabled, true);
+  assert.equal(button('Environment variable').disabled, true);
+});
+
+test('editing an env-key provider opens in env mode; switching to direct clears it', async (t) => {
+  const calls = [];
+  const { render } = mount(t, {
+    calls,
+    api: [{ ...CUSTOM, apiKeyEnv: 'ACME_KEY' }],
+    handlers: { checkCustomProviderKeyEnv: () => ({ found: true }), saveCustomProvider: (i) => i },
+  });
+  await render();
+  await click(button('Edit'));
+  assert.equal(field('API key environment variable').value, 'ACME_KEY');
+  assert.equal(button('Environment variable').getAttribute('aria-pressed'), 'true');
+  await settle();
+  assert.ok(hint().classList.contains('ok'));
+  await submit();
+  assert.equal(calls.find((c) => c.capability === 'saveCustomProvider').args[0].apiKeyEnv, 'ACME_KEY');
+
+  await click(button('Edit'));
+  await click(button('Direct input'));
+  assert.equal(field('API key').required, true);
+  await submit();
+  assert.match(alerts(), /No API key/);
+  await type(field('API key'), 'sk-new');
+  calls.length = 0;
+  await submit();
+  const save = calls.find((c) => c.capability === 'saveCustomProvider').args[0];
+  assert.equal(save.apiKey, 'sk-new');
+  assert.equal(save.apiKeyEnv, null);
 });
 
 test('edit lists hidden rows marked; refresh surfaces the discovery error with its rows', async (t) => {
@@ -689,4 +819,94 @@ test('reopening a model editor after a save shows the saved values and keeps uns
   assert.equal(document.querySelector('.settings-model-editor input[id$="-contextWindow"]').value, '12345');
   await click(editorBtn('Cancel'));
   assert.equal(field('Display name').value, 'Draft name');
+});
+
+test('refresh with an empty model list shows the empty-result message', async (t) => {
+  const calls = [];
+  const { render } = mount(t, { calls, handlers: { discoverCustomProviderModels: () => ({ models: [] }) } });
+  await render();
+  await click(button('Edit'));
+  await click(button('Refresh models'));
+  assert.match(alerts(), /Automatic discovery returned no models|자동 검색에서 모델이 반환되지 않았습니다/);
+});
+
+test('IPC envelopes are stripped and known failures are localized', async (t) => {
+  const calls = [];
+  let message = '';
+  const { render } = mount(t, {
+    calls,
+    handlers: {
+      testCustomProvider: () => {
+        throw new Error(`Error invoking remote method 'mixdog:invoke-capability': Error: ${message}`);
+      },
+      saveCustomProvider: () => {
+        throw new Error(
+          "Error invoking remote method 'mixdog:invoke-capability': TypeError: custom provider name is invalid."
+        );
+      },
+      discoverCustomProviderModels: () => ({ models: [{ id: 'm' }] }),
+    },
+  });
+  await render();
+  await click(button('Add custom provider'));
+  await type(field('Display name'), 'X');
+  await type(field('Base URL'), 'https://x.test');
+  await type(field('API key'), 'k');
+  message = 'Connection error.';
+  await click(button('Test connection'));
+  assert.doesNotMatch(alerts(), /Error invoking|Connection error/);
+  assert.match(alerts(), /Could not connect|연결/);
+  message = 'custom-test first byte timed out after 60000ms';
+  await click(button('Test connection'));
+  assert.doesNotMatch(alerts(), /Error invoking|custom-test/);
+  assert.match(alerts(), /60/);
+  message = 'connection test timed out after 20s';
+  await click(button('Test connection'));
+  assert.doesNotMatch(alerts(), /connection test timed out/);
+  assert.match(alerts(), /20/);
+  await submit();
+  assert.doesNotMatch(alerts(), /Error invoking|TypeError/);
+  assert.match(alerts(), /display name|표시 이름/i);
+});
+
+test('name is trimmed, bounded and validated inline before saving', async (t) => {
+  const calls = [];
+  const { render } = mount(t, {
+    calls,
+    handlers: { saveCustomProvider: (i) => i, discoverCustomProviderModels: () => ({ models: [{ id: 'm' }] }) },
+  });
+  await render();
+  await click(button('Add custom provider'));
+  const name = field('Display name');
+  assert.equal(name.maxLength, 200);
+  await type(field('Base URL'), 'https://x.test');
+  await type(field('API key'), 'k');
+  await type(name, '   ');
+  await submit();
+  assert.ok(name.getAttribute('aria-invalid') === 'true');
+  assert.equal(calls.length, 0);
+  await type(name, 'a'.repeat(201));
+  await submit();
+  assert.equal(calls.length, 0);
+  assert.equal(name.getAttribute('aria-invalid'), 'true');
+  await type(name, '  Ok  ');
+  await submit();
+  assert.equal(calls.find((c) => c.capability === 'saveCustomProvider').args[0].name, 'Ok');
+});
+
+test('a refresh HTTP failure shows a generic status message without internal ids', async (t) => {
+  const { render } = mount(t, {
+    calls: [],
+    handlers: {
+      discoverCustomProviderModels: () => ({
+        models: [],
+        error: { kind: 'other', message: 'custom-6223a6ea-1111 models 500' },
+      }),
+    },
+  });
+  await render();
+  await click(button('Edit'));
+  await click(button('Refresh models'));
+  assert.doesNotMatch(alerts(), /custom-6223/);
+  assert.match(alerts(), /500/);
 });

@@ -7,6 +7,7 @@ import {
   providerNativeToolPrefixCount,
 } from './provider-request-tools.mjs';
 import { MEASURED_TOOL_USAGE, ROUTE_TOOL_ORDER } from './tool-catalog-data.mjs';
+import { nativeDeferredFamilyForRoute } from '../providers/wire-route.mjs';
 
 const toolSchemaBreakdownMemo = new WeakMap();
 
@@ -78,7 +79,7 @@ export function toolSchemaBucket(tool) {
   if (['shell', 'edit', 'apply_patch'].includes(name)) return 'mutation';
   if (name === 'agent' || name === 'delegate') return 'agents';
   if (name.includes('channel') || name.includes('webhook')) return 'channels';
-  if (name.includes('provider') || name === 'load_tool' || name === 'tool_search' || name === 'cwd') return 'setup';
+  if (name.includes('provider') || name === 'load_tool' || name === 'tool_search' || name === 'session') return 'setup';
   if (kind === 'control') return 'control';
   return 'other';
 }
@@ -171,23 +172,25 @@ export function immutableToolForSurface(tool) {
   return frozen;
 }
 
-export function deferredProviderMode(provider) {
+// `route` is the session's pinned wire route (session.wireRoute). The
+// first-party Anthropic and OpenAI providers are native by name; a gateway or
+// custom provider is native only on a route pinned with verified support
+// (wire-route.mjs nativeDeferredFamilyForRoute), which is OFF everywhere today.
+export function deferredProviderMode(provider, route = null) {
   const p = clean(provider).toLowerCase();
   if (p === 'gemini') return 'manifest';
-  if (p === 'anthropic' || p === 'anthropic-oauth' || p === 'openai' || p === 'openai-oauth') {
-    return 'native';
-  }
+  if (nativeProviderFamily(p, route)) return 'native';
   // xAI/Grok and every other OpenAI-compatible backend have no native
   // tool_search/tool_search_output contract. Give them one complete canonical
   // function array instead of a load-driven array whose bytes churn.
   return 'canonical';
 }
 
-export function nativeProviderFamily(provider) {
+export function nativeProviderFamily(provider, route = null) {
   const p = clean(provider).toLowerCase();
   if (p === 'openai' || p === 'openai-oauth') return 'openai';
   if (p === 'anthropic' || p === 'anthropic-oauth') return 'anthropic';
-  return '';
+  return nativeDeferredFamilyForRoute(p, route);
 }
 
 export const ANTHROPIC_NATIVE_PROVIDERS = new Set(['anthropic', 'anthropic-oauth']);

@@ -1,6 +1,7 @@
 // The DesktopApi surface of a browser: each method forwards over the relay
 // socket (or degrades to a browser equivalent).
 import type { DesktopApi, DesktopCapabilityRequest, DesktopCapabilityResult } from '../shared/contract';
+import type { ProjectRecoveryRequest } from '../shared/project-recovery';
 import {
   FILE_DOWNLOAD_REMOTE_METHODS,
   FileDownloadError,
@@ -208,8 +209,7 @@ export const createRemoteApi = (ctx: RemoteShimContext): DesktopApi => {
     setQuotaAutoResume: (enabled) => call('setQuotaAutoResume', [enabled]),
     setSessionArchived: (sessionId: string, archived: boolean) => call('setSessionArchived', [sessionId, archived]),
     setSessionFavorite: (sessionId: string, favorite: boolean) => call('setSessionFavorite', [sessionId, favorite]),
-    setSessionProject: (sessionId: string, projectPath: string | null) =>
-      call('setSessionProject', [sessionId, projectPath]),
+    setSessionProject: (sessionId: string, projectPath: string) => call('setSessionProject', [sessionId, projectPath]),
     deleteSession: (sessionId) => call('deleteSession', [sessionId]),
     // Cold session lanes fill through a host-side read; the replay frame
     // arrives on the broadcast sessionState event like any live push.
@@ -297,8 +297,9 @@ export const createRemoteApi = (ctx: RemoteShimContext): DesktopApi => {
     gitCherryPickCommit: (cwd, hash) => call('gitCherryPickCommit', [cwd, hash]),
     gitCreateTag: (cwd, tag, hash) => call('gitCreateTag', [cwd, tag, hash]),
     gitDeleteTag: (cwd, tag) => call('gitDeleteTag', [cwd, tag]),
-    gitReview: (cwd) => call('gitReview', [cwd]),
-    gitReviewDiff: (cwd, path, untracked) => call('gitReviewDiff', [cwd, path, untracked === true]),
+    gitReview: (cwd, source) => call('gitReview', [cwd, source]),
+    gitReviewDiff: (cwd, path, untracked, source) => call('gitReviewDiff', [cwd, path, untracked === true, source]),
+    gitReviewDiffs: (cwd, files, source) => call('gitReviewDiffs', [cwd, files, source]),
     gitStashList: (cwd) => call('gitStashList', [cwd]),
     gitStashApply: (cwd, ref) => call('gitStashApply', [cwd, ref]),
     gitStashDrop: (cwd, ref) => call('gitStashDrop', [cwd, ref]),
@@ -455,6 +456,11 @@ export const createRemoteApi = (ctx: RemoteShimContext): DesktopApi => {
     });
   }
   Object.defineProperty(api, 'routeAutoEffort', { enumerable: true, get: routeAutoEffort });
+  Object.defineProperty(api, 'projectRecovery', {
+    enumerable: true,
+    get: () => ctx.peerProjectRecovery === true
+      ? (project: string, request: ProjectRecoveryRequest) => call('projectRecovery', [project, request]) : undefined,
+  });
   // Read per access like the members below: a reconnect may reach a host that
   // predates `browserDrive`, and the pane must then never send `viewport`.
   Object.defineProperty(api, 'remoteBrowserDrive', { enumerable: true, get: () => ctx.peerBrowserDrive === true });

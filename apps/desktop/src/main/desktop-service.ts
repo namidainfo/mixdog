@@ -32,6 +32,7 @@ import {
 import type { DesktopServiceInbound, DesktopServiceOutbound } from './desktop-service-protocol';
 import { createDesktopServiceStateSync } from './desktop-service-state-sync';
 import { createDesktopOperations } from './desktop-operations';
+import { projectRecoveryStorePath } from './project-recovery-store';
 import { sessionRecordsReferencing } from './server-file-operations';
 import { rotatePairingToken } from './remote-pairing-token';
 import { remoteAccessDescriptor } from './remote-access-descriptor';
@@ -55,6 +56,8 @@ import {
   MODEL_PROXY_REQUEST_EVENT,
 } from '../../../../src/runtime/agent/orchestrator/providers/model-proxy-channel.mjs';
 import { modelProxyClientMode } from '../../../../src/runtime/shared/model-proxy-mode.mjs';
+import { registerSessionSidebarHost } from '../../../../src/runtime/shared/session-sidebar-host.mjs';
+import { sessionSidebarChangeHandler } from './session-sidebar-actions';
 
 // Slightly under the relay's own claim TTL: a dialog left open must never
 // outlive the request it answers.
@@ -258,6 +261,14 @@ export async function createDesktopService({
     for (const listener of desktopEventListeners) listener({ name, value });
   };
   const operations = createDesktopOperations({
+    withRecoveryStore: async (root, action, run) => {
+      const worktrees = await runtime.loadWorktrees?.();
+      if (worktrees?.withWorktreeRecoveryStore)
+        return worktrees.withWorktreeRecoveryStore(root, projectRecoveryStorePath(options.userDataPath, root), action, run);
+      if (worktrees && await (worktrees.findWorktreeContaining ?? worktrees.getWorktreeByPath)(root))
+        throw new Error('Worktree file recovery protection is unavailable. Update the host before editing.');
+      return run();
+    },
     userDataPath: options.userDataPath,
     packaged: options.packaged,
     resourcesPath: options.resourcesPath,
@@ -280,6 +291,9 @@ export async function createDesktopService({
     (root) => operations.invoke('termDisposeUnder', [root]),
     (root) => operations.invoke('lspDisposeUnder', [root])
   );
+  // The Lead's `session` tool (favorite / archive) runs
+  // in this daemon and applies its change through the same host methods.
+  const unregisterSessionSidebarHost = registerSessionSidebarHost(sessionSidebarChangeHandler(host));
   const settingsStore = operations.settingsStore;
   // A deleted session takes its server-window upload staging folder with it.
   const deleteSessionWithUploads = async (sessionId: unknown): Promise<unknown> => {
@@ -642,6 +656,7 @@ export async function createDesktopService({
     },
     async dispose(): Promise<void> {
       unregisterTerminalReleaser();
+      unregisterSessionSidebarHost();
       importProgress.dispose();
       stateSync.dispose();
       desktopEventListeners.clear();
