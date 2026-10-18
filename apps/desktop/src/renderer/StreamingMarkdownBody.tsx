@@ -3,7 +3,9 @@ import { memo, useEffect, useMemo, useRef, useState, type ComponentType } from '
 import type { MarkdownAstRoot } from './markdown-ast';
 import {
   LatestMarkdownAstQueue,
+  parseSettledMarkdownAstNow,
   readCachedStreamingMarkdownAst,
+  SYNC_MARKDOWN_PARSE_MAX_UTF16_UNITS,
   syncMarkdownParser,
 } from './markdown-worker-client';
 import MarkdownAstBody from './MarkdownAstBody';
@@ -45,10 +47,8 @@ function promoteMarkdownAst(
   return { text: parsedText, source, root };
 }
 
-/** Live markdown up to this size parses on the main thread, in the commit
- *  that reveals it; larger text (and history) stays on the worker. */
-export const SYNC_MARKDOWN_PARSE_MAX_CHARS = 8 * 1024;
-/** A main-thread parse slower than this hands longer text back to the worker. */
+/** A main-thread parse slower than this hands longer text back to the worker.
+ *  (Size cap: SYNC_MARKDOWN_PARSE_MAX_UTF16_UNITS in markdown-worker-client.) */
 const SYNC_MARKDOWN_PARSE_BUDGET_MS = 8;
 
 const ParsedMarkdownBody = memo(function ParsedMarkdownBody({
@@ -67,10 +67,13 @@ const ParsedMarkdownBody = memo(function ParsedMarkdownBody({
   const slowAt = useRef(Number.POSITIVE_INFINITY);
   const lastSync = useRef<RenderedMarkdownAst | null>(null);
   const parser =
-    sync && parse && parseText.length <= SYNC_MARKDOWN_PARSE_MAX_CHARS && parseText.length < slowAt.current
+    sync && parse && parseText.length <= SYNC_MARKDOWN_PARSE_MAX_UTF16_UNITS && parseText.length < slowAt.current
       ? syncMarkdownParser()
       : null;
   const syncRoot = useMemo(() => {
+    // Settled text (history, a reply that arrived whole) commits its final
+    // structure in the render that mounts it whenever the parser is loaded.
+    if (!sync) return parse ? parseSettledMarkdownAstNow(parseText, SYNC_MARKDOWN_PARSE_MAX_UTF16_UNITS) : null;
     if (!parser) return null;
     const cached = readCachedStreamingMarkdownAst(parseText);
     if (cached) return cached;
@@ -80,7 +83,7 @@ const ParsedMarkdownBody = memo(function ParsedMarkdownBody({
     noteStreamSyncParse(duration, parseText.length);
     if (duration > SYNC_MARKDOWN_PARSE_BUDGET_MS) slowAt.current = parseText.length;
     return root;
-  }, [parser, parseText]);
+  }, [parser, parseText, sync, parse]);
   if (syncRoot) lastSync.current = { text: parseText, source: text, root: syncRoot };
   const [rendered, setRendered] = useState<RenderedMarkdownAst | null>(() => {
     // A cache read is free, so even a tail past the parse cap opens styled
@@ -126,7 +129,11 @@ const ParsedMarkdownBody = memo(function ParsedMarkdownBody({
   // A cold web Worker can trail the first streamed tokens by a network round
   // trip. Fenced scripts still reserve their final card/mono geometry during
   // that gap; ordinary prose stays hidden so raw Markdown markers never flash.
-  const showFencedSourceFallback = !renderedRoot && containsFencedCodeMarkdown(text);
+  // A completed reply (`sync` false) never paints source: raw prose and
+  // tables would reflow into their final structure when the parse lands, so
+  // its row stays reserved (CSS holds the measured/estimated box) and empty
+  // until the AST arrives.
+  const showFencedSourceFallback = sync && !renderedRoot && containsFencedCodeMarkdown(text);
 
   useEffect(() => {
     // A cached AST was already promoted during render; a main-thread parse
@@ -195,7 +202,7 @@ const StreamingMarkdownBody = memo(function StreamingMarkdownBody({
   text: string;
   parseText?: string;
   parse?: boolean;
-  /** Live reply: small text parses on the main thread (see SYNC_MARKDOWN_PARSE_MAX_CHARS). */
+  /** Live reply: small text parses on the main thread (see SYNC_MARKDOWN_PARSE_MAX_UTF16_UNITS). */
   sync?: boolean;
   copyControl: MarkdownCopyControl;
 }) {
@@ -205,7 +212,9 @@ const StreamingMarkdownBody = memo(function StreamingMarkdownBody({
   // `parseText` is the healed form of `text` for the live tail: the parser
   // sees closed markers while the source fallback still shows exactly what
   // the model has emitted.
-  return <ParsedMarkdownBody text={text} parseText={parseText ?? text} parse={parse} sync={sync} copyControl={copyControl} />;
+  return (
+    <ParsedMarkdownBody text={text} parseText={parseText ?? text} parse={parse} sync={sync} copyControl={copyControl} />
+  );
 });
 
 export default StreamingMarkdownBody;

@@ -7,7 +7,6 @@ import type {
 import { compactedSessionTitle, generatedSessionTitle, normalizeSessionTitle } from '../shared/session-title.mjs';
 import { bloomSessionPurpose } from '../../../../src/runtime/shared/desktop-session-metadata.mjs';
 
-const SESSION_WORKING_HEARTBEAT_MS = 2 * 60 * 1000;
 // A user prompt plus an assistant reply: the smallest persisted conversation.
 const MIN_CONVERSATION_MESSAGE_COUNT = 2;
 const WORKSPACE_TRANSITION_STATES = new Set(['idle', 'provisioning', 'switching', 'removing', 'recovery']);
@@ -108,8 +107,7 @@ export function requiredVisibleSessionVersion(value: unknown): number {
 export function desktopSessionSummaries(
   rows: Array<Record<string, unknown>>,
   titles: Readonly<Record<string, string>> = {},
-  names: Readonly<Record<string, string>> = {},
-  now = Date.now()
+  names: Readonly<Record<string, string>> = {}
 ): DesktopSessionSummary[] {
   return rows
     .flatMap((row): DesktopSessionSummary[] => {
@@ -143,10 +141,9 @@ export function desktopSessionSummaries(
       const sharedTitle = generatedSessionTitle(row.title || '', '');
       const legacyDesktopTitle = generatedSessionTitle(titles[id] || '', '');
       const previewTitle = compactedSessionTitle(preview, '') || generatedSessionTitle(preview, '');
-      const heartbeatAt = Number(row.heartbeatAt) || 0;
-      const agentHeartbeatAt = Number(row.agentHeartbeatAt) || 0;
-      const ownWorking = heartbeatAt > 0 && now - heartbeatAt <= SESSION_WORKING_HEARTBEAT_MS;
-      const agentWorking = agentHeartbeatAt > 0 && now - agentHeartbeatAt <= SESSION_WORKING_HEARTBEAT_MS;
+      // Turn activity the daemon overlays from its in-memory runtime state.
+      const ownWorking = row.working === true;
+      const agentWorking = row.agentWorking === true;
       const working = ownWorking || agentWorking;
       const updatedAt = Number(row.updatedAt) || 0;
       const activityAt = Number(row.lastUsedAt) || updatedAt;
@@ -187,6 +184,9 @@ export function desktopSessionSummaries(
       return [
         {
           id,
+          ...(row.visibility === 'agent-only' || (row.owner === 'agent' && row.agent !== 'lead')
+            ? { agentSession: true }
+            : {}),
           preview,
           title: manualTitle || sharedTitle || legacyDesktopTitle || previewTitle || generatedSessionTitle(preview),
           updatedAt,

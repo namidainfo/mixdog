@@ -5,15 +5,17 @@ import type {
   DesktopOrchestrationMode,
   SessionSnapshot,
 } from '../shared/contract';
-import { beginBootSurface, reportBootSurfaceReady, reportBootSurfaceStage } from './boot-metrics';
+import { beginBootSurface, holdBootSurface, reportBootSurfaceReady, reportBootSurfaceStage } from './boot-metrics';
 import { routePreferenceStore } from './app-route-preference';
 import { useModelSelection } from './use-model-selection';
 import type { RecordValue } from './desktop-types';
+import { isDesktopProvidersUnavailableError, useDesktopProvidersRetry } from './desktop-provider-retry';
 import { t } from './i18n';
 import {
   SHARED_MODEL_CATALOG_MAX_AGE_MS,
   readCachedModelCatalog,
   requestModelCatalog,
+  invalidateSharedModelCatalogRequest,
   subscribeModelCatalogInvalidation,
 } from './model-catalog-cache';
 import { customProviderDisplayNames, filterConfiguredModels } from './model-catalog';
@@ -358,6 +360,8 @@ export const ModelSelector = memo(function ModelSelector({
   const [providerSetup, setProviderSetup] = useState<unknown>(null);
   const [catalogError, setCatalogError] = useState('');
   const [providerSetupError, setProviderSetupError] = useState('');
+  // A server window whose desktop proxy is away retries on the shared cadence.
+  const [desktopProvidersAway, setDesktopProvidersAway] = useState(false);
   const [catalogLoaded, setCatalogLoaded] = useState(cachedCatalog.models.length > 0);
   const [startupCatalogSettled, setStartupCatalogSettled] = useState(cachedCatalog.models.length > 0);
   const [catalogRefreshing, setCatalogRefreshing] = useState(false);
@@ -391,6 +395,10 @@ export const ModelSelector = memo(function ModelSelector({
   const latestRouteToken = useRef(0);
   const modelBootKey = `${provider || 'none'}:${model || 'none'}`;
   beginBootSurface('model-controls', modelBootKey);
+  // A restored session renders its controls before its route is known
+  // (`none:none`), then re-keys on the route: the superseded key must not
+  // hold the boot cover waiting for a ready no render will report.
+  useEffect(() => holdBootSurface('model-controls', modelBootKey), [modelBootKey]);
   // An in-flight write no longer locks the controls. The selection is previewed
   // locally the moment it is clicked, so disabling the picker until the runtime
   // replied only made it look frozen — and swallowed the next click.
@@ -468,6 +476,7 @@ export const ModelSelector = memo(function ModelSelector({
       setCatalogRefreshing(true);
       setCatalogError('');
       setProviderSetupError('');
+      setDesktopProvidersAway(false);
       const shared = requestModelCatalog(api);
       let fullApplied = false;
       const setupRequest = shared.setup
@@ -478,6 +487,7 @@ export const ModelSelector = memo(function ModelSelector({
           if (!shared.isCurrent()) return;
           console.warn('[model-catalog] provider setup refresh failed', reason);
           setProviderSetupError('unavailable');
+          setDesktopProvidersAway(isDesktopProvidersUnavailableError(reason));
         });
       const fullRequest = shared.full
         .then((full) => {
@@ -554,6 +564,8 @@ export const ModelSelector = memo(function ModelSelector({
       }),
     [loadCatalog]
   );
+
+  useDesktopProvidersRetry(desktopProvidersAway, invalidateSharedModelCatalogRequest);
 
   useEffect(() => {
     if (model && !startupCatalogSettled) return;

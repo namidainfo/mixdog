@@ -4,7 +4,19 @@
 import { isUtf8 } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
 import { existsSync, realpathSync } from 'node:fs';
-import { cp, lstat, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  cp,
+  type FileHandle,
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { toUSVString } from 'node:util';
 
@@ -12,8 +24,16 @@ import { codeGraphModuleUrl } from './desktop-support';
 import { ProjectRecoveryError } from '../shared/project-recovery';
 import { withProjectMutationPaths } from './project-mutation-queue';
 import {
-  beginProjectRecovery, RECOVERY_MAX_BYTES, recoveryIdentity, recoveryReadBytes, RecoveryReadLimitError,
-  releaseRecoveryDirectory, sameRecoveryIdentity, writeRecoveryState, retireRecoveryDirectory, removeRecoveryDirectory,
+  beginProjectRecovery,
+  RECOVERY_MAX_BYTES,
+  recoveryIdentity,
+  recoveryReadBytes,
+  RecoveryReadLimitError,
+  releaseRecoveryDirectory,
+  sameRecoveryIdentity,
+  writeRecoveryState,
+  retireRecoveryDirectory,
+  removeRecoveryDirectory,
   type RecoveryPreparedFile,
 } from './project-recovery-store';
 
@@ -43,7 +63,8 @@ function decodeTextPayload(
   binary = false
 ): DecodedProjectText {
   const utf16 = encoding === 'utf16le' || encoding === 'utf16be';
-  const text = encoding === 'utf16be' ? decodeUtf16Be(bytes) : bytes.toString(utf16 ? 'utf16le' : 'utf8');
+  const nodeEncoding = utf16 ? 'utf16le' : 'utf8';
+  const text = encoding === 'utf16be' ? decodeUtf16Be(bytes) : bytes.toString(nodeEncoding);
   // Replacement characters are safe for display only. A literal U+FFFD in a
   // valid file is not an error; validate the bytes/code units, not that glyph.
   const content = toUSVString(text);
@@ -139,10 +160,11 @@ export function projectEntryPathIn(root: string, relPath: string): string {
 /** Claim lexical paths AND their resolved aliases. Revalidate after waiting:
  * a changed symlink must not redirect a queued operation outside its claim. */
 function mutateProjectEntries<T>(root: string, relPaths: string[], run: () => Promise<T>): Promise<T> {
-  const paths = () => relPaths.flatMap((relPath) => {
-    const path = projectEntryPathIn(root, relPath);
-    return [path, canonicalPathThroughExistingAncestor(path)];
-  });
+  const paths = () =>
+    relPaths.flatMap((relPath) => {
+      const path = projectEntryPathIn(root, relPath);
+      return [path, canonicalPathThroughExistingAncestor(path)];
+    });
   const claimed = paths();
   return withProjectMutationPaths(claimed, async () => {
     if (paths().some((path, index) => path !== claimed[index])) {
@@ -171,10 +193,15 @@ export const PROJECT_TEXT_EDIT_MAX_BYTES = 1_048_576;
 export const PROJECT_TEXT_VIEW_MAX_BYTES = 10_485_760;
 
 /** Editor tab: read a project text file (1 MB edit cap, 10 MB read-only cap, binary sniff). */
-export async function readProjectTextFileIn(
-  root: string,
-  relPath: string
-): Promise<{
+export async function readProjectTextFileIn(root: string, relPath: string): Promise<ProjectTextFile> {
+  const file = projectEntryPathIn(root, relPath);
+  const info = await stat(file);
+  if (!info.isFile()) throw new Error('Not a file.');
+  if (info.size > PROJECT_TEXT_VIEW_MAX_BYTES) return projectTextTooLarge(info.mtimeMs);
+  return projectTextReply(await readFile(file), info.mtimeMs);
+}
+
+export interface ProjectTextFile {
   content: string;
   mtimeMs: number;
   binary: boolean;
@@ -182,19 +209,27 @@ export async function readProjectTextFileIn(
   readOnly?: boolean;
   readOnlyReason?: 'encoding';
   encoding: ProjectTextEncoding;
-}> {
-  const file = projectEntryPathIn(root, relPath);
-  const info = await stat(file);
+}
+
+function projectTextTooLarge(mtimeMs: number): ProjectTextFile {
+  return { content: '', mtimeMs, binary: false, tooLarge: true, encoding: 'utf8' };
+}
+
+/** readProjectTextFileIn for a file already open and authorized by the
+ *  caller (a paired device's read): every byte comes through `handle`. */
+export async function readProjectTextFileThrough(handle: FileHandle): Promise<ProjectTextFile> {
+  const info = await handle.stat();
   if (!info.isFile()) throw new Error('Not a file.');
-  if (info.size > PROJECT_TEXT_VIEW_MAX_BYTES) {
-    return { content: '', mtimeMs: info.mtimeMs, binary: false, tooLarge: true, encoding: 'utf8' };
-  }
-  const bytes = await readFile(file);
+  if (info.size > PROJECT_TEXT_VIEW_MAX_BYTES) return projectTextTooLarge(info.mtimeMs);
+  return projectTextReply(await handle.readFile(), info.mtimeMs);
+}
+
+function projectTextReply(bytes: Buffer, mtimeMs: number): ProjectTextFile {
   const decoded = decodeProjectText(bytes);
   const readOnly = !decoded.binary && (!decoded.lossless || bytes.length > PROJECT_TEXT_EDIT_MAX_BYTES);
   return {
     content: decoded.binary ? '' : decoded.content,
-    mtimeMs: info.mtimeMs,
+    mtimeMs,
     binary: decoded.binary,
     tooLarge: false,
     ...(readOnly ? { readOnly: true } : {}),
@@ -255,6 +290,214 @@ export async function writeProjectTextFileIn(
   );
 }
 
+function assertProjectTextWrite(content: unknown, expectedContent: unknown, encoding: unknown): void {
+  if (typeof content !== 'string' || content.length > 4_194_304) throw new TypeError('File content is invalid.');
+  if (typeof expectedContent !== 'string' || expectedContent.length > 4_194_304) {
+    throw new TypeError('Expected file content is invalid.');
+  }
+  if (
+    encoding !== undefined &&
+    encoding !== 'utf8' &&
+    encoding !== 'utf8bom' &&
+    encoding !== 'utf16le' &&
+    encoding !== 'utf16be'
+  ) {
+    throw new TypeError('File encoding is invalid.');
+  }
+}
+
+/** Opens a project file (absolute path) read-write, already authorized: the
+ *  caller's proof that the open file is where it may write. */
+export type AuthorizedFileOpener = (absolute: string) => Promise<FileHandle>;
+
+/** The current text of an authorized handle, checked as a save's precondition:
+ *  lossless text equal to `expectedContent`. */
+async function expectedHandleText(
+  handle: FileHandle,
+  expectedContent: string,
+  label: string
+): Promise<{ bytes: Buffer; decoded: DecodedProjectText }> {
+  const info = await handle.stat();
+  if (!info.isFile()) throw new Error('Not a file.');
+  if (info.size > PROJECT_TEXT_VIEW_MAX_BYTES) throw new Error(`File changed on disk: ${label}`);
+  const bytes = await handle.readFile();
+  const decoded = decodeProjectText(bytes);
+  requireLosslessText(decoded);
+  if (decoded.binary || decoded.content !== expectedContent) {
+    throw new Error('File changed on disk. Reload or keep your edits before saving.');
+  }
+  return { bytes, decoded };
+}
+
+/** Replaces every byte of the open file with `bytes`, in place. */
+export async function rewriteFileThrough(handle: FileHandle, bytes: Buffer): Promise<void> {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const { bytesWritten } = await handle.write(bytes, offset, bytes.length - offset, offset);
+    if (bytesWritten < 1) throw new Error('File write made no progress.');
+    offset += bytesWritten;
+  }
+  await handle.truncate(bytes.length);
+  await handle.datasync();
+}
+
+/** writeProjectTextFileIn for a paired device: the file is opened through
+ *  `openFile`, which authorizes the open file's real location, and read,
+ *  checked and rewritten through that one handle — in place, since a rename
+ *  would replace a path rather than the file that was authorized. Because an
+ *  in-place write is not atomic, the original bytes are kept and put back
+ *  through the same handle if the write fails. */
+export async function writeProjectTextFileThrough(
+  root: string,
+  relPath: string,
+  content: string,
+  expectedContent: string,
+  encoding: ProjectTextEncoding | undefined,
+  openFile: AuthorizedFileOpener
+): Promise<{ mtimeMs: number }> {
+  assertProjectTextWrite(content, expectedContent, encoding);
+  return mutateProjectEntries(root, [relPath], async () => {
+    const handle = await openFile(projectEntryPathIn(root, relPath));
+    try {
+      const { bytes: original, decoded } = await expectedHandleText(handle, expectedContent, relPath);
+      const bytes = encodeProjectText(
+        content,
+        encoding ?? decoded.encoding,
+        encoding === undefined ? decoded.hasBom : true
+      );
+      try {
+        await rewriteFileThrough(handle, bytes);
+      } catch (error) {
+        try {
+          await rewriteFileThrough(handle, original);
+        } catch {
+          throw new Error(`Save failed: ${writeFailureMessage(error)}. The original could not be restored.`, {
+            cause: error,
+          });
+        }
+        throw error;
+      }
+      return { mtimeMs: (await handle.stat()).mtimeMs };
+    } finally {
+      await handle.close();
+    }
+  });
+}
+
+/** writeProjectTextFilesIn for a paired device: every file is opened and
+ *  authorized through `openFile` and checked before the first byte is
+ *  written, then rewritten in place through its own handle. A failure puts
+ *  back the bytes of every file already written, through the same handles. */
+export async function writeProjectTextFilesThrough(
+  root: string,
+  writes: ReadonlyArray<{ relPath: string; content: string; expectedContent: string }>,
+  openFile: AuthorizedFileOpener,
+  recoveryDataPath?: string
+): Promise<void> {
+  if (!Array.isArray(writes) || writes.length < 1 || writes.length > 100) {
+    throw new TypeError('Workspace edit files are invalid.');
+  }
+  const normalized = writes.map((write) => ({ ...write, relPath: String(write.relPath || '').replace(/\\/g, '/') }));
+  if (new Set(normalized.map((write) => write.relPath.toLocaleLowerCase())).size !== normalized.length) {
+    throw new TypeError('Workspace edit contains duplicate files.');
+  }
+  for (const write of normalized) assertProjectTextWrite(write.content, write.expectedContent, undefined);
+  return mutateProjectEntries(
+    root,
+    normalized.map((write) => write.relPath),
+    async () => {
+      const opened: Array<{ handle: FileHandle; relPath: string; before: Buffer; after: Buffer }> = [];
+      try {
+        for (const write of normalized) {
+          const handle = await openFile(projectEntryPathIn(root, write.relPath));
+          try {
+            const { bytes, decoded } = await expectedHandleText(handle, write.expectedContent, write.relPath);
+            opened.push({
+              handle,
+              relPath: write.relPath,
+              before: bytes,
+              after: encodeProjectText(write.content, decoded.encoding, decoded.hasBom),
+            });
+          } catch (error) {
+            await handle.close();
+            throw error;
+          }
+        }
+        // The same host-owned recovery record as writeProjectTextFilesIn,
+        // published before the first byte is written.
+        const journal = recoveryDataPath
+          ? await beginProjectRecovery(recoveryDataPath, root, await openedRecoveryFiles(root, opened))
+          : undefined;
+        const written: typeof opened = [];
+        const restored = new Set<string>();
+        let failed = false;
+        let failure: unknown;
+        try {
+          for (const file of opened) {
+            // Recorded before the write: a failure part-way through this file
+            // leaves it modified, and it is restored with the earlier ones.
+            written.push(file);
+            await rewriteFileThrough(file.handle, file.after);
+          }
+        } catch (error) {
+          failed = true;
+          failure = error;
+          const unrestored: string[] = [];
+          for (const file of written.reverse()) {
+            await rewriteFileThrough(file.handle, file.before).then(
+              () => restored.add(file.relPath),
+              () => unrestored.push(file.relPath)
+            );
+          }
+          if (unrestored.length) {
+            failure = new Error(
+              `Workspace edit failed: ${writeFailureMessage(error)}. Not restored: ${JSON.stringify(unrestored)}.`,
+              { cause: error }
+            );
+          }
+        }
+        await settleRecoveryJournal(journal, failed, failure, restored);
+      } finally {
+        await Promise.all(opened.map((file) => file.handle.close().catch(() => undefined)));
+      }
+    }
+  );
+}
+
+/** Recovery entries for files opened through authorized handles: each one's
+ *  destination is where its handle really is, confirmed by identity. */
+async function openedRecoveryFiles(
+  root: string,
+  opened: ReadonlyArray<{ handle: FileHandle; relPath: string; before: Buffer; after: Buffer }>
+): Promise<RecoveryPreparedFile[]> {
+  let bytes = 0;
+  const prepared: RecoveryPreparedFile[] = [];
+  for (const file of opened) {
+    bytes += file.before.length + file.after.length;
+    if (bytes > RECOVERY_MAX_BYTES) {
+      throw new ProjectRecoveryError(
+        'RECOVERY_BATCH_LIMIT',
+        'Workspace edit exceeds the 16 MiB recovery budget. Split the edit.'
+      );
+    }
+    const destination = realpathSync(projectEntryPathIn(root, file.relPath));
+    const info = await file.handle.stat({ bigint: true });
+    const named = recoveryIdentity(destination);
+    if (named.dev !== String(info.dev) || named.ino !== String(info.ino)) {
+      throw new Error(`Project path changed before saving: ${file.relPath}`);
+    }
+    prepared.push({
+      relPath: file.relPath,
+      destination,
+      parent: recoveryIdentity(dirname(destination)),
+      mode: Number(info.mode),
+      before: file.before,
+      after: file.after,
+    });
+  }
+  return prepared;
+}
+
 type ProjectFileReplacement = {
   before: Buffer;
   after: Buffer;
@@ -282,19 +525,7 @@ async function writeProjectTextFileUnlocked(
   expectedBytes?: Buffer,
   validatePreparedTarget?: () => void
 ): Promise<{ mtimeMs: number }> {
-  if (typeof content !== 'string' || content.length > 4_194_304) throw new TypeError('File content is invalid.');
-  if (typeof expectedContent !== 'string' || expectedContent.length > 4_194_304) {
-    throw new TypeError('Expected file content is invalid.');
-  }
-  if (
-    encoding !== undefined &&
-    encoding !== 'utf8' &&
-    encoding !== 'utf8bom' &&
-    encoding !== 'utf16le' &&
-    encoding !== 'utf16be'
-  ) {
-    throw new TypeError('File encoding is invalid.');
-  }
+  assertProjectTextWrite(content, expectedContent, encoding);
   const file = projectEntryPathIn(root, relPath);
   // Own the destination before the first asynchronous read. A batch passes
   // its preflight identity, so earlier writes cannot retarget a later entry.
@@ -322,11 +553,18 @@ async function writeProjectTextFileUnlocked(
   // Ordinary saves preserve the observed BOM; an explicit encoding keeps
   // the existing conversion contract, including a BOM for UTF-16.
   const bytes = encodeProjectText(content, targetEncoding, encoding === undefined ? current.hasBom : true);
-  await replaceProjectFileBytes(file, bytes, currentBytes, info.mode, () => {
-    // Record the successful rename before any fallible post-commit metadata
-    // lookup. A batch must roll this file back even when the stat below fails.
-    onCommitted?.({ before: currentBytes, after: bytes, mode: info.mode, destination });
-  }, validatePath);
+  await replaceProjectFileBytes(
+    file,
+    bytes,
+    currentBytes,
+    info.mode,
+    () => {
+      // Record the successful rename before any fallible post-commit metadata
+      // lookup. A batch must roll this file back even when the stat below fails.
+      onCommitted?.({ before: currentBytes, after: bytes, mode: info.mode, destination });
+    },
+    validatePath
+  );
   return { mtimeMs: (await stat(file)).mtimeMs };
 }
 
@@ -401,15 +639,15 @@ export class ProjectTextBatchWriteError extends Error {
     result: ProjectTextBatchFailure,
     rollbackFailures: readonly ProjectTextRollbackFailure[]
   ) {
-    const failures = rollbackFailures.map(({ relPath, cause: failure }) =>
-      `${JSON.stringify(relPath)} (${writeFailureMessage(failure)})`
+    const failures = rollbackFailures.map(
+      ({ relPath, cause: failure }) => `${JSON.stringify(relPath)} (${writeFailureMessage(failure)})`
     );
     const recovery = failures.length
       ? `Rollback incomplete. Not restored: ${failures.join('; ')}. Inspect these files before retrying.`
       : 'All committed files were restored.';
     super(
       `Workspace edit failed at ${JSON.stringify(result.failedPath)}: ${writeFailureMessage(cause)}. ` +
-      `Committed: ${JSON.stringify(result.committedPaths)}. Restored: ${JSON.stringify(result.restoredPaths)}. ${recovery}`,
+        `Committed: ${JSON.stringify(result.committedPaths)}. Restored: ${JSON.stringify(result.restoredPaths)}. ${recovery}`,
       { cause }
     );
     this.name = 'ProjectTextBatchWriteError';
@@ -439,150 +677,227 @@ export async function writeProjectTextFilesIn(
   if (new Set(normalized.map((write) => write.relPath.toLocaleLowerCase())).size !== normalized.length) {
     throw new TypeError('Workspace edit contains duplicate files.');
   }
-  return mutateProjectEntries(root, normalized.map((write) => write.relPath), async () => {
-    const rootPath = realpathSync(root);
-    const rootIdentity = recoveryDataPath ? recoveryIdentity(root) : undefined;
-    const validateRoot = () => {
-      if (rootIdentity && (realpathSync(root) !== rootPath || !sameRecoveryIdentity(recoveryIdentity(root), rootIdentity))) {
-        throw new Error('Project root changed during recovery preparation.');
-      }
-    };
-    // Resolve every destination before asynchronous preflight reads.
-    const destinations = new Map(normalized.map(({ relPath }) =>
-      [relPath, replacementDestination(projectEntryPathIn(root, relPath))]
-    ));
-    const parents = recoveryDataPath
-      ? new Map([...destinations].map(([rel, destination]) => [rel, recoveryIdentity(dirname(destination))])) : null;
-    const prepared: RecoveryPreparedFile[] = [];
-    let recoveryBytes = 0;
-    for (const write of normalized) {
-      if (
-        !write.relPath ||
-        typeof write.content !== 'string' ||
-        typeof write.expectedContent !== 'string' ||
-        write.content.length > 4_194_304 ||
-        write.expectedContent.length > 4_194_304
-      ) {
-        throw new TypeError('Workspace edit file content is invalid.');
-      }
-      if (toUSVString(write.content) !== write.content) {
-        throw new TypeError('File content contains unpaired Unicode surrogates.');
-      }
-      const file = projectEntryPathIn(root, write.relPath);
-      const before = recoveryDataPath
-        ? await recoveryReadBytes(file, RECOVERY_MAX_BYTES - recoveryBytes).catch((error) => {
-            if (error instanceof RecoveryReadLimitError)
-              throw new ProjectRecoveryError('RECOVERY_BATCH_LIMIT', 'Workspace edit exceeds the 16 MiB recovery budget. Split the edit.', { cause: error });
-            throw error;
-          })
-        : await readFile(file);
-      const current = decodeProjectText(before);
-      requireLosslessText(current);
-      if (current.binary || current.content !== write.expectedContent) {
-        throw new Error(`File changed on disk: ${write.relPath}`);
-      }
-      if (recoveryDataPath) {
-        validateRoot();
-        const destination = destinations.get(write.relPath)!;
-        if (replacementDestination(file) !== destination) throw new Error('Project path changed during recovery preparation.');
-        const parent = parents!.get(write.relPath)!;
-        if (!sameRecoveryIdentity(recoveryIdentity(dirname(destination)), parent)) {
-          throw new Error('Project directory changed during recovery preparation.');
+  return mutateProjectEntries(
+    root,
+    normalized.map((write) => write.relPath),
+    async () => {
+      const rootPath = realpathSync(root);
+      const rootIdentity = recoveryDataPath ? recoveryIdentity(root) : undefined;
+      const validateRoot = () => {
+        if (
+          rootIdentity &&
+          (realpathSync(root) !== rootPath || !sameRecoveryIdentity(recoveryIdentity(root), rootIdentity))
+        ) {
+          throw new Error('Project root changed during recovery preparation.');
         }
-        const after = encodeProjectText(write.content, current.encoding, current.hasBom);
-        recoveryBytes += before.length + after.length;
-        if (recoveryBytes > RECOVERY_MAX_BYTES) throw new ProjectRecoveryError('RECOVERY_BATCH_LIMIT', 'Workspace edit exceeds the 16 MiB recovery budget. Split the edit.');
-        const info = await lstat(file);
-        if (!info.isFile() || info.isSymbolicLink()) throw new Error('Journaled workspace edits require regular files.');
-        prepared.push({ relPath: write.relPath, destination, parent, mode: info.mode, before, after });
-      }
-    }
-    validateRoot();
-    const journal = recoveryDataPath ? await beginProjectRecovery(recoveryDataPath, root, prepared) : undefined;
-    const committed: Array<ProjectFileReplacement & { relPath: string }> = [];
-    const restored = new Set<string>();
-    let failedPath = '';
-    let failed = false;
-    let failure: unknown;
-    try {
-      validateRoot();
-      for (let index = 0; index < normalized.length; index++) {
-        const write = normalized[index];
-        const entry = prepared[index];
-        const validatePreparedTarget = entry ? () => {
+      };
+      // Resolve every destination before asynchronous preflight reads.
+      const destinations = new Map(
+        normalized.map(({ relPath }) => [relPath, replacementDestination(projectEntryPathIn(root, relPath))])
+      );
+      const parents = recoveryDataPath
+        ? new Map([...destinations].map(([rel, destination]) => [rel, recoveryIdentity(dirname(destination))]))
+        : null;
+      const prepared: RecoveryPreparedFile[] = [];
+      let recoveryBytes = 0;
+      for (const write of normalized) {
+        if (
+          !write.relPath ||
+          typeof write.content !== 'string' ||
+          typeof write.expectedContent !== 'string' ||
+          write.content.length > 4_194_304 ||
+          write.expectedContent.length > 4_194_304
+        ) {
+          throw new TypeError('Workspace edit file content is invalid.');
+        }
+        if (toUSVString(write.content) !== write.content) {
+          throw new TypeError('File content contains unpaired Unicode surrogates.');
+        }
+        const file = projectEntryPathIn(root, write.relPath);
+        const before = recoveryDataPath
+          ? await recoveryReadBytes(file, RECOVERY_MAX_BYTES - recoveryBytes).catch((error) => {
+              if (error instanceof RecoveryReadLimitError)
+                throw new ProjectRecoveryError(
+                  'RECOVERY_BATCH_LIMIT',
+                  'Workspace edit exceeds the 16 MiB recovery budget. Split the edit.',
+                  { cause: error }
+                );
+              throw error;
+            })
+          : await readFile(file);
+        const current = decodeProjectText(before);
+        requireLosslessText(current);
+        if (current.binary || current.content !== write.expectedContent) {
+          throw new Error(`File changed on disk: ${write.relPath}`);
+        }
+        if (recoveryDataPath) {
           validateRoot();
-          if (!sameRecoveryIdentity(recoveryIdentity(dirname(entry.destination)), entry.parent)) {
-            throw new Error('Project directory changed after recovery preparation.');
+          const destination = destinations.get(write.relPath)!;
+          if (replacementDestination(file) !== destination)
+            throw new Error('Project path changed during recovery preparation.');
+          const parent = parents!.get(write.relPath)!;
+          if (!sameRecoveryIdentity(recoveryIdentity(dirname(destination)), parent)) {
+            throw new Error('Project directory changed during recovery preparation.');
           }
-        } : undefined;
-        failedPath = write.relPath;
-        await writeProjectTextFileUnlocked(
-          root, write.relPath, write.content, write.expectedContent, undefined,
-          (replacement) => { committed.push({ ...replacement, relPath: write.relPath }); },
-          destinations.get(write.relPath), entry?.before, validatePreparedTarget
-        );
-      }
-    } catch (error) {
-      failed = true;
-      failure = error;
-      // Preserve the original pre-commit error when no swap occurred.
-      if (committed.length) {
-        const rollbackFailures: ProjectTextRollbackFailure[] = [];
-        for (const replacement of [...committed].reverse()) {
-          try {
-            const file = projectEntryPathIn(root, replacement.relPath);
-            const preparedEntry = prepared.find((entry) => entry.relPath === replacement.relPath);
-            const validatePath = () => {
-              validateRoot();
-              if (preparedEntry && !sameRecoveryIdentity(recoveryIdentity(dirname(preparedEntry.destination)), preparedEntry.parent)) {
-                throw new Error('Project directory changed before rollback.');
-              }
-              projectEntryPathIn(root, replacement.relPath);
-              if (replacementDestination(file) !== replacement.destination) {
-                throw new Error('Project path changed before rollback.');
-              }
-            };
-            let mode = replacement.mode;
-            try { mode = (await stat(file)).mode; } catch { /* Metadata is advisory during recovery. */ }
-            await replaceProjectFileBytes(file, replacement.before, replacement.after, mode,
-              () => { restored.add(replacement.relPath); }, validatePath);
-          } catch (cause) {
-            rollbackFailures.push({ relPath: replacement.relPath, cause });
-          }
+          const after = encodeProjectText(write.content, current.encoding, current.hasBom);
+          recoveryBytes += before.length + after.length;
+          if (recoveryBytes > RECOVERY_MAX_BYTES)
+            throw new ProjectRecoveryError(
+              'RECOVERY_BATCH_LIMIT',
+              'Workspace edit exceeds the 16 MiB recovery budget. Split the edit.'
+            );
+          const info = await lstat(file);
+          if (!info.isFile() || info.isSymbolicLink())
+            throw new Error('Journaled workspace edits require regular files.');
+          prepared.push({ relPath: write.relPath, destination, parent, mode: info.mode, before, after });
         }
-        const committedPaths = committed.map(({ relPath }) => relPath);
-        failure = new ProjectTextBatchWriteError(error, {
-          failedPath, committedPaths,
-          restoredPaths: committedPaths.filter((path) => restored.has(path)),
-          unrestoredPaths: committedPaths.filter((path) => !restored.has(path)),
-        }, rollbackFailures);
       }
-    }
-    if (journal) {
-      const journalErrors: unknown[] = [];
+      validateRoot();
+      const journal = recoveryDataPath ? await beginProjectRecovery(recoveryDataPath, root, prepared) : undefined;
+      const committed: Array<ProjectFileReplacement & { relPath: string }> = [];
+      const restored = new Set<string>();
+      let failedPath = '';
+      let failed = false;
+      let failure: unknown;
       try {
-        await writeRecoveryState(journal.directory, {
-          phase: failed ? 'failed' : 'complete', message: failed ? writeFailureMessage(failure) : '', restored: [...restored],
-        });
-        if (!failed) {
-          journal.directory = await retireRecoveryDirectory(journal.directory);
-          try { await removeRecoveryDirectory(journal.directory); } catch { /* Retired, never restorable. */ }
+        validateRoot();
+        for (let index = 0; index < normalized.length; index++) {
+          const write = normalized[index];
+          const entry = prepared[index];
+          const validatePreparedTarget = entry
+            ? () => {
+                validateRoot();
+                if (!sameRecoveryIdentity(recoveryIdentity(dirname(entry.destination)), entry.parent)) {
+                  throw new Error('Project directory changed after recovery preparation.');
+                }
+              }
+            : undefined;
+          failedPath = write.relPath;
+          await writeProjectTextFileUnlocked(
+            root,
+            write.relPath,
+            write.content,
+            write.expectedContent,
+            undefined,
+            (replacement) => {
+              committed.push({ ...replacement, relPath: write.relPath });
+            },
+            destinations.get(write.relPath),
+            entry?.before,
+            validatePreparedTarget
+          );
         }
-      } catch (error) { journalErrors.push(error); }
-      try { await releaseRecoveryDirectory(journal.directory); } catch (error) { journalErrors.push(error); }
-      if (journalErrors.length) {
-        throw new AggregateError(failed ? [failure, ...journalErrors] : journalErrors,
-          (failed ? 'Workspace edit failed; recovery bookkeeping also failed. Inspect retained recovery records.'
-            : 'Files were saved, but recovery bookkeeping failed. Inspect retained recovery records before retrying.') + `\n[file-recovery] ${journal.id}`);
+      } catch (error) {
+        failed = true;
+        failure = error;
+        // Preserve the original pre-commit error when no swap occurred.
+        if (committed.length) {
+          const rollbackFailures: ProjectTextRollbackFailure[] = [];
+          for (const replacement of [...committed].reverse()) {
+            try {
+              const file = projectEntryPathIn(root, replacement.relPath);
+              const preparedEntry = prepared.find((entry) => entry.relPath === replacement.relPath);
+              const validatePath = () => {
+                validateRoot();
+                if (
+                  preparedEntry &&
+                  !sameRecoveryIdentity(recoveryIdentity(dirname(preparedEntry.destination)), preparedEntry.parent)
+                ) {
+                  throw new Error('Project directory changed before rollback.');
+                }
+                projectEntryPathIn(root, replacement.relPath);
+                if (replacementDestination(file) !== replacement.destination) {
+                  throw new Error('Project path changed before rollback.');
+                }
+              };
+              let mode = replacement.mode;
+              try {
+                mode = (await stat(file)).mode;
+              } catch {
+                /* Metadata is advisory during recovery. */
+              }
+              await replaceProjectFileBytes(
+                file,
+                replacement.before,
+                replacement.after,
+                mode,
+                () => {
+                  restored.add(replacement.relPath);
+                },
+                validatePath
+              );
+            } catch (cause) {
+              rollbackFailures.push({ relPath: replacement.relPath, cause });
+            }
+          }
+          const committedPaths = committed.map(({ relPath }) => relPath);
+          failure = new ProjectTextBatchWriteError(
+            error,
+            {
+              failedPath,
+              committedPaths,
+              restoredPaths: committedPaths.filter((path) => restored.has(path)),
+              unrestoredPaths: committedPaths.filter((path) => !restored.has(path)),
+            },
+            rollbackFailures
+          );
+        }
       }
+      await settleRecoveryJournal(journal, failed, failure, restored);
     }
-    if (failed) {
-      if (journal && failure instanceof Error) failure.message += `\n[file-recovery] ${journal.id}`;
-      throw failure;
-    }
-  });
+  );
 }
 
+/** Settles a batch's recovery record once its writes have run: a completed
+ *  batch retires it, a failed one keeps it, marked with what was restored.
+ *  Rethrows the batch's failure, tagged with the record's id. */
+async function settleRecoveryJournal(
+  journal: { id: string; directory: string } | undefined,
+  failed: boolean,
+  failure: unknown,
+  restored: ReadonlySet<string>
+): Promise<void> {
+  if (journal) {
+    const journalErrors: unknown[] = [];
+    try {
+      await writeRecoveryState(journal.directory, {
+        phase: failed ? 'failed' : 'complete',
+        message: failed ? writeFailureMessage(failure) : '',
+        restored: [...restored],
+      });
+      if (!failed) {
+        journal.directory = await retireRecoveryDirectory(journal.directory);
+        try {
+          await removeRecoveryDirectory(journal.directory);
+        } catch {
+          /* Retired, never restorable. */
+        }
+      }
+    } catch (error) {
+      journalErrors.push(error);
+    }
+    try {
+      await releaseRecoveryDirectory(journal.directory);
+    } catch (error) {
+      journalErrors.push(error);
+    }
+    if (journalErrors.length) {
+      throw new AggregateError(
+        failed ? [failure, ...journalErrors] : journalErrors,
+        (failed
+          ? 'Workspace edit failed; recovery bookkeeping also failed. Inspect retained recovery records.'
+          : 'Files were saved, but recovery bookkeeping failed. Inspect retained recovery records before retrying.') +
+          `\n[file-recovery] ${journal.id}`
+      );
+    }
+  }
+  if (failed) {
+    if (journal && failure instanceof Error) failure.message += `\n[file-recovery] ${journal.id}`;
+    throw failure;
+  }
+}
+
+// biome-ignore lint/suspicious/noControlCharactersInRegex: rejects C0 control characters (U+0000-U+001F) in file names on purpose.
 const INVALID_ENTRY_SEGMENT = /[:*?"<>|\u0000-\u001f]/;
 
 function explorerEntrySegments(name: string): string[] {
@@ -633,6 +948,7 @@ async function entryExists(path: string): Promise<boolean> {
  * external processes. Node's portable rename API has no no-replace flag. */
 export async function renameProjectEntryIn(root: string, relPath: string, newName: string): Promise<void> {
   const trimmed = String(newName || '').trim();
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: rejects C0 control characters (U+0000-U+001F) in file names on purpose.
   if (!trimmed || /[\\/:*?"<>|\u0000-\u001f]/.test(trimmed) || trimmed === '.' || trimmed === '..') {
     throw new TypeError('Entry name is invalid.');
   }
@@ -646,8 +962,10 @@ export async function renameProjectEntryIn(root: string, relPath: string, newNam
     if (from === destination) return;
     if (await entryExists(destination)) {
       const names = await readdir(dirname(from));
-      const caseOnly = basename(from).toLowerCase() === trimmed.toLowerCase()
-        && names.includes(basename(from)) && !names.includes(trimmed);
+      const caseOnly =
+        basename(from).toLowerCase() === trimmed.toLowerCase() &&
+        names.includes(basename(from)) &&
+        !names.includes(trimmed);
       if (!caseOnly) throw new Error('An entry with that name already exists in the target folder.');
     }
     await rename(from, destination);

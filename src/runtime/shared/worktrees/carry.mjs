@@ -48,8 +48,8 @@ import { operationInProgress } from './merge.mjs';
 const IDENTITY_PATH = '.mixdog/project.id';
 const RECOVERY_REF_PREFIX = 'refs/mixdog/carry/';
 /** Untracked files beyond these limits are refused rather than snapshotted. */
-export const CARRY_UNTRACKED_MAX_BYTES = 256 * 1024 * 1024;
-export const CARRY_UNTRACKED_MAX_FILES = 10_000;
+const CARRY_UNTRACKED_MAX_BYTES = 256 * 1024 * 1024;
+const CARRY_UNTRACKED_MAX_FILES = 10_000;
 const CHECK_ATTR_CHUNK = 200;
 // Recovery commits are Mixdog's own, independent of the user's identity config.
 const COMMIT_ENV = Object.freeze({
@@ -65,6 +65,8 @@ function identityPath(projectSubdir) {
 
 /** CE_INTENT_TO_ADD in an index entry's flags (`git add -N`). */
 const INTENT_TO_ADD_FLAG = 0x20000000;
+
+const PORCELAIN_LEAD_FIELDS = { 1: 8, 2: 9, u: 10 };
 
 /**
  * `git status --porcelain=v2 -z` rows: path, untracked, unmerged, submodule.
@@ -82,8 +84,8 @@ function parseStatusV2(raw) {
       continue;
     }
     // Leading fields before the path: 1 → 8, 2 → 9 (then the original path), u → 10.
-    const lead = kind === '1' ? 8 : kind === '2' ? 9 : kind === 'u' ? 10 : -1;
-    if (lead < 0) continue;
+    const lead = PORCELAIN_LEAD_FIELDS[kind];
+    if (lead === undefined) continue;
     const parts = field.split(' ');
     rows.push({
       path: parts.slice(lead).join(' '),

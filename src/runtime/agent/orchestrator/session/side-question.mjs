@@ -54,7 +54,7 @@ function sideQuestionPrompt(question) {
 function replyMessages(response) {
   if (!response) return [];
   const reply = response.toolCalls?.length
-    ? buildToolCallAssistantMessage(response, { calls: response.toolCalls, suppressMidTurnText: false, opts: {} })
+    ? buildToolCallAssistantMessage(response, { calls: response.toolCalls, opts: {} })
     : buildIntermediateAssistantMessage(response, {});
   if (!reply) return [];
   const stubs = collectAssistantToolCallIds(reply).map((id) => ({
@@ -165,12 +165,17 @@ export async function askSideQuestion(sessionId, question) {
     const { messages, opts } = buildSideQuestionRequest(request, text);
     let response;
     try {
-      response = await request.provider.send(messages, request.model, request.tools.length ? request.tools : undefined, {
-        ...opts,
-        transportScope,
-        admissionOwner: sessionId,
-        signal: run.signal,
-      });
+      response = await request.provider.send(
+        messages,
+        request.model,
+        request.tools.length ? request.tools : undefined,
+        {
+          ...opts,
+          transportScope,
+          admissionOwner: sessionId,
+          signal: run.signal,
+        }
+      );
     } catch (error) {
       throw run.signal.aborted ? run.signal.reason : error;
     }

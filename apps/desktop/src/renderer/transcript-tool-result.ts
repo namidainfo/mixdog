@@ -101,13 +101,26 @@ function readQuoted(text: string, at: number): [string, number] | null {
   }
 }
 
+const ASK_USER_REPLY_LEAD = 'User replied in chat: ';
+
+/** The composer message that answered the question (the runtime leads the
+ *  result with `User replied in chat: "<reply>". `) and the result after it. */
+export function askUserChatReply(result: string): { reply: string; rest: string } {
+  if (!result.startsWith(ASK_USER_REPLY_LEAD)) return { reply: '', rest: result };
+  const quoted = readQuoted(result, ASK_USER_REPLY_LEAD.length);
+  if (!quoted) return { reply: '', rest: result };
+  return { reply: quoted[0], rest: result.slice(quoted[1]).replace(/^\. /, '') };
+}
+
 /** The answers in an ask_user result, by question text: the picked labels (as
  *  the runtime joined them) and the typed text. Grammar per question:
  *  `"q"=(no answer)`, `"q"="picked"`, `"q"="typed" (typed)` or
  *  `"q"="picked" + "typed" (typed)`, joined by `; `. */
 export function askUserAnswers(result: string): Map<string, { picked: string; typed: string }> {
   const answers = new Map<string, { picked: string; typed: string }>();
-  if (!result.startsWith(ASK_USER_RESULT_PREFIX)) return answers;
+  const body = askUserChatReply(result).rest;
+  if (!body.startsWith(ASK_USER_RESULT_PREFIX)) return answers;
+  result = body;
   const TYPED = ' (typed)';
   let at = ASK_USER_RESULT_PREFIX.length;
   for (;;) {
@@ -141,7 +154,7 @@ export function askUserAnswers(result: string): Map<string, { picked: string; ty
 
 function toolActivityAnswer(result: unknown, question: Record<string, unknown>, index: number, total: number): string {
   const secret = question.is_secret === true || question.isSecret === true;
-  if (typeof result === 'string' && result.startsWith(ASK_USER_RESULT_PREFIX)) {
+  if (typeof result === 'string' && askUserChatReply(result).rest.startsWith(ASK_USER_RESULT_PREFIX)) {
     const answer = askUserAnswers(result).get(toolActivityFirstText(question, 'question'));
     return answer ? [answer.picked, answer.typed].filter(Boolean).join(', ') : '';
   }
@@ -547,8 +560,11 @@ function toolActivityFailureBody(body: string, error: string, failure: string): 
 /** `- job_… shell/shell running label=…` rows of a task list, one readable line each. */
 export function toolActivityLocalizeTaskList(text: string): string {
   if (!/^background tasks:\s*\d+/i.test(text.trim())) return text;
-  const surfaceLabel = (surface: string) =>
-    surface === 'shell' ? t('Commands') : surface === 'agent' ? t('Agent') : surface;
+  const surfaceLabel = (surface: string) => {
+    if (surface === 'shell') return t('Commands');
+    if (surface === 'agent') return t('Agent');
+    return surface;
+  };
   return text
     .split('\n')
     .map((line) => {
@@ -640,13 +656,15 @@ export function toolActivityBackgroundTask(
     error
   );
   const statusLabel = background ? TOOL_DETAIL_LABELS.background : result.statusLabel;
+  let failureHint = '';
+  if (result.failed) {
+    const shellLabel = !meta.get('surface') || meta.get('surface') === 'shell' ? meta.get('label') : '';
+    failureHint = shellLabel || toolActivityFailureLine(result, '');
+  }
   const body = toolActivityFailureBody(
     toolActivityDropEmptySections(toolActivityStripInstructions(lines.slice(index).join('\n'), false, waitResult)),
     error,
-    result.failed
-      ? (!meta.get('surface') || meta.get('surface') === 'shell' ? meta.get('label') : '') ||
-          toolActivityFailureLine(result, '')
-      : ''
+    failureHint
   );
   return {
     meta: toolActivityCompact([

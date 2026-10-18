@@ -70,7 +70,8 @@ export function answerSessionDiffSignal(sessionId: string, signal: string): void
   if (!id) return;
   answeredSignals.delete(id);
   answeredSignals.set(id, signal);
-  while (answeredSignals.size > SESSION_DIFF_CACHE_LIMIT) answeredSignals.delete(answeredSignals.keys().next().value as string);
+  while (answeredSignals.size > SESSION_DIFF_CACHE_LIMIT)
+    answeredSignals.delete(answeredSignals.keys().next().value as string);
 }
 
 /** Same diff content, compared without re-serialising the (large) patch. */
@@ -140,8 +141,13 @@ export function releaseSessionDiff(sessionId: string): void {
 }
 
 /** One round-trip per session at a time: concurrent callers share the same
- *  promise, and a settled result answers without one unless forced. */
-export function fetchSessionDiff(sessionId: string, options?: { force?: boolean }): Promise<SessionDiffResult> {
+ *  promise, and a settled result answers without one unless forced. A forced
+ *  `join` read (a periodic re-check, not a change signal) is answered by a
+ *  read already running instead of queueing another full read behind it. */
+export function fetchSessionDiff(
+  sessionId: string,
+  options?: { force?: boolean; join?: boolean }
+): Promise<SessionDiffResult> {
   adoptHost();
   const id = cleanSessionId(sessionId);
   if (!id) return Promise.resolve(emptySessionDiff());
@@ -149,7 +155,7 @@ export function fetchSessionDiff(sessionId: string, options?: { force?: boolean 
   const flight = pendingDiffs.get(id);
   if (flight) {
     // A change signal during a running read queues exactly one follow-up.
-    if (force) flight.queuedDirty = true;
+    if (force && options?.join !== true) flight.queuedDirty = true;
     return flight.inflight;
   }
   const result = sessionDiffCache.get(id);

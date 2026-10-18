@@ -9,10 +9,7 @@ import {
 } from '../runtime/agent/orchestrator/runtime-core/builtin-features.mjs';
 import { featureEnvOverride, moduleEnabled } from '../runtime/agent/orchestrator/runtime-core/config-helpers.mjs';
 import { LOCAL_PROVIDER_ID } from '../runtime/local-provider/managed-runtime.mjs';
-import {
-  INSTRUCTION_FILES_MODES,
-  normalizeInstructionFilesMode,
-} from '../runtime/shared/instruction-files-mode.mjs';
+import { INSTRUCTION_FILES_MODES, normalizeInstructionFilesMode } from '../runtime/shared/instruction-files-mode.mjs';
 import { getEmbeddingInfo } from '../runtime/memory/lib/embedding-provider.mjs';
 import { onnxRuntimeSupported } from '../runtime/shared/onnx-runtime-support.mjs';
 import {
@@ -24,7 +21,7 @@ import {
   shutdownEffortJudge,
 } from '../runtime/effort-judge/judge-client.mjs';
 
-const TOGGLEABLE_BUILTINS = ['git', 'office', 'tidy', 'localProvider', 'autoEffort', 'visualize'];
+const TOGGLEABLE_BUILTINS = ['git', 'office', 'tidy', 'localProvider', 'autoEffort', 'visualize', 'media'];
 
 function setLocalProviderEnabledInConfig(configLike, enabled) {
   const next = { ...(configLike || {}) };
@@ -113,6 +110,12 @@ export function createBuiltinToolSettings(
           enabled: featureEnvOverride('MIXDOG_FEATURE_VISUALIZE') ?? moduleEnabled(config, 'visualize', true),
           installed: true,
         },
+        // Image and video generation ships with the runtime and is on unless
+        // switched off; the image/video skills follow it (`requires: media`).
+        media: {
+          enabled: featureEnvOverride('MIXDOG_FEATURE_MEDIA') ?? moduleEnabled(config, 'media', true),
+          installed: true,
+        },
         localProvider: {
           ...localProvider,
           ...localSettings.status(),
@@ -168,7 +171,7 @@ export function createBuiltinToolSettings(
     },
     async setBuiltinToolEnabled(name, enabled) {
       if (!TOGGLEABLE_BUILTINS.includes(name)) {
-        throw new TypeError('Built-in tool must be git, office, tidy, localProvider, autoEffort, or visualize.');
+        throw new TypeError('Built-in tool must be git, office, tidy, localProvider, autoEffort, visualize, or media.');
       }
       if (name === 'autoEffort' && enabled !== false && !onnxRuntimeSupported()) {
         throw new Error(EFFORT_JUDGE_UNSUPPORTED);

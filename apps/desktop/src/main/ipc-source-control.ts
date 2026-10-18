@@ -24,6 +24,7 @@ import {
   requiredGitPatch,
   requiredGitPath,
   requiredGitPaths,
+  requiredGitRequestContextInput,
   requiredReviewDiffFiles,
   requiredString,
   optionalGithubLoginOptions,
@@ -97,7 +98,8 @@ function registerGitToolingIpc({ handle, operations }: SourceControlRegistration
   handle(DESKTOP_IPC.installGitCli, () => installGitCli());
   handle(DESKTOP_IPC.githubCliStatus, () => githubCliStatus());
   handle(DESKTOP_IPC.installGithubCli, () => installGithubCli());
-  handle(DESKTOP_IPC.githubCliLoginStart, () => githubCliLoginStart());  handle(DESKTOP_IPC.githubCliLoginStatus, (_event, flowId) =>
+  handle(DESKTOP_IPC.githubCliLoginStart, () => githubCliLoginStart());
+  handle(DESKTOP_IPC.githubCliLoginStatus, (_event, flowId) =>
     githubCliLoginStatus(requiredString(flowId, 'flowId', 200))
   );
   handle(DESKTOP_IPC.githubCliLoginOpenBrowser, (_event, flowId, options) =>
@@ -270,6 +272,9 @@ function registerRepositoryHistoryIpc({ handle, operations }: SourceControlRegis
   handle(DESKTOP_IPC.gitShow, (_event, cwd, hash) => gitShow(requiredRepositoryCwd(cwd), requiredCommitHash(hash)));
   handle(DESKTOP_IPC.gitShowDiff, (_event, cwd, hash, path) =>
     gitShowDiff(requiredRepositoryCwd(cwd), requiredCommitHash(hash), requiredGitPath(path))
+  );
+  handle(DESKTOP_IPC.gitRequestContext, (_event, cwd, input) =>
+    operations.gitRequestContext(requiredRepositoryCwd(cwd), requiredGitRequestContextInput(input))
   );
   handle(DESKTOP_IPC.gitShowFile, (_event, cwd, rev, path) =>
     gitShowFile(requiredRepositoryCwd(cwd), requiredGitRevision(rev), requiredGitPath(path))

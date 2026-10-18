@@ -95,6 +95,7 @@ interface DesktopServiceAdapter {
   readonly clientCount: number;
   invoke(method: string, args: unknown[]): Promise<unknown>;
   control(message: unknown): Promise<void>;
+  releaseClient(epoch: number): Promise<void>;
   dispose(reason?: string): Promise<void>;
 }
 
@@ -264,8 +265,13 @@ export async function createDesktopService({
     withRecoveryStore: async (root, action, run) => {
       const worktrees = await runtime.loadWorktrees?.();
       if (worktrees?.withWorktreeRecoveryStore)
-        return worktrees.withWorktreeRecoveryStore(root, projectRecoveryStorePath(options.userDataPath, root), action, run);
-      if (worktrees && await (worktrees.findWorktreeContaining ?? worktrees.getWorktreeByPath)(root))
+        return worktrees.withWorktreeRecoveryStore(
+          root,
+          projectRecoveryStorePath(options.userDataPath, root),
+          action,
+          run
+        );
+      if (worktrees && (await (worktrees.findWorktreeContaining ?? worktrees.getWorktreeByPath)(root)))
         throw new Error('Worktree file recovery protection is unavailable. Update the host before editing.');
       return run();
     },
@@ -414,8 +420,9 @@ export async function createDesktopService({
     },
     // The window process owns the approval dialog, so the decision travels
     // out as an event and comes back as remoteAccessResolveClaim. An
-    // unanswered request expires on its own — the relay drops it at 180s.
+    // unanswered request expires on its own — the relay drops it at 300s.
     onClientClaim: (claim: RemoteClientClaim): Promise<RemoteClaimDecision> => claims.claim(claim),
+    onClaimConflict: (claimId: string): void => void claims.resolve(claimId, false),
   };
   const RELAY_RETRY_BASE_MS = 5_000;
   const RELAY_RETRY_MAX_MS = 5 * 60_000;
@@ -653,6 +660,9 @@ export async function createDesktopService({
     async control(value): Promise<void> {
       if (!value || typeof value !== 'object') return;
       await stateSync.control(value as DesktopServiceInbound);
+    },
+    releaseClient(epoch): Promise<void> {
+      return stateSync.releaseClient(epoch);
     },
     async dispose(): Promise<void> {
       unregisterTerminalReleaser();

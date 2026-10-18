@@ -156,6 +156,17 @@ const ROUTE_SCHEMA = {
   },
 };
 
+ROUTE_SCHEMA.properties.fallbacks = {
+  type: 'array',
+  description: 'Agent and Web Search routes only: ordered fallback models; [] clears the list.',
+  items: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['provider', 'model'],
+    properties: Object.fromEntries(Object.entries(ROUTE_SCHEMA.properties).filter(([key]) => key !== 'disabled')),
+  },
+};
+
 export const SETUP_TOOL_DEFS = Object.freeze([
   {
     name: 'setup',
@@ -272,7 +283,8 @@ export const SETUP_TOOL_DEFS = Object.freeze([
               properties: { id: { type: 'string' }, label: { type: 'string', maxLength: 80 } },
             },
           },
-          description: 'set_provider_account: OAuth account change; account ids from status providers with detail:true.',
+          description:
+            'set_provider_account: OAuth account change; account ids from status providers with detail:true.',
         },
         modelId: {
           type: 'string',

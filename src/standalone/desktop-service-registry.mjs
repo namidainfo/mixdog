@@ -172,6 +172,8 @@ export class DesktopServiceRegistry {
         instance,
         subscribers: new Set(),
         receivers: new Set(),
+        visibilityEpochs: new Map(),
+        nextVisibilityEpoch: 0,
       };
       this.#servicesById.set(requestedId, record);
       this.#servicesByModule.set(requestedModule, record);
@@ -194,7 +196,14 @@ export class DesktopServiceRegistry {
     const service = await this.#initialize(params);
     if (this.#closed) throw new Error('session service is closed');
     const token = subscriberToken(ctx);
-    if (token) service.subscribers.add(token);
+    if (token) {
+      service.subscribers.add(token);
+      // The adapter outlives desktop processes, whose request counters restart.
+      // Allocate the ordering namespace here, not from a client's wall clock.
+      if (!service.visibilityEpochs.has(token)) {
+        service.visibilityEpochs.set(token, ++service.nextVisibilityEpoch);
+      }
+    }
     this.#syncModelProxyPresence();
     return { desktopId: service.desktopId };
   }
@@ -225,14 +234,23 @@ export class DesktopServiceRegistry {
     if (method === 'invokeDesktopOperation' && args?.[0] === 'sessionOpenHandled') {
       return this.#acknowledgeSessionOpen(desktopId, subscriberToken(ctx), args[1]?.[0]);
     }
-    const { service } = this.#requireSubscribed(desktopId, ctx);
+    const { service, token } = this.#requireSubscribed(desktopId, ctx);
     const name = String(method || '');
     if (!name) throw new TypeError('desktop service method is required');
+    let callArgs = Array.isArray(args) ? args : [];
+    if (name === 'setVisibleSessions' && token) {
+      const epoch = service.visibilityEpochs.get(token);
+      if (epoch === undefined) {
+        service.subscribers.delete(token);
+        throw new Error('desktop service client is not initialized');
+      }
+      callArgs = [callArgs[0], callArgs[1], epoch];
+    }
     // `[slow-op] desktop.invoke` names the call it timed: a desktop operation
     // (Git reads) or a session capability, not only the generic route.
     const target = name === 'invokeDesktopOperation' || name === 'invokeCapability' ? String(args?.[0] || '') : '';
     annotateSpan(target ? `${name}:${target}` : name);
-    return sanitizeForWire(await service.instance.invoke(name, Array.isArray(args) ? args : [])) ?? null;
+    return sanitizeForWire(await service.instance.invoke(name, callArgs)) ?? null;
   }
 
   async control({ desktopId, message } = {}, ctx = null) {
@@ -254,7 +272,7 @@ export class DesktopServiceRegistry {
     const token = subscriberToken(ctx);
     this.#disconnectSessionOpens(service.desktopId, token);
     service.receivers.delete(token);
-    if (token) service.subscribers.delete(token);
+    if (token) await this.#releaseSubscriber(service, token);
     this.#syncModelProxyPresence();
     return { ok: true, unsubscribed: true };
   }
@@ -265,9 +283,18 @@ export class DesktopServiceRegistry {
     for (const service of this.#servicesById.values()) {
       this.#disconnectSessionOpens(service.desktopId, token);
       service.receivers.delete(token);
-      service.subscribers.delete(token);
+      void this.#releaseSubscriber(service, token).catch((error) => {
+        this.#log(`desktop visibility release failed: ${error?.message || error}`);
+      });
     }
     this.#syncModelProxyPresence();
+  }
+
+  async #releaseSubscriber(service, token) {
+    service.subscribers.delete(token);
+    const epoch = service.visibilityEpochs.get(token);
+    service.visibilityEpochs.delete(token);
+    if (epoch !== undefined) await service.instance.releaseClient?.(epoch);
   }
 
   notifySessionRuntimeReleased(sessionId, reason) {

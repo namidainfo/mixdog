@@ -16,6 +16,7 @@ function agentOwnedSessionFields(sessionProfile) {
     visibility: 'agent-only',
     agentTag: sessionProfile?.agentTag || null,
     taskType: sessionProfile?.taskType || null,
+    ...(sessionProfile?.routeFallbacks !== undefined ? { routeFallbacks: sessionProfile.routeFallbacks } : {}),
     permission: sessionProfile?.permission || undefined,
     permissionMode: sessionProfile?.permissionMode || undefined,
     schemaAllowedTools: Array.isArray(sessionProfile?.schemaAllowedTools)
@@ -38,6 +39,10 @@ export function sessionOptions(deps, coreMemoryContext) {
   const agentOwned = sessionProfile?.owner === 'agent' || sessionProfile?.visibility === 'agent-only';
   // Agent-owned sessions keep the Active Workflow block only.
   const workflowContext = agentOwned ? packContext : leadWorkflowContext;
+  const callerDisallowedTools = [
+    ...(agentOwned ? [] : LEAD_DISALLOWED_TOOLS),
+    ...(!agentOwned && rt.disallowDelegation ? ['agent'] : []),
+  ];
   const sessionOpts = {
     ...(rt.reservedSessionId ? { id: rt.reservedSessionId } : {}),
     ...(rt.reservedSessionId && rt.reservedSessionTitle ? { titleReservation: rt.reservedSessionTitle } : {}),
@@ -60,11 +65,8 @@ export function sessionOptions(deps, coreMemoryContext) {
     ...(rt.approvalMode ? { approvalMode: rt.approvalMode } : {}),
     clientHostPid: sessionProfile?.clientHostPid || process.pid,
     mcpScopeId: rt.mcpScopeId,
-    disallowedTools: [
-      ...(agentOwned ? [] : LEAD_DISALLOWED_TOOLS),
-      ...(!agentOwned && rt.disallowDelegation ? ['agent'] : []),
-      ...featureDisallowedTools(),
-    ],
+    callerDisallowedTools,
+    disallowedTools: [...callerDisallowedTools, ...featureDisallowedTools()],
     cwd: rt.currentCwd,
     ...(rt.desktopSession && typeof rt.desktopSession === 'object' ? { desktopSession: rt.desktopSession } : {}),
     coreMemoryContext,

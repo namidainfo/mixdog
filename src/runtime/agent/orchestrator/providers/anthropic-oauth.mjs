@@ -90,8 +90,7 @@ const _oauthRefreshes = new Map();
 // Anthropic OAuth contract for first-party OAuth clients: Claude requests
 // are gated on this exact system-prompt prefix (Haiku 5.5 included).
 const CLAUDE_CODE_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude.";
-const OAUTH_BETA_HEADERS =
-  'oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,extended-cache-ttl-2025-04-11';
+const OAUTH_BETA_HEADERS = 'oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27';
 
 function logQuiet(line) {
   if (!process.env.MIXDOG_QUIET_PROVIDER_LOG) process.stderr.write(`[anthropic-oauth] ${line}\n`);
@@ -676,9 +675,7 @@ export class AnthropicOAuthProvider {
       response.status === 400 &&
       opts.fast === true &&
       !opts._fastModeRetry &&
-      fastModeDowngraded(
-        noteFastModeCapacityError({ httpStatus: 400, message: scrubbedText }, { fast: true })
-      )
+      fastModeDowngraded(noteFastModeCapacityError({ httpStatus: 400, message: scrubbedText }, { fast: true }))
     ) {
       process.stderr.write(`[anthropic-oauth] fast mode is not enabled for this account; retrying at standard speed\n`);
       return this.send(messages, useModel, tools, { ...opts, _fastModeRetry: true });

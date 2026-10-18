@@ -36,6 +36,7 @@ export function createInternalToolExecutor({
   getWorkspaceApi,
   getSessionManager,
   getLifecycleApi,
+  executeSessionControl,
 }) {
   const handlers = {
     request_user_input: (args, { callerCtx }) => executeUserQuestion(args, callerCtx),
@@ -61,6 +62,7 @@ export function createInternalToolExecutor({
       getWorkspaceApi,
       getSessionManager,
       getLifecycleApi,
+      executeSessionControl,
     }),
   };
 

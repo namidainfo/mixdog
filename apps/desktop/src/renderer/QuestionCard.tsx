@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MutableRefObject,
+} from 'react';
 import { ErrorNotice } from './ErrorNotice';
 import { t } from './i18n';
 import {
@@ -8,6 +15,7 @@ import {
   primaryAction,
   type Question,
   type QuestionAction,
+  type QuestionDraft,
   type QuestionAnswer,
   questionReducer,
   type QuestionState,
@@ -39,7 +47,7 @@ function ownsKeyboard(card: HTMLElement): boolean {
 // An IME commit arrives as keyCode 229 even after isComposing has cleared.
 const isImeKey = (event: globalThis.KeyboardEvent): boolean => event.isComposing || event.keyCode === 229;
 
-const isTypingTarget =(target: EventTarget | null): boolean =>
+const isTypingTarget = (target: EventTarget | null): boolean =>
   target instanceof HTMLInputElement ||
   target instanceof HTMLTextAreaElement ||
   (target instanceof HTMLElement && target.isContentEditable);
@@ -48,8 +56,11 @@ const isTypingTarget =(target: EventTarget | null): boolean =>
 export function QuestionCard({
   questions,
   resolve,
+  draftsRef,
 }: {
   questions: Question[];
+  /** Kept current with the card's drafts so the composer can send them along with a reply. */
+  draftsRef?: MutableRefObject<QuestionDraft[]>;
   /** true/false: recorded or refused (another device answered first; the card
    *  stays disabled until the approval leaves the snapshot). */
   resolve: (decision: QuestionDecision) => Promise<unknown>;
@@ -58,10 +69,15 @@ export function QuestionCard({
   // The ref is advanced with the same transition as the state, so a second
   // click or key before React re-renders still builds on the first one.
   const stateRef = useRef(state);
-  const apply = useCallback((action: QuestionAction) => {
-    stateRef.current = questionReducer(stateRef.current, action);
-    setState(stateRef.current);
-  }, []);
+  if (draftsRef) draftsRef.current = stateRef.current.drafts;
+  const apply = useCallback(
+    (action: QuestionAction) => {
+      stateRef.current = questionReducer(stateRef.current, action);
+      if (draftsRef) draftsRef.current = stateRef.current.drafts;
+      setState(stateRef.current);
+    },
+    [draftsRef]
+  );
   const { drafts, index } = state;
   const [resolving, setResolving] = useState(false);
   const [error, setError] = useState('');
@@ -174,7 +190,8 @@ export function QuestionCard({
         handled();
         const active = rowRefs.current.findIndex((row) => row === document.activeElement);
         const step = event.key === 'ArrowDown' ? 1 : -1;
-        const next = active < 0 ? (step > 0 ? 0 : optionCount) : Math.min(optionCount, Math.max(0, active + step));
+        const entry = step > 0 ? 0 : optionCount;
+        const next = active < 0 ? entry : Math.min(optionCount, Math.max(0, active + step));
         rowRefs.current[next]?.focus();
       } else if (event.key === ' ' && multiSelect && !onButton) {
         const active = rowRefs.current.findIndex((row) => row === document.activeElement);
@@ -216,6 +233,21 @@ export function QuestionCard({
   };
 
   const typed = draft.text.trim().length > 0;
+  const primary = primaryAction(drafts, index);
+  const primaryLabel = {
+    skip: t('Skip'),
+    next: t('Next'),
+    send: t('Send'),
+    close: t('Close'),
+  }[primary];
+  const meta = [total > 1 ? `${index + 1}/${total}` : '', multi ? t('Multiple') : ''].filter(Boolean).join(' · ');
+  const hint = [
+    draft.selected.length > 0 ? t('{{count}} selected', { count: draft.selected.length }) : '',
+    `Enter ${primaryLabel}`,
+    index > 0 ? `← ${t('Previous question')}` : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
 
   return (
     // biome-ignore lint/a11y/useSemanticElements: an <article> must keep its tag; role="group" names the question region
@@ -223,14 +255,28 @@ export function QuestionCard({
       ref={cardRef}
       tabIndex={-1}
       className="question-card"
-      role="group" aria-label={t('Agent question')} data-multi={multi || undefined}>
+      role="group"
+      aria-label={t('Agent question')}
+      data-multi={multi || undefined}
+    >
       <div className="question-head">
-        <div className="question-text">{question.question}</div>
-        {total > 1 && <small className="question-step">{index + 1}/{total}</small>}
-        <button type="button" className="question-close" aria-label={t('Close question')} onClick={() => void close()}>
+        <span className="question-icon" aria-hidden="true">
+          ?
+        </span>
+        <span className="question-title">
+          <strong>{question.header || t('Question')}</strong>
+          {meta && <span className="question-meta">{meta}</span>}
+        </span>
+        <button
+          type="button"
+          className="question-close"
+          aria-label={t('Close question')}
+          onClick={() => void close()}
+        >
           ✕
         </button>
       </div>
+      <div className="question-text">{question.question}</div>
       <div className="question-options" role={multi ? 'group' : 'radiogroup'} aria-label={t('Options')}>
         {question.options.map((option, i) => {
           const on = draft.selected.includes(i);
@@ -249,7 +295,9 @@ export function QuestionCard({
               disabled={resolving}
               onClick={() => choose(i)}
             >
-              <span className="question-key">{i + 1}</span>
+              <span className="question-box" data-kind={multi ? 'check' : 'radio'} aria-hidden="true">
+                {multi && on ? '✓' : ''}
+              </span>
               <span className="question-option-text">
                 <span className="question-option-label">
                   {option.label}
@@ -257,38 +305,63 @@ export function QuestionCard({
                 </span>
                 {option.description && <span className="question-option-desc">{option.description}</span>}
               </span>
+              {i < 9 && <span className="question-key">{i + 1}</span>}
             </button>
           );
         })}
       </div>
       <label className="question-other" data-typed={typed || undefined}>
-          <input
-            ref={(node) => {
-              inputRef.current = node;
-              rowRefs.current[question.options.length] = node;
-            }}
-            type="text"
-            value={draft.text}
-            maxLength={4000}
-            disabled={resolving}
-            placeholder={t('Type your own answer')}
-            aria-label={t('Type your own answer')}
-            autoComplete="off"
-            spellCheck={false}
-            onChange={(event) => apply({ type: 'text', value: event.target.value })}
-            onCompositionStart={() => {
-              composingRef.current = true;
-            }}
-            onCompositionEnd={() => {
-              composingRef.current = false;
-            }}
-            onBlur={() => {
-              composingRef.current = false;
-            }}
-            onKeyDown={moveFromInput}
-          />
+        <input
+          ref={(node) => {
+            inputRef.current = node;
+            rowRefs.current[question.options.length] = node;
+          }}
+          type="text"
+          value={draft.text}
+          maxLength={4000}
+          disabled={resolving}
+          placeholder={t('Type your own answer')}
+          aria-label={t('Type your own answer')}
+          autoComplete="off"
+          spellCheck={false}
+          onChange={(event) => apply({ type: 'text', value: event.target.value })}
+          onCompositionStart={() => {
+            composingRef.current = true;
+          }}
+          onCompositionEnd={() => {
+            composingRef.current = false;
+          }}
+          onBlur={() => {
+            composingRef.current = false;
+          }}
+          onKeyDown={moveFromInput}
+        />
       </label>
       {error && <ErrorNotice error={error} />}
+      <div className="question-foot">
+        <span className="question-hint">{hint}</span>
+        {index > 0 && (
+          <button
+            type="button"
+            className="turn-changes-action question-btn"
+            data-action="previous"
+            disabled={resolving}
+            onClick={() => apply({ type: 'step', delta: -1 })}
+          >
+            {t('Previous')}
+          </button>
+        )}
+        <button
+          type="button"
+          className={`${primary === 'send' || primary === 'next' ? 'turn-changes-view' : 'turn-changes-action'} question-btn`}
+          data-primary
+          data-action={primary}
+          disabled={resolving}
+          onClick={advance}
+        >
+          {primaryLabel}
+        </button>
+      </div>
     </article>
   );
 }

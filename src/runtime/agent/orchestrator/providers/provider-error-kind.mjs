@@ -517,7 +517,10 @@ const IN_FLIGHT_BUDGET_MAX_WAIT_MS = 60_000;
 function inFlightAdviceMs(err) {
   const advised = retryAfterMsFromError(err);
   if (advised != null) return advised;
-  for (const [name, unitMs] of [['retry-after-ms', 1], ['retry-after', 1000]]) {
+  for (const [name, unitMs] of [
+    ['retry-after-ms', 1],
+    ['retry-after', 1000],
+  ]) {
     const value = errorHeaderValue(err, name);
     const n = Number(value);
     if (value != null && String(value).trim() !== '' && Number.isFinite(n) && n >= 0) return n * unitMs;
@@ -650,7 +653,6 @@ export function providerErrorKind(err, options = {}) {
   // Validated account-pool evidence and boundary-stamped re-auth decide first.
   if (err.quotaExhausted && typeof err.quotaExhausted === 'object') return describe('quota_exhausted');
   if (chain.some((item) => item?.reauthRequired === true)) return describe('auth');
-
   if (isInFlightBudget402(chain, status, inFlightAdviceMs(err))) return describe('transient', IN_FLIGHT_BUDGET);
   // Every other 402 is a billing refusal, whatever generic retryable code
   // (server_error, rate_limit_exceeded) its body also carries.
@@ -661,8 +663,7 @@ export function providerErrorKind(err, options = {}) {
   // generic rate-limit code or status; they never turn an overload (or a more
   // specific refusal) into quota.
   const quotaFlagged =
-    options.quotaFlags !== false &&
-    chain.some((item) => item?.providerQuota === true || item?.quotaExceeded === true);
+    options.quotaFlags !== false && chain.some((item) => item?.providerQuota === true || item?.quotaExceeded === true);
   if (quotaFlagged && (!kind || kind === 'rate_limited')) kind = 'quota_exhausted';
   // Wordings, for untyped errors only (a typed code always decides).
   const text = options.text !== false && (!kind || kind === 'invalid_request') ? messageOf(err, chain) : '';

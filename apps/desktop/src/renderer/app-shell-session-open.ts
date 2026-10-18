@@ -1,3 +1,4 @@
+import { startTransition } from 'react';
 import type { NavigationSelection, WorkspaceTab } from './navigation';
 import type { DesktopSessionSummary } from '../shared/contract';
 import { sessionSummaryTitle } from '../shared/session-title.mjs';
@@ -90,14 +91,20 @@ export function useAppSessionOpen({
       if (navigationEpoch.current === navigationToken) setRequestedSessionId('');
     };
     if (!confirmation) void laneReady.then(clearRequested, clearRequested);
-    activateSelection(
-      {
-        kind: 'session',
-        id: sessionId,
-        ...(pinnedTitle ? { title: pinnedTitle } : {}),
-      },
-      pinnedTitle || (session ? sessionSummaryTitle(session, t('Untitled session')) : t('Untitled session'))
-    );
+    // Normal clicks render the incoming pane in a transition. Confirmed
+    // bridge navigation must propagate failures to its acknowledgement;
+    // React reports transition errors instead of throwing them to the caller.
+    const activate = () =>
+      activateSelection(
+        {
+          kind: 'session',
+          id: sessionId,
+          ...(pinnedTitle ? { title: pinnedTitle } : {}),
+        },
+        pinnedTitle || (session ? sessionSummaryTitle(session, t('Untitled session')) : t('Untitled session'))
+      );
+    if (confirmation) activate();
+    else startTransition(activate);
     if (confirmation) ensureCurrent();
   };
 

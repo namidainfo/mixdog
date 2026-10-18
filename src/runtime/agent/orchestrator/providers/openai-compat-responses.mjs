@@ -330,7 +330,9 @@ async function sendCompatResponsesOnce(provider, messages, useModel, tools, opts
     effortProjection,
     sessionCacheKey,
   });
-  // Custom routes also carry the session identity as headers; caller headers win.
+  // The session identity also travels as headers; caller headers win.
+  // Custom routes only: a gateway route that opts into prompt_cache_key keeps
+  // its own headers.
   const headers = isCustomProviderName(provider.name)
     ? customSessionHeaders(provider, sessionCacheKey, opts.requestHeaders)
     : opts.requestHeaders;

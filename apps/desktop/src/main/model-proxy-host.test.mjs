@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { createModelProxyHost, createModelProxyRuntime } from './model-proxy-host.ts';
+import { createModelProxyHost, createModelProxyRuntime, modelProxyCredentialProbe } from './model-proxy-host.ts';
+import { OAUTH_PROVIDER_NAMES } from '../../../../src/runtime/agent/orchestrator/providers/registry.mjs';
+import { hasProviderApiKey, resolveProviderApiKey } from '../../../../src/runtime/shared/provider-api-key.mjs';
 import {
   MODEL_PROXY_REQUEST_EVENT,
+  MODEL_PROXY_OPERATIONS,
   ModelProxyChannel,
 } from '../../../../src/runtime/agent/orchestrator/providers/model-proxy-channel.mjs';
 import {
@@ -95,7 +98,7 @@ test('the PC runs the call with its own provider and streams every callback back
       messages: [{ role: 'user', content: 'hi' }],
       model: 'claude-test',
       tools: [{ name: 'read', input_schema: {} }],
-      options: ['onStageChange', 'onTextDelta', 'onTextReset', 'sessionId', 'signal'],
+      options: ['onStageChange', 'onTextDelta', 'onTextReset', 'sessionId', 'signal', 'toolExecutionSessionId'],
     },
   ]);
   // The daemon settles on the PC's resolve; the PC retires the call right after.
@@ -150,6 +153,37 @@ test('the PC serves only the named provider and the allowed methods', async (t) 
     providers: { openai: { enabled: true, modelProxy: {} } },
     ready: true,
   });
+});
+
+test('the PC reports its model-specific first-response budget through the catalog and provider config', async (t) => {
+  const argon = { transportMs: 577_000, semanticMs: 1_147_000 };
+  const fallback = { transportMs: 130_000, semanticMs: 250_000 };
+  const provider = {
+    send: async () => ({ content: 'x' }),
+    listModels: async () => [{ id: 'argon' }, { id: 'flash' }, { id: 'bare' }],
+    getCachedModelInfo: (id) => (id === 'bare' ? null : { id }),
+    firstResponseBudget: (id) => (id === 'argon' ? argon : id === 'flash' ? { transportMs: 'x', semanticMs: 1 } : null),
+  };
+  const { channel } = connect(
+    t,
+    fakeRuntime(
+      { 'antigravity-oauth': provider },
+      {
+        providerConfig: async () => ({
+          providers: { 'antigravity-oauth': { enabled: true, modelProxy: { firstResponseBudget: fallback } } },
+        }),
+      }
+    )
+  );
+  const proxied = new ModelProxyProvider('antigravity-oauth', {}, channel);
+  await proxied.listModels();
+  assert.deepEqual(proxied.getCachedModelInfo('argon'), { id: 'argon', firstResponseBudget: argon });
+  // An unusable figure is dropped; a model without a catalog entry gets none.
+  assert.deepEqual(proxied.getCachedModelInfo('flash'), { id: 'flash' });
+  assert.equal(proxied.getCachedModelInfo('bare'), null);
+  const config = await channel.request({ provider: '', method: 'providerConfig' });
+  const forwarded = new ModelProxyProvider('antigravity-oauth', config.providers['antigravity-oauth'], channel);
+  assert.deepEqual(forwarded.firstResponseBudget('unlisted'), fallback);
 });
 
 test('a daemon-side abort aborts the PC provider call', async (t) => {
@@ -267,6 +301,7 @@ function pcModules(available, keys = {}) {
   const inits = [];
   return {
     keyReads,
+    probeAuth: () => 'present',
     inits,
     live,
     loadConfig: (options) => {
@@ -277,7 +312,8 @@ function pcModules(available, keys = {}) {
       inits.push(structuredClone(config));
       live.clear();
       const enabled = Object.entries(config).filter(([, entry]) => entry.enabled === true);
-      if (!enabled.length) throw Object.assign(new Error('all providers disabled in config'), { code: 'PROVIDERS_NONE_ENABLED' });
+      if (!enabled.length)
+        throw Object.assign(new Error('all providers disabled in config'), { code: 'PROVIDERS_NONE_ENABLED' });
       for (const [name, entry] of enabled) {
         live.set(name, { send: async () => ({ content: `${name}:${entry.apiKey ?? 'no-key'}` }) });
       }
@@ -304,8 +340,8 @@ test('cold start: the daemon waits for a PC that connects late and loads its reg
   connect(t, createModelProxyRuntime(modules), { channel });
   const config = await settledWhileAlive(loading);
   assert.deepEqual(config, {
-    openai: { enabled: true, modelProxy: {} },
-    gemini: { enabled: false, modelProxy: {} },
+    openai: { enabled: true, authState: 'present', modelProxy: {} },
+    gemini: { enabled: false, authState: 'present', modelProxy: {} },
   });
   // Availability needs no credential value.
   assert.deepEqual(modules.keyReads, []);
@@ -338,10 +374,10 @@ test('a loaded PC registry with nothing enabled is an answer, not a wait', async
   const modules = pcModules({ openai: { enabled: false } });
   const { channel } = connect(t, createModelProxyRuntime(modules));
   const config = await settledWhileAlive(loadModelProxyProviderConfig({ channel, waitMs: 5_000 }), 1_000);
-  assert.deepEqual(config, { openai: { enabled: false, modelProxy: {} } });
+  assert.deepEqual(config, { openai: { enabled: false, authState: 'present', modelProxy: {} } });
 });
 
-test('only the requested provider\'s credential is read, on demand', async (t) => {
+test("only the requested provider's credential is read, on demand", async (t) => {
   const modules = pcModules(
     { openai: { enabled: true }, anthropic: { enabled: true } },
     { openai: 'pc-openai-key', anthropic: 'pc-anthropic-key' }
@@ -369,10 +405,13 @@ test('server send options are reduced to the allowlist', async (t) => {
     requestHeaders: { authorization: 'Bearer x' },
     extraBody: { stolen: true },
     codexInstallationId: 'pc-identity',
+    toolExecutionSessionId: 'daemon-session',
     _providerSeam: true,
   });
-  assert.deepEqual(Object.keys(seen).sort(), ['sessionId', 'signal', 'temperature']);
+  assert.deepEqual(Object.keys(seen).sort(), ['sessionId', 'signal', 'temperature', 'toolExecutionSessionId']);
   assert.ok(seen.signal instanceof AbortSignal);
+  // Tools run in the server daemon: the PC names no local tool executor.
+  assert.equal(seen.toolExecutionSessionId, '');
 });
 
 test('a proxied side request gets its own transport scope on the PC, disposed when the request ends', async (t) => {
@@ -402,7 +441,8 @@ test('a proxied side request gets its own transport scope on the PC, disposed wh
   const { channel } = connect(t, fakeRuntime({ openai: provider }));
   const proxied = new ModelProxyProvider('openai', {}, channel);
   const mainScope = 'main-session#side:server-scope';
-  const side = (sessionId, signal) => proxied.send([], 'gpt', undefined, { sessionId, transportScope: mainScope, signal });
+  const side = (sessionId, signal) =>
+    proxied.send([], 'gpt', undefined, { sessionId, transportScope: mainScope, signal });
 
   // Success: the PC's own scope, never the server's, released afterwards.
   await side('ok');
@@ -485,7 +525,7 @@ test('providerConfig tells a server availability and traits only; disallowed pro
               baseURL: 'https://corp.example/v1',
               organization: 'acme',
               accountLabel: 'work@acme.example',
-              modelProxy: { nativePdf: true, extra: 'x' },
+              modelProxy: { nativePdf: true, consumesReadWindows: true, extra: 'x' },
             },
             'custom-1': { type: 'custom', enabled: true, baseURL: 'http://10.0.0.5' },
           },
@@ -496,7 +536,7 @@ test('providerConfig tells a server availability and traits only; disallowed pro
   );
   // A provider the server may not use is not even named to it.
   assert.deepEqual(await channel.request({ provider: '', method: 'providerConfig' }), {
-    providers: { openai: { enabled: true, modelProxy: { nativePdf: true } } },
+    providers: { openai: { enabled: true, modelProxy: { nativePdf: true, consumesReadWindows: true } } },
     ready: true,
   });
   await assert.rejects(new ModelProxyProvider('custom-1', {}, channel).send([], 'm', undefined, {}), {
@@ -557,21 +597,21 @@ test('a remote session pins its wire through the PC adapter and the pin reaches 
   assert.equal(asked, 1);
 });
 
-test('at the concurrency cap nothing more is claimed; a freed slot takes up the next call', async (t) => {
+test('a call is claimed and run while another is still running: there is no concurrency cap', async (t) => {
   const provider = hangingProvider();
-  const { channel, host, operations } = connect(t, fakeRuntime({ openai: provider }), { maxConcurrentCalls: 1 });
+  const { channel, host, operations } = connect(t, fakeRuntime({ openai: provider }));
   const firstAbort = new AbortController();
   const first = new ModelProxyProvider('openai', {}, channel).send([], 'gpt', undefined, { signal: firstAbort.signal });
   first.catch(() => {});
   await provider.started;
-  const second = new ModelProxyProvider('openai', {}, channel).send([], 'gpt', undefined, {});
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  assert.equal(operations.filter((operation) => operation === 'modelProxyClaim').length, 1);
-  assert.equal(channel.snapshot().requests.length, 1, 'the second call waits unclaimed on the daemon');
   provider.send = async () => ({ content: 'second' });
+  assert.deepEqual(
+    await settledWhileAlive(new ModelProxyProvider('openai', {}, channel).send([], 'gpt', undefined, {})),
+    { content: 'second' }
+  );
+  assert.equal(operations.filter((operation) => operation === 'modelProxyClaim').length, 2);
+  assert.equal(host.running, 1, 'the first is still running');
   firstAbort.abort(new Error('done'));
-  assert.deepEqual(await settledWhileAlive(second), { content: 'second' });
-  assert.equal(host.running, 0);
 });
 
 test('a call payload over the request cap is refused before any provider runs', async (t) => {
@@ -585,9 +625,289 @@ test('a call payload over the request cap is refused before any provider runs', 
   const { channel } = connect(t, fakeRuntime({ openai: provider }), { maxRequestBytes: 200 });
   await assert.rejects(
     settledWhileAlive(
-      new ModelProxyProvider('openai', {}, channel).send([{ role: 'user', content: 'x'.repeat(500) }], 'gpt', undefined, {})
+      new ModelProxyProvider('openai', {}, channel).send(
+        [{ role: 'user', content: 'x'.repeat(500) }],
+        'gpt',
+        undefined,
+        {}
+      )
     ),
     { code: 'MODEL_PROXY_REQUEST_TOO_LARGE' }
   );
   assert.equal(sent, false);
+});
+
+test('the last disabled or removed provider is not advertised even when the registry preserves its instance', async () => {
+  const available = { openai: { enabled: true } };
+  const modules = pcModules(available);
+  const init = modules.initProviders;
+  modules.initProviders = async (config) => {
+    // Match the real registry's all-disabled preservation guard.
+    if (!Object.values(config).some((entry) => entry.enabled === true)) {
+      throw Object.assign(new Error('all disabled'), { code: 'PROVIDERS_NONE_ENABLED' });
+    }
+    return init(config);
+  };
+  const runtime = createModelProxyRuntime(modules);
+  assert.equal((await runtime.providerConfig()).providers.openai.enabled, true);
+  available.openai.enabled = false;
+  assert.equal((await runtime.providerConfig()).providers.openai.enabled, false);
+  assert.equal(modules.live.has('openai'), true);
+  assert.equal(await runtime.provider('openai'), undefined);
+  delete available.openai;
+  assert.equal((await runtime.providerConfig()).providers.openai.enabled, false);
+  assert.equal(await runtime.provider('openai'), undefined);
+  assert.deepEqual(modules.keyReads, []);
+});
+
+for (const claimed of [false, true]) {
+  test(`provider config deadline aborts a stalled request (claimed=${claimed})`, async (t) => {
+    _resetModelProxyProviderConfigForTest();
+    t.after(_resetModelProxyProviderConfigForTest);
+    const channel = new ModelProxyChannel();
+    let requestId;
+    const detach = channel.attachPublisher((snapshot) => {
+      for (const { id } of snapshot.requests) {
+        requestId = id;
+        if (claimed) channel.handleOperation(MODEL_PROXY_OPERATIONS.claim, [id]);
+      }
+    });
+    t.after(detach);
+    const loading = loadModelProxyProviderConfig({ channel, waitMs: 30 });
+    await assert.rejects(settledWhileAlive(loading, 1_000), (error) => error.code === 'MODEL_PROXY_UNAVAILABLE');
+    assert.ok(requestId);
+  });
+}
+
+test('forced and short-budget reads do not join an older request or let it overwrite the fresh cache', async (t) => {
+  _resetModelProxyProviderConfigForTest();
+  t.after(_resetModelProxyProviderConfigForTest);
+  const replies = [];
+  const channel = {
+    connected: true,
+    generation: 1,
+    request: () => new Promise((resolve) => replies.push(resolve)),
+  };
+  const old = loadModelProxyProviderConfig({ channel });
+  const fresh = loadModelProxyProviderConfig({ channel, force: true });
+  assert.equal(replies.length, 2);
+  replies[1]({ ready: true, providers: { gemini: { enabled: true } } });
+  assert.equal((await fresh).gemini.enabled, true);
+  replies[0]({ ready: true, providers: { gemini: { enabled: false } } });
+  await old;
+  assert.equal((await loadModelProxyProviderConfig({ channel })).gemini.enabled, true);
+
+  _resetModelProxyProviderConfigForTest();
+  const long = loadModelProxyProviderConfig({ channel, waitMs: 15_000 });
+  const short = loadModelProxyProviderConfig({ channel, waitMs: 1_000 });
+  assert.equal(replies.length, 4);
+  replies[3]({ ready: true, providers: {} });
+  replies[2]({ ready: true, providers: {} });
+  await Promise.all([long, short]);
+});
+
+test('all built-in provider families and custom protocols use the same PC catalog and send path', async (t) => {
+  const names = [
+    'openai',
+    'anthropic',
+    'gemini',
+    'deepseek',
+    'xai',
+    'opencode-go',
+    'openrouter',
+    'openai-oauth',
+    'anthropic-oauth',
+    'grok-oauth',
+    'muse-code-oauth',
+    'command-code-oauth',
+    'mimo-oauth',
+    'cursor-oauth',
+    'antigravity-oauth',
+    'mixdog-local',
+  ];
+  const custom = ['openai-chat', 'openai-responses', 'anthropic'].flatMap((protocol, i) =>
+    ['key', 'none'].map((auth, j) => ({
+      id: `custom-00000000-0000-4000-8000-0000000000${i}${j}`,
+      protocol,
+      auth,
+    }))
+  );
+  const available = Object.fromEntries([
+    ...names.map((id) => [id, { enabled: true }]),
+    ...custom.map(({ id, ...config }) => [id, { ...config, type: 'custom', enabled: true }]),
+  ]);
+  const modules = pcModules(available);
+  const init = modules.initProviders;
+  modules.initProviders = async (config) => {
+    await init(config);
+    for (const [name, provider] of modules.live) {
+      provider.listModels = async () => [{ id: `${name}-model` }];
+    }
+  };
+  const runtime = createModelProxyRuntime(modules);
+  let clock = 0;
+  const { channel } = connect(t, runtime, { now: () => clock });
+  const advertised = await channel.request({ provider: '', method: 'providerConfig' });
+  assert.deepEqual(Object.keys(advertised.providers).sort(), Object.keys(available).sort());
+  for (const name of Object.keys(available)) {
+    clock += 60_000; // Each independent provider check receives a fresh rate-limit window.
+    assert.equal(advertised.providers[name].enabled, true, name);
+    const proxy = new ModelProxyProvider(name, {}, channel);
+    assert.deepEqual(await proxy.listModels(), [{ id: `${name}-model` }]);
+    assert.equal((await proxy.send([], `${name}-model`, [], {})).content, `${name}:no-key`);
+  }
+});
+
+test('proxy readiness distinguishes missing credentials, transient probes, and explicit disables', async (t) => {
+  const available = { 'openai-oauth': { enabled: true } };
+  const modules = pcModules(available);
+  let state = 'present';
+  modules.probeAuth = () => state;
+  const init = modules.initProviders;
+  modules.initProviders = async (config) => {
+    if (config['openai-oauth'].credentialProbeUnavailable) return; // registry preserves the prior adapter
+    return init(config);
+  };
+  const runtime = createModelProxyRuntime(modules);
+  const { channel } = connect(t, runtime);
+  const read = async () =>
+    (await channel.request({ provider: '', method: 'providerConfig' })).providers['openai-oauth'];
+  assert.equal((await read()).enabled, true);
+  state = 'unreadable';
+  available['openai-oauth'] = { enabled: false, credentialProbeUnavailable: true };
+  assert.deepEqual(await read(), { enabled: true, authState: 'unreadable', modelProxy: {} });
+  assert.ok(await runtime.provider('openai-oauth'));
+  state = 'absent';
+  available['openai-oauth'] = { enabled: true }; // a persisted enable is not authentication
+  assert.deepEqual(await read(), { enabled: false, authState: 'absent', modelProxy: {} });
+  assert.equal(await runtime.provider('openai-oauth'), undefined);
+  state = 'present';
+  available['openai-oauth'] = { enabled: false };
+  assert.equal((await read()).enabled, false);
+  assert.equal(await runtime.provider('openai-oauth'), undefined);
+});
+
+test('custom environment credentials drive proxy readiness without a stored-key fallback', async (t) => {
+  const variable = 'MIXDOG_PROXY_ENV_CREDENTIAL_TEST';
+  const previous = process.env[variable];
+  t.after(() => {
+    if (previous === undefined) delete process.env[variable];
+    else process.env[variable] = previous;
+  });
+  const name = 'custom-proxy-env';
+  const available = { [name]: { type: 'custom', auth: 'key', enabled: true, apiKeyEnv: variable } };
+  const modules = pcModules(available, { [name]: 'stored-key-must-not-be-used' });
+  modules.probeAuth = () => 'absent'; // No conventional environment alias or keychain credential.
+  const { resolveProviderApiKey } = await import('../../../../src/runtime/shared/provider-api-key.mjs');
+  const init = modules.initProviders;
+  modules.initProviders = async (config) => {
+    await init(config);
+    modules.live.set(name, { send: async () => ({ content: resolveProviderApiKey(name, config[name]) }) });
+  };
+  const runtime = createModelProxyRuntime(modules);
+  const { channel } = connect(t, runtime);
+  process.env[variable] = 'environment-key-one';
+  const first = await runtime.providerConfig();
+  assert.equal(first.providers[name].enabled, true);
+  assert.equal(first.providers[name].authState, 'present');
+  assert.equal(
+    JSON.stringify(first).includes('environment-key-one'),
+    false,
+    'no key value crosses the config boundary'
+  );
+  const provider = new ModelProxyProvider(name, {}, channel);
+  assert.equal((await provider.send([], 'test-model', undefined, {})).content, 'environment-key-one');
+  process.env[variable] = 'environment-key-two';
+  assert.equal((await provider.send([], 'test-model', undefined, {})).content, 'environment-key-two');
+  delete process.env[variable];
+  modules.probeAuth = () => 'present'; // A stored key must not satisfy a missing named variable.
+  assert.equal((await runtime.providerConfig()).providers[name].enabled, false);
+  assert.equal(await runtime.provider(name), undefined);
+  assert.deepEqual(modules.keyReads, []);
+});
+
+test('an unreadable credential with a live adapter is advertised on the first read, not only later ones', async (t) => {
+  // A stored enable builds the adapter; the credential file is unreadable this instant.
+  const modules = pcModules({ 'openai-oauth': { enabled: true } });
+  modules.probeAuth = () => 'unreadable';
+  const { channel } = connect(t, createModelProxyRuntime(modules));
+  const read = async () =>
+    (await channel.request({ provider: '', method: 'providerConfig' })).providers['openai-oauth'];
+  assert.deepEqual(await read(), { enabled: true, authState: 'unreadable', modelProxy: {} });
+  assert.deepEqual(await read(), { enabled: true, authState: 'unreadable', modelProxy: {} });
+});
+
+test('a custom provider advertises only the ids of its hidden models', async (t) => {
+  const name = 'custom-proxy-hidden';
+  const modules = pcModules({
+    [name]: {
+      type: 'custom',
+      auth: 'none',
+      enabled: true,
+      name: 'Private gateway',
+      baseURL: 'https://gateway.internal',
+      models: [{ id: 'row-hidden', hidden: true }, { id: 'row-visible' }],
+      modelOverrides: { 'override-hidden': { hidden: true }, 'override-visible': { name: 'Shown' } },
+    },
+  });
+  const { channel } = connect(t, createModelProxyRuntime(modules));
+  const advertised = (await channel.request({ provider: '', method: 'providerConfig' })).providers[name];
+  assert.deepEqual(advertised, {
+    enabled: true,
+    type: 'custom',
+    hiddenModels: ['row-hidden', 'override-hidden'],
+    authState: 'present',
+    modelProxy: {},
+  });
+});
+
+test('proxy credential presence follows the registry OAuth set and resolveProviderApiKey precedence', (t) => {
+  const variables = ['MIXDOG_PROXY_PROBE_ENV_TEST', 'MIXDOG_AGENT_PROXY-PROBE_APIKEY', 'OPENAI_API_KEY'];
+  const saved = Object.fromEntries(variables.map((name) => [name, process.env[name]]));
+  t.after(() => {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+  for (const name of variables) delete process.env[name];
+  const oauthReads = [];
+  const probe = modelProxyCredentialProbe({
+    OAUTH_PROVIDER_NAMES,
+    oauthCredentialProbeState: (name) => {
+      oauthReads.push(name);
+      return 'unreadable';
+    },
+    hasProviderApiKey,
+  });
+  // OAuth membership comes from the registry, not the name's suffix.
+  assert.equal(probe('cursor-oauth', {}), 'unreadable');
+  assert.equal(probe('proxy-probe-oauth', {}), 'absent');
+  assert.deepEqual(oauthReads, ['cursor-oauth']);
+  // API keys: whatever resolveProviderApiKey would find, probe says present.
+  const cases = [
+    ['proxy-probe', { apiKey: 'config-file-key' }],
+    ['proxy-probe', { apiKeyEnv: 'MIXDOG_PROXY_PROBE_ENV_TEST' }],
+    ['proxy-probe', { apiKeyEnv: 'MIXDOG_PROXY_PROBE_ENV_TEST', apiKey: 'ignored-for-env-routes' }],
+    ['proxy-probe', {}],
+    ['custom-proxy-probe', { type: 'custom', auth: 'key', apiKeyEnv: 'MIXDOG_PROXY_PROBE_ENV_TEST' }],
+  ];
+  const check = () => {
+    for (const [name, config] of cases) {
+      const expected = resolveProviderApiKey(name, config) ? 'present' : 'absent';
+      assert.equal(probe(name, config), expected, `${name} ${JSON.stringify(config)}`);
+    }
+  };
+  check();
+  assert.equal(probe('proxy-probe', { apiKey: 'config-file-key' }), 'present');
+  process.env.MIXDOG_PROXY_PROBE_ENV_TEST = 'from-env';
+  process.env['MIXDOG_AGENT_PROXY-PROBE_APIKEY'] = 'from-mixdog-env';
+  check();
+  assert.equal(probe('proxy-probe', {}), 'present');
+  assert.equal(probe('proxy-probe', { apiKeyEnv: 'MIXDOG_PROXY_PROBE_ENV_TEST' }), 'present');
+  delete process.env.MIXDOG_PROXY_PROBE_ENV_TEST;
+  // A named variable is the only source for its route, even with another key present.
+  assert.equal(probe('custom-proxy-probe', cases[4][1]), 'absent');
+  check();
+  assert.equal(probe('custom-proxy-probe', { type: 'custom', auth: 'none' }), 'present');
 });

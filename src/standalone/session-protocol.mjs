@@ -6,6 +6,8 @@
  */
 
 export const SESSION_READ_ACTIONS = Object.freeze([
+  'inspectProjectBranch',
+  'isSessionTerminal',
   'contextStatus',
   'getAgentDefinition',
   'getAutoClear',
@@ -18,6 +20,7 @@ export const SESSION_READ_ACTIONS = Object.freeze([
   'getDisabledSkills',
   'getMediaDefault',
   'getMediaJob',
+  'getMediaPins',
   'getMcpServerConfig',
   'getMcpOAuthLoginStatus',
   'getOnboardingStatus',
@@ -72,6 +75,7 @@ export const SESSION_READ_ACTIONS = Object.freeze([
   'listProviders',
   'listWebSearchModels',
   'listThemes',
+  'listShellJobs',
   'listWorkflows',
   'mcpStatus',
   'pluginsStatus',
@@ -196,6 +200,7 @@ export const SESSION_CONFIGURE_ACTIONS = Object.freeze([
   'startLocalProviderModelMaintenance',
   'deleteLocalProviderModel',
   'setMediaDefault',
+  'setMediaPin',
   'setModel',
   'setOutputStyle',
   'setPluginEnabled',
@@ -222,6 +227,7 @@ export const SESSION_CONFIGURE_ACTIONS = Object.freeze([
   'startConversationImport',
   'startMediaJob',
   'stopShellJob',
+  'releaseShellJob',
   'switchContext',
   'taskControl',
   'testWebhook',
@@ -236,6 +242,7 @@ export const SESSION_CONFIGURE_ACTIONS = Object.freeze([
   'selectBranch',
   'selectProjectBranch',
   'mergeProjectBranch',
+  'manageProjectBranch',
   'requestWorktree',
   'mergeWorkspace',
   'removeWorktree',

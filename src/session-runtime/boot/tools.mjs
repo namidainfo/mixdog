@@ -71,6 +71,8 @@ function wireAgent(boot) {
     mcpScopeId: rt.mcpScopeId,
     awaitKeychainPrewarm,
     isKeychainPrewarmReady: () => rt.keychainPrewarmWaitDone,
+    // Lazy: wireProviders runs after wireTools and defines the catalog.
+    listProviderModels: (options) => boot.collectProviderModels(options),
     notifySessionCompletion,
     // SubagentStart/SubagentStop: bridge internal worker spawn/finish to the
     // standard hook bus. agent_type is passed top-level via hookCommonPayload.
@@ -253,6 +255,7 @@ function wireInternalTools(boot) {
       getWorkspaceApi: () => boot.workspaceApi || null,
       getSessionManager: () => boot.mgr || null,
       getLifecycleApi: () => boot.lifecycleApi || null,
+      executeSessionControl: boot.params.executeSessionControl,
     }),
   });
   Object.assign(boot, { setupTool, disposeInternalTools });

@@ -662,11 +662,7 @@ export class DesktopServiceClient implements DesktopService {
     return await this.sendRequest<T>(method, args, timeoutMs, signal);
   }
 
-  private async invokeRead<T>(
-    method: DesktopServiceMethod,
-    args: unknown[] = [],
-    signal?: AbortSignal
-  ): Promise<T> {
+  private async invokeRead<T>(method: DesktopServiceMethod, args: unknown[] = [], signal?: AbortSignal): Promise<T> {
     try {
       return await this.invoke<T>(method, args, undefined, signal);
     } catch (error) {
@@ -835,6 +831,9 @@ export class DesktopServiceClient implements DesktopService {
   stopShellJob(sessionId: string, taskId: string): Promise<{ stopped: boolean; error?: string }> {
     return this.invoke('stopShellJob', [sessionId, taskId]);
   }
+  releaseShellJob(sessionId: string, taskId: string): Promise<{ released: boolean; error?: string }> {
+    return this.invoke('releaseShellJob', [sessionId, taskId]);
+  }
   getQuotaAutoResume(): Promise<boolean> {
     return this.invoke('getQuotaAutoResume', []);
   }
@@ -844,8 +843,17 @@ export class DesktopServiceClient implements DesktopService {
   readAttachmentImage(attachmentRef: string): Promise<string | null> {
     return this.invokeRead('readAttachmentImage', [attachmentRef]);
   }
+  /** The provenance behind attachment opens and file grants: main's IPC
+   *  checks a request against the transcript the service holds. */
+  readSessionTranscript(sessionId: string): Promise<SessionSnapshot> {
+    return this.invokeRead('readSessionTranscript', [sessionId]);
+  }
 
-  readSessionFinalAnswer(sessionId: string, startedAt: number, signal?: AbortSignal): Promise<SessionFinalAnswer | null> {
+  readSessionFinalAnswer(
+    sessionId: string,
+    startedAt: number,
+    signal?: AbortSignal
+  ): Promise<SessionFinalAnswer | null> {
     return this.invokeRead('readSessionFinalAnswer', [sessionId, startedAt], signal);
   }
   setSessionFavorite(sessionId: string, favorite: boolean): Promise<unknown> {

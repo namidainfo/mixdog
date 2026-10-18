@@ -181,6 +181,11 @@ export function TranscriptList({
     anchorHold,
     readingAnchorHeld,
     queueAnchorRestore,
+    spacer,
+    rowsRef,
+    scrollInset,
+    indexForPendingKey,
+    restoreReadingAnchor,
   });
   const { measureRow, bindSpacer } = useTranscriptRowRegistration({ viewport, spacer, content, virtualizerRef });
 
@@ -228,10 +233,20 @@ function renderVirtualRow(
   const row = rows[virtualRow.index];
   if (!row) return null;
   const next = rows[virtualRow.index + 1];
-  const turnEnd = !next || next._tag === 'TurnGap';
-  // The live band under a reply part stands where that reply's completion
-  // footer lands (12-transcript.css).
-  const bandUnderPart = row._tag === 'Thinking' && rows[virtualRow.index - 1]?._tag === 'AssistantPart';
+  const previous = rows[virtualRow.index - 1]?._tag;
+  // The live band under a reply part or tool card is the same 40px status
+  // slot as the completion footer that replaces it (12-transcript.css): the
+  // row above it takes no step, the band leads in itself.
+  const leadsBand = (tag: TranscriptRowModel['_tag'] | undefined) => tag === 'AssistantPart' || tag === 'ToolActivity';
+  // The step after a reply part, tool card or error belongs to the row BELOW
+  // it. As the part's own bottom padding, appending the next row resized the
+  // settled part above it, and the new row was placed at the old size for a
+  // frame before jumping 8px (tool rounds shook the whole thread).
+  const part = (tag: TranscriptRowModel['_tag'] | undefined) =>
+    tag === 'AssistantPart' || tag === 'ToolActivity' || tag === 'Error';
+  const bandLead = row._tag === 'Thinking' && leadsBand(previous);
+  const stepBefore = !bandLead && row._tag !== 'TurnGap' && part(previous);
+  const turnEnd = !part(row._tag) && (!next || next._tag === 'TurnGap');
   return (
     // A row binds position AND measurement to one element.
     // Position and measurement therefore share the
@@ -252,7 +267,8 @@ function renderVirtualRow(
         data-index={virtualRow.index}
         data-tag={row._tag}
         data-turn-end={turnEnd ? 'true' : undefined}
-        data-under-part={bandUnderPart ? 'true' : undefined}
+        data-band-lead={bandLead ? 'true' : undefined}
+        data-step-before={stepBefore ? 'true' : undefined}
       >
         {renderRow(row)}
       </div>

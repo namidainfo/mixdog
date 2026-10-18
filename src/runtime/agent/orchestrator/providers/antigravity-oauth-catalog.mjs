@@ -194,6 +194,18 @@ function antigravityCatalogModels() {
 }
 
 /**
+ * The catalog `family` ('gemini-pro', 'gemini-flash', 'gpt-oss') of a picker
+ * id or one of its wire ids, or null when no record carries one (Claude, or
+ * an id the catalog does not list).
+ */
+export function antigravityModelFamily(model, models = antigravityCatalogModels()) {
+  const id = String(model || '');
+  const wires = (entry) => (entry?.wire && typeof entry.wire === 'object' ? Object.values(entry.wire) : [entry?.wire]);
+  const record = models.find((entry) => entry?.id === id) || models.find((entry) => wires(entry).includes(id));
+  return typeof record?.family === 'string' && record.family ? record.family : null;
+}
+
+/**
  * Turn a picker model + effort into the wire id the gateway accepts. Tiered
  * families consume the effort (the id encodes it); a bare id whose record
  * lists levels keeps it for thinkingLevel; every other record drops it
@@ -229,16 +241,25 @@ function quotaRow(label, bucket) {
 }
 
 /** Every reported group/window from retrieveUserQuotaSummary, without guessing
- * a weekly window or a percentage for reset-only buckets. */
+ * a weekly window or a percentage for reset-only buckets. Known bucket ids
+ * keep stable labels even when the gateway changes a group's display text. */
 export function antigravityQuotaWindows(summary) {
+  const labels = {
+    'gemini-5h:5h': '5H',
+    'gemini-weekly:weekly': '7D',
+    'gemini-argon-wtu-weekly:weekly': '7D Argon',
+    '3p-5h:5h': '5H Claude/GPT',
+    '3p-weekly:weekly': '7D Claude/GPT',
+  };
   const groups = Array.isArray(summary?.groups) ? summary.groups : [];
   return groups.flatMap((group) => {
     const buckets = Array.isArray(group?.buckets) ? group.buckets : [];
-    return buckets.map((bucket) => {
+    return buckets.toSorted((a, b) => (a?.window === '5h' ? 0 : 1) - (b?.window === '5h' ? 0 : 1)).map((bucket) => {
       if (!bucket || typeof bucket !== 'object') return null;
       const period = bucket.window === '5h' ? '5H' : bucket.window === 'weekly' ? '7D' : String(bucket.window || bucket.displayName || 'Quota');
-      const label = group.displayName && group.displayName !== 'Gemini Models' ? `${group.displayName} ${period}` : period;
+      const label = labels[`${bucket.bucketId}:${bucket.window}`] ||
+        (group.displayName && group.displayName !== 'Gemini Models' ? `${group.displayName} ${period}` : period);
       return quotaRow(label, bucket);
-    }).filter(Boolean).sort((a, b) => (a.label.endsWith('5H') ? 0 : 1) - (b.label.endsWith('5H') ? 0 : 1));
+    }).filter(Boolean);
   });
 }

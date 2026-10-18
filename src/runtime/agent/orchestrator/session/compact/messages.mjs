@@ -4,6 +4,7 @@ import { SUMMARY_PREFIX } from './constants.mjs';
 import { sha16, roleCounts } from './text-utils.mjs';
 import { carryMessageId, withoutMessageIdsReplacer } from '../message-ids.mjs';
 import {
+  contextAckMessage,
   isActualUserInstructionMessage,
   isInjectedSkillBodyMessage,
   isProtectedContextUserMessage,
@@ -27,6 +28,7 @@ export function makeSummaryMessage(content) {
 // User-message classification lives in the import-light user-message-kind.mjs
 // (the session store counts real turns with it); re-exported for callers.
 export {
+  contextAckMessage,
   isActualUserInstructionMessage,
   isInjectedSkillBodyMessage,
   isProtectedContextUserMessage,

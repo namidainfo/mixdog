@@ -4,7 +4,7 @@ import type { ToolApprovalDecision } from '../shared/contract';
 import { ApprovalCard } from './ApprovalCard';
 import { UserQuestionCard } from './UserQuestionCard';
 import { QuestionCard } from './QuestionCard';
-import { approvalQuestions } from './question-card-logic';
+import { approvalQuestions, buildAnswers, type QuestionDraft } from './question-card-logic';
 import type { ComposerIslandFlash } from './ComposerIsland';
 import type { Snapshot } from './desktop-types';
 import { t } from './i18n';
@@ -41,6 +41,9 @@ export function useConversationApprovals(snapshot: Snapshot, routeSessionIdRef: 
   let questionCard: ReactNode = null;
   // Sending a message while a question waits closes the question first.
   let dismissQuestion: (() => Promise<unknown>) | null = null;
+  let answerQuestion: ((reply: string) => Promise<unknown>) | null = null;
+  // The pending question card's current drafts, kept by the card.
+  const questionDrafts = useRef<QuestionDraft[]>([]);
   const pendingApproval = snapshot.toolApproval;
   if (pendingApproval && String(pendingApproval.id ?? '') !== answeredElsewhere?.id) {
     const resolveDecision = async (decision: ToolApprovalDecision) => {
@@ -57,9 +60,7 @@ export function useConversationApprovals(snapshot: Snapshot, routeSessionIdRef: 
         setAnsweredElsewhere({
           id: approvalId,
           device:
-            multiDevice && result?.id === approvalId && isOtherDevice(result.device, viewerDevice)
-              ? result.device
-              : '',
+            multiDevice && result?.id === approvalId && isOtherDevice(result.device, viewerDevice) ? result.device : '',
         });
       }
       return accepted;
@@ -67,9 +68,21 @@ export function useConversationApprovals(snapshot: Snapshot, routeSessionIdRef: 
     const questions = pendingApproval.kind === 'question' ? approvalQuestions(pendingApproval.args) : null;
     if (questions) {
       questionCard = (
-        <QuestionCard key={approvalInstanceKey(pendingApproval.id)} questions={questions} resolve={resolveDecision} />
+        <QuestionCard
+          key={approvalInstanceKey(pendingApproval.id)}
+          questions={questions}
+          resolve={resolveDecision}
+          draftsRef={questionDrafts}
+        />
       );
       dismissQuestion = () => resolveDecision({ approved: false, reason: 'dismissed by user' });
+      // A composer message answers the question together with the card's picks.
+      answerQuestion = (reply) =>
+        resolveDecision({
+          approved: true,
+          answers: buildAnswers(questions, questionDrafts.current),
+          reply,
+        });
     } else {
       approvalCard = (
         <ApprovalCard
@@ -91,7 +104,16 @@ export function useConversationApprovals(snapshot: Snapshot, routeSessionIdRef: 
       />
     );
   }
-  return { approvalCard, questionCard, dismissQuestion, retiredApproval, answeredElsewhere, multiDevice, viewerDevice };
+  return {
+    approvalCard,
+    questionCard,
+    dismissQuestion,
+    answerQuestion,
+    retiredApproval,
+    answeredElsewhere,
+    multiDevice,
+    viewerDevice,
+  };
 }
 
 /** The island's one-shot notice: an approval settled on another device wins

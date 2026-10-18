@@ -15,6 +15,7 @@ import type {
 
 import { resolve as resolvePath } from 'node:path';
 import { DESKTOP_IPC, type DesktopRemoteAccessInfo, type DesktopSettings } from '../shared/contract';
+import { ipcErrorEnvelope } from '../shared/file-error-codes';
 import { translateNativeUi } from '../shared/native-ui';
 import type { DesktopService } from './desktop-service-contract';
 import type { DesktopSettingsStore } from './settings-store';
@@ -102,6 +103,7 @@ const SERVICE_OPERATION_NAMES = [
   'gitShow',
   'gitShowDiff',
   'gitShowFile',
+  'gitRequestContext',
   'gitStage',
   'gitStash',
   'gitStashApply',
@@ -217,17 +219,28 @@ export function registerDesktopIpc(
       assertSender(event);
       const refused = connectionFeatureGate(connectionKind, channel);
       if (refused) throw refused;
-      return listener(event, ...args);
+      // Custom Error properties do not survive Electron's invoke, so a
+      // refusal with a structured code is returned as an envelope the
+      // preload turns back into an Error with that code.
+      const refusal = (error: unknown): unknown => {
+        const envelope = ipcErrorEnvelope(error);
+        if (envelope) return envelope;
+        throw error;
+      };
+      // The listener still starts in this tick: handlers' call order matters.
+      try {
+        const result = listener(event, ...args);
+        return result instanceof Promise ? result.catch(refusal) : result;
+      } catch (error) {
+        return refusal(error);
+      }
     });
   };
   // The daemon's own user-data directory for paths handed to the service.
+  const serviceGetPath = (name: Parameters<App['getPath']>[0]) =>
+    name === 'userData' ? serviceUserDataPath?.() : app.getPath?.(name);
   const serviceApp: Partial<Pick<App, 'getPath'>> =
-    serviceUserDataPath && typeof app.getPath === 'function'
-      ? {
-          getPath: ((name: Parameters<App['getPath']>[0]) =>
-            name === 'userData' ? serviceUserDataPath() : app.getPath!(name)) as App['getPath'],
-        }
-      : app;
+    serviceUserDataPath && typeof app.getPath === 'function' ? { getPath: serviceGetPath as App['getPath'] } : app;
   const invokeDesktopOperation = <T>(method: string, args: unknown[]): Promise<T> =>
     host.invokeDesktopOperation(method, args) as Promise<T>;
   type ServiceOperation = (...args: unknown[]) => Promise<unknown>;
@@ -246,13 +259,14 @@ export function registerDesktopIpc(
   // A server window's files live on the server: its one-file grants name
   // server paths (agent output links, uploads) and its bytes travel over the
   // window's own connection. This PC's selected-file grants never apply there.
+  const downloadsDir = () => (typeof app.getPath === 'function' ? app.getPath('downloads') : '');
   const server =
     connectionKind === 'ssh'
       ? createServerFiles({
           invoke: invokeDesktopOperation,
           listProjects: () => host.listProjects(),
           session: () => window.webContents.session,
-          downloadsDir: () => (typeof app.getPath === 'function' ? app.getPath('downloads') : ''),
+          downloadsDir,
         })
       : null;
   const grantedFile = async (accessToken: unknown, projectPath: unknown, relPath: unknown) =>
@@ -387,6 +401,8 @@ export function registerDesktopIpc(
     DESKTOP_IPC.termAcknowledge,
     DESKTOP_IPC.termData,
     DESKTOP_IPC.termSizeOwner,
+    DESKTOP_IPC.termActivityChanged,
+    DESKTOP_IPC.termFocus,
     DESKTOP_IPC.lspDiagnostics,
     DESKTOP_IPC.lspStatus,
     DESKTOP_IPC.remoteClientClaim,

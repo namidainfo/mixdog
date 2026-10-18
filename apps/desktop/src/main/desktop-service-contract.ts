@@ -55,7 +55,11 @@ export interface DesktopService {
   listSessions(): Promise<DesktopSessionSummary[]>;
   /** `signal` stops the read when aborted (rejects with the signal's reason);
    *  it is local to the caller and never travels over the service IPC. */
-  readSessionFinalAnswer(sessionId: string, startedAt: number, signal?: AbortSignal): Promise<SessionFinalAnswer | null>;
+  readSessionFinalAnswer(
+    sessionId: string,
+    startedAt: number,
+    signal?: AbortSignal
+  ): Promise<SessionFinalAnswer | null>;
   /** Base64 of a stored attachment blob; null when it is permanently unreadable. */
   readAttachmentImage(attachmentRef: string): Promise<string | null>;
   /** The session's transcript as this host holds it (the window its views
@@ -70,6 +74,7 @@ export interface DesktopService {
   scheduleQuotaResume(sessionId: string): Promise<boolean>;
   cancelQuotaResume(sessionId: string): Promise<boolean>;
   stopShellJob(sessionId: string, taskId: string): Promise<{ stopped: boolean; error?: string }>;
+  releaseShellJob(sessionId: string, taskId: string): Promise<{ released: boolean; error?: string }>;
   getQuotaAutoResume(): Promise<boolean>;
   setQuotaAutoResume(enabled: boolean): Promise<boolean>;
   setSessionArchived(sessionId: string, archived: boolean): unknown;
@@ -160,6 +165,7 @@ export const DESKTOP_SERVICE_METHODS = [
   'listSessions',
   'readSessionFinalAnswer',
   'readAttachmentImage',
+  'readSessionTranscript',
   'markSessionRead',
   'listAgentPool',
   'searchSessionContent',
@@ -168,6 +174,7 @@ export const DESKTOP_SERVICE_METHODS = [
   'scheduleQuotaResume',
   'cancelQuotaResume',
   'stopShellJob',
+  'releaseShellJob',
   'getQuotaAutoResume',
   'setQuotaAutoResume',
   'setSessionArchived',

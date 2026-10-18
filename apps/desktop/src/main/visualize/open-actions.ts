@@ -126,6 +126,7 @@ async function openInline(
       reloadTimer: null,
       problems: [],
       problemSeq: 0,
+      allowNetwork: true,
     };
     ctx.tabs.addTab(sessionId, tab);
   }
@@ -158,10 +159,7 @@ async function openInline(
   sessionCwds.set(sessionId, cwd);
   ctx.thumbnails.refresh(sessionId, tab);
   return {
-    text: withProblems(
-      tab,
-      `${placed} Open again with the same title to add a version.${versionNote(tab)}`
-    ),
+    text: withProblems(tab, `${placed} Open again with the same title to add a version.${versionNote(tab)}`),
     tabs: [summary(tab)],
     ...problemsOf(tab),
   };
@@ -266,6 +264,7 @@ export function createOpenActions(ctx: OpenContext) {
         reloadTimer: null,
         problems: [],
         problemSeq: 0,
+        allowNetwork: true,
       };
       ctx.tabs.addTab(sessionId, tab);
     }

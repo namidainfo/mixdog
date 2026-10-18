@@ -271,8 +271,10 @@ export type ComposerProps = {
   /** This pane is the focused, visible one. A payload shared into the app from
    *  outside (share sheet) may only land in a composer the user can see. */
   paneActive?: boolean;
-  /** Replaces the rotating placeholder (a pending question: sending closes it). */
+  /** Replaces the rotating placeholder (a pending question: sending answers it). */
   placeholderOverride?: string;
+  /** Set while a question waits: "Steer now" on a plain queued follow-up answers it. */
+  answerQuestion?: ((reply: string) => Promise<unknown>) | null;
 };
 
 export const Composer = memo(function Composer(props: ComposerProps) {
@@ -306,6 +308,7 @@ export const Composer = memo(function Composer(props: ComposerProps) {
     hiddenQueueIds,
     pendingSubmissionIds,
     onQueuedRestored,
+    answerQuestion,
     promptRestore,
     userMessages,
     submit,
@@ -430,6 +433,7 @@ export const Composer = memo(function Composer(props: ComposerProps) {
     mergeRestoredAttachments,
     showNotice: showComposerNotice,
     onQueuedRestored,
+    answerQuestion,
     scope: historyScope,
   });
   useComposerPromptRestore({ promptRestore, setDraft, draftRef, textarea, onQueuedRestored });
@@ -511,11 +515,7 @@ export const Composer = memo(function Composer(props: ComposerProps) {
   // biome-ignore lint/correctness/useExhaustiveDependencies: identityScope and paneActive are reset triggers; the effect body does not read them
   useEffect(() => setEditingPasteId(null), [identityScope, paneActive]);
   const editingPaste = attachments.find((attachment) => attachment.id === editingPasteId);
-  const btw = useBtwCard(
-    sessionId,
-    paneActive,
-    selector.open || slash.open || mention.open || skillMention.open
-  );
+  const btw = useBtwCard(sessionId, paneActive, selector.open || slash.open || mention.open || skillMention.open);
   const executeSlash = createSlashExecutor({
     draftMode,
     sessionId,
