@@ -178,6 +178,13 @@ export function parseNativeToolSearchPayload(toolName, result) {
     const extraLines = [];
     if (missing.length) extraLines.push(`missing: ${missing.join(', ')}`);
     if (blocked.length) extraLines.push(`blocked: ${blocked.join(', ')}`);
+    // The provider sees this summary instead of the full loader result.
+    // Keep its connection state and recovery guidance, not only missing names.
+    for (const field of ['pendingMcpServers', 'failedMcpServers']) {
+      const servers = parsed[field];
+      if (Array.isArray(servers) && servers.length) extraLines.push(`${field}: ${servers.join(', ')}`);
+    }
+    if (typeof parsed.note === 'string' && parsed.note.trim()) extraLines.push(parsed.note.trim());
     const summary = extraLines.length ? `${baseSummary}\n${extraLines.join('; ')}` : baseSummary;
     return {
       provider,
