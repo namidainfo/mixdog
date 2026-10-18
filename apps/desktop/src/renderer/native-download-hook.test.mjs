@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { deliverPreferNative } from './file-download-transfer.ts';
+import { deliverPreferNative, saveBlobWithSink } from './file-download-transfer.ts';
 import { installNativeDownloadHook } from './native-download-hook.ts';
 import { installTestDom } from './test-support/test-dom.mjs';
 
@@ -69,6 +69,46 @@ test('a lane URL has no Blob and keeps the browser path', async (t) => {
   const result = await deliverPreferNative({ url: '/lane/x' }, { name: 'x', mime: 'a/b' }, async () => 'saved');
   assert.equal(result, 'saved');
   assert.deepEqual(sent(calls, 'fileSaveBegin'), []);
+});
+
+test('a paired PC window navigates the lane URL so its worker can serve the attachment', async (t) => {
+  const { window, document } = installTestDom(t);
+  window.mixdogRemoteWindow = { hostId: 'office', hostName: 'Office PC' };
+  let clicked;
+  document.addEventListener('click', (event) => {
+    event.preventDefault();
+    clicked = event.target;
+  });
+  const url = 'https://mixdog.test/__mixdog-download__/11111111-2222-4333-8444-555555555555';
+  const result = await deliverPreferNative(
+    { url },
+    { name: 'mixdog-personal.exe', mime: 'application/octet-stream' }
+  );
+  assert.equal(result, 'saved');
+  assert.equal(clicked.href, url);
+  assert.equal(clicked.hasAttribute('download'), false, 'the attachment must be requested through the worker');
+  assert.equal(clicked.target, '', 'the paired window keeps its authenticated session');
+  assert.equal(document.querySelector('a'), null);
+});
+
+test('a browser Blob still downloads with its suggested file name', async (t) => {
+  const { document } = installTestDom(t, { globals: { navigator: {} } });
+  const href = 'blob:https://mixdog.test/browser-blob';
+  t.mock.method(URL, 'createObjectURL', () => href);
+  let clicked;
+  document.addEventListener('click', (event) => {
+    event.preventDefault();
+    clicked = event.target;
+  });
+  const result = await saveBlobWithSink(
+    { kind: 'browser' },
+    new Blob(['report'], { type: 'text/plain' }),
+    'report.txt'
+  );
+  assert.equal(result, 'saved');
+  assert.equal(clicked.href, href);
+  assert.equal(clicked.download, 'report.txt');
+  assert.equal(document.querySelector('a'), null);
 });
 
 test('clicking <a download> on a blob: or data: URL saves through the bridge', async (t) => {

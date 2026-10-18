@@ -59,6 +59,10 @@ test('the window presents an ordinary browser so the page installs the relay shi
 
 test('same-origin navigation stays in the window; links leave through the OS', () => {
   assert.equal(isRemoteHostNavigation(LINK, `https://relay.example.com/d/${DEVICE}/assets/x.js`), true);
+  assert.equal(
+    isRemoteHostNavigation(LINK, 'https://relay.example.com/__mixdog-download__/11111111-2222-4333-8444-555555555555'),
+    true
+  );
   assert.equal(isRemoteHostNavigation(LINK, 'https://evil.example.com/'), false);
   assert.equal(isRemoteHostNavigation(LINK, 'garbage'), false);
   assert.equal(externalLinkTarget('https://example.com/a'), 'https://example.com/a');

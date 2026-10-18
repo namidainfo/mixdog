@@ -480,10 +480,10 @@ export async function runFileDownload(
   }
 }
 
-function clickDownload(url: string, name: string): void {
+function clickDownload(url: string, name?: string): void {
   const link = document.createElement('a');
   link.href = url;
-  link.download = name;
+  if (name !== undefined) link.download = name;
   link.rel = 'noopener';
   document.body.append(link);
   link.click();
@@ -497,7 +497,9 @@ async function deliverInBrowser(
   transfer: Pick<FileDownloadTransfer, 'name' | 'mime'>
 ): Promise<BrowserDelivery> {
   if ('url' in target) {
-    clickDownload(target.url, transfer.name);
+    // A download attribute bypasses the service worker in Chromium. Navigate
+    // instead so the worker decrypts the file and supplies its attachment name.
+    clickDownload(target.url);
     return 'saved';
   }
   const file = new File([target.blob], transfer.name, { type: transfer.mime });
