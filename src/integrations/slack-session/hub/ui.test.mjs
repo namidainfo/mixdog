@@ -14,13 +14,14 @@ function snapshot(id, userName = me.userName) {
     records: Array.from({ length: 8 }, (_, i) => ({ id: `${id}-${i}`, kind: i % 2 ? 'verified' : 'decision',
       title: `기록 ${id}-${i}`, body: `본문 ${id}-${i}`, conclusion: '판단', at: 1792110000000 + i, next: '검토', owner: 'user' })) };
 }
-async function harness(t, { admin = false } = {}) {
+async function harness(t, { admin = false, waitingFor = null } = {}) {
   const dom = new JSDOM(await readFile(new URL('public/index.html', import.meta.url), 'utf8'), { url: 'http://127.0.0.1' });
   t.after(() => dom.window.close());
   dom.window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
   dom.window.HTMLDialogElement.prototype.close = function () { this.open = false; };
   dom.window.HTMLElement.prototype.scrollIntoView = function () {};
   const calls = [], docs = [], data = new Map([['a', snapshot('a')], ['b', snapshot('b', 'softon_김민지')]]);
+  data.get('a').waitingFor = waitingFor;
   let failure = false, authenticated = true;
   const request = async (url, options = {}) => {
     calls.push({ url, options });
@@ -88,11 +89,13 @@ test('administrator owner filters also constrain the recent record flow', async 
 });
 
 test('messages identify the Slack owner, AI and errors without trusting author HTML', async (t) => {
-  const h = await harness(t);
+  const h = await harness(t, { waitingFor: '도구 승인' });
   assert.equal(h.$('.message[data-speaker="user"] .message-head strong').textContent, me.userName);
   assert.match(h.$('.message[data-speaker="user"] .message-head').textContent, /사용자/u);
-  assert.equal(h.$('.message[data-speaker="assistant"] .message-head strong').textContent, 'Mixdog');
+  assert.equal(h.$('.message[data-speaker="assistant"] .message-head strong').textContent, 'SOFTON');
   assert.match(h.$('.message[data-speaker="assistant"] .message-head').textContent, /AI/u);
+  assert.match(h.$('#login').textContent, /아직 SOFTON 세션이 없어도 로그인할 수 있습니다\./u);
+  assert.equal(h.$('#active-panel .notice').textContent, '도구 승인 대기 중입니다. 질문에는 원래 Slack 스레드에서 답변해 주세요. 일반 사용자의 도구 실행은 PC 소유자가 SOFTON 승인 화면에서 확인해야 합니다.');
   assert.equal(h.$('link[rel="icon"][type="image/x-icon"]').getAttribute('href'), '/favicon.ico');
   assert.equal(h.$('.brand-mark').getAttribute('src'), '/favicon-32.png');
 });

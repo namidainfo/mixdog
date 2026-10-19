@@ -166,11 +166,11 @@ export function mountHub(document, request) {
         const article = el('article', 'message'), heading = el('div', 'message-head');
         const speaker = ['user', 'assistant', 'error'].includes(message.by) ? message.by : 'error';
         article.dataset.speaker = speaker;
-        heading.append(el('strong', '', speaker === 'user' ? snapshot.userName || snapshot.userId : speaker === 'error' ? '시스템' : 'Mixdog'),
+        heading.append(el('strong', '', speaker === 'user' ? snapshot.userName || snapshot.userId : speaker === 'error' ? '시스템' : 'SOFTON'),
           el('span', '', speaker === 'user' ? '사용자' : speaker === 'error' ? '오류' : 'AI'), el('time', '', stamp(message.at)));
         article.append(heading, el('p', 'message-body', message.text)); panel.append(article);
       }
-      if (snapshot.waitingFor) panel.append(el('p', 'notice', `${snapshot.waitingFor} 대기 중입니다. 질문에는 원래 Slack 스레드에서 답변해 주세요. 일반 사용자의 도구 실행은 PC 소유자가 Mixdog 승인 화면에서 확인해야 합니다.`));
+      if (snapshot.waitingFor) panel.append(el('p', 'notice', `${snapshot.waitingFor} 대기 중입니다. 질문에는 원래 Slack 스레드에서 답변해 주세요. 일반 사용자의 도구 실행은 PC 소유자가 SOFTON 승인 화면에서 확인해야 합니다.`));
     }
     if (tab === 'files') renderFiles(panel, snapshot);
     if (tab === 'records') {
