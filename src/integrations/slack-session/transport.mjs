@@ -78,6 +78,7 @@ export class SlackWorkerTransport extends EventEmitter {
     try {
       await this.call('health', {});
       if (o.hubOptions) await this.call('startHub', o.hubOptions);
+      this.log('Mixdog native session transport ready');
     } catch (error) {
       // A logon can race daemon readiness. Never retain a half-initialized
       // child that makes later start() calls falsely look successful.

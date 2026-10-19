@@ -112,6 +112,48 @@ function harness({ store = new MemoryStore(), transport = new FakeTransport(), m
   return { relay, store, transport, sent, message, conversation };
 }
 
+test('an idle logon retries the native connection after the daemon becomes ready without creating a request', async (t) => {
+  const transport = new FakeTransport();
+  let ready = false, attempts = 0;
+  transport.start = async () => {
+    attempts++;
+    if (!ready) throw new Error('daemon not ready');
+  };
+  const h = harness({ transport });
+  t.after(() => h.relay.close());
+  await h.relay.start();
+  assert.equal(attempts, 1);
+  ready = true;
+  await h.relay.tick();
+  assert.equal(attempts, 2);
+  assert.equal(h.store.listConversations().length, 0);
+  assert.deepEqual(transport.calls, []);
+  assert.deepEqual(h.sent, []);
+});
+
+test('idle polling reconnects a lost worker and stops reconnecting after the relay closes', async () => {
+  const transport = new FakeTransport();
+  let connected = false, connections = 0;
+  transport.start = async () => {
+    if (connected) return;
+    connections++;
+    connected = true;
+  };
+  const h = harness({ transport });
+  await h.relay.start();
+  await h.relay.tick();
+  assert.equal(connections, 1);
+  connected = false;
+  transport.emit('offline', new Error('worker exited'));
+  await h.relay.tick();
+  assert.equal(connections, 2);
+  assert.deepEqual(transport.calls, []);
+  await h.relay.close();
+  connected = false;
+  await h.relay.tick();
+  assert.equal(connections, 2);
+});
+
 test('rotated native IDs remain in the same owner history', async () => {
   const h = harness();
   await h.relay.start();

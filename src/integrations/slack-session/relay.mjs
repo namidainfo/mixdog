@@ -48,12 +48,6 @@ export class SlackMixdogRelay {
       for (const item of conversation.outbox) if (item.status === 'posting') item.status = 'uncertain';
       await this.save(key, conversation);
     }
-    try {
-      await this.transport.start();
-      this.log('Mixdog native session transport ready');
-    } catch (error) {
-      this.log(`Mixdog 준비 대기: ${error.message}`);
-    }
     await this.tick();
     this.timer = setInterval(() => void this.tick().catch((error) => this.log(error.message)), this.config.pollIntervalMs);
     this.timer.unref?.();
@@ -453,6 +447,12 @@ export class SlackMixdogRelay {
     if (this.closed || this.ticking) return;
     this.ticking = true;
     try {
+      // The hub must reconnect even when there are no pending Slack requests.
+      try {
+        await this.transport.start();
+      } catch (error) {
+        this.log(`Mixdog 준비 대기: ${error.message}`);
+      }
       await Promise.all(this.store.listConversations().map(([key]) => this.serial(key, async () => {
         const conversation = this.store.getConversation(key);
         await this.flush(key, conversation);
