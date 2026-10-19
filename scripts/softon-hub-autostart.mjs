@@ -30,6 +30,11 @@ export async function startHubAtLogon({ probeDaemon, launchApp, startBridge, pro
   return { ready: true };
 }
 
+export async function recordHubStartup(receipt, entry) {
+  await fs.appendFile(path.join(path.dirname(receipt), 'startup.jsonl'), `${JSON.stringify(entry)}\n`);
+  await fs.writeFile(receipt, JSON.stringify(entry, null, 2));
+}
+
 function launch(executable, args, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, { windowsHide: true, ...options });
@@ -72,8 +77,8 @@ async function main() {
   const executable = path.join(local, 'Programs', 'mixdog-personal', 'Mixdog Personal.exe');
   const receipt = path.join(local, 'SOFTON', 'session-hub', 'startup.json');
   await fs.mkdir(path.dirname(receipt), { recursive: true });
-  const record = (status, error) => fs.writeFile(receipt,
-    JSON.stringify({ status, at: new Date().toISOString(), origin: origin.origin, error: error || undefined }, null, 2));
+  const record = (status, error) => recordHubStartup(receipt,
+    { status, at: new Date().toISOString(), origin: origin.origin, error: error || undefined });
   try {
     const ca = await fs.readFile(values['tls-cert']);
     await startHubAtLogon({

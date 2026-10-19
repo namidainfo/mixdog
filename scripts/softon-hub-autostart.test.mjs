@@ -1,6 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { startHubAtLogon } from './softon-hub-autostart.mjs';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { recordHubStartup, startHubAtLogon } from './softon-hub-autostart.mjs';
+
+test('startup receipts expose the latest state without losing earlier failures from the operational log', async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'softon-startup-log-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const receipt = path.join(directory, 'startup.json');
+  const entries = [
+    { status: 'starting', at: '2026-10-19T00:00:00.000Z', origin: 'https://192.168.19.118:8797' },
+    { status: 'failed', at: '2026-10-19T00:02:00.000Z', error: 'service failed' },
+    { status: 'ready', at: '2026-10-19T00:03:00.000Z', origin: 'https://192.168.19.118:8797' },
+  ];
+  for (const entry of entries) await recordHubStartup(receipt, entry);
+  assert.deepEqual(JSON.parse(await fs.readFile(receipt, 'utf8')), entries[2]);
+  const history = (await fs.readFile(path.join(directory, 'startup.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.deepEqual(history, entries);
+});
 
 test('a cold logon launches the background host once, waits for its daemon, then starts and verifies the hub', async () => {
   const events = []; let time = 0, probes = 0, hub = 0;
