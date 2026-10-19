@@ -39,7 +39,6 @@ import { providerCacheKey } from './provider-cache-key.mjs';
 import { buildSessionRecord, normalizeDesktopSessionMetadata, sessionOriginFields } from './session-record.mjs';
 import { normalizeWorkflowRoute } from '../../runtime-core/workflow.mjs';
 import { applyPendingWorkspaceReroot, refreshSessionBp3Environment } from './prompt-utils.mjs';
-import { reserveSessionTitle } from '../store/title-sequence.mjs';
 import { isWorktreeBound } from '../../../../shared/worktrees/contract.mjs';
 import { applyAgentToolExposure } from '../loop/tool-exposure-migration.mjs';
 import { retainBloomProjectMetadata } from '../../../../shared/desktop-session-metadata.mjs';
@@ -253,11 +252,6 @@ export function createSession(opts) {
   // A non-native agent sends core + bridge, built from its filtered tools.
   applyAgentToolExposure(session);
   refreshSessionBp3Environment(session, opts.cwd);
-  const titleReservation = opts.titleReservation || reserveSessionTitle(session);
-  if (titleReservation) {
-    session.createdAt = titleReservation.createdAt;
-    session.generatedTitlePrefix = titleReservation.prefix;
-  }
   initializeBloomSessionTitle(session);
   // In-process registry + async debounced save: same-process create → load
   // reads live memory; disk flush is for cross-process / restart durability.

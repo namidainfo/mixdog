@@ -138,7 +138,7 @@ export function buildSessionRecord({ opts, route, presetObj, surface, prompt, me
     workflow: toSessionWorkflowMeta(opts.workflow),
     orchestrationMode: sessionOrchestrationMode(opts),
     disallowedTools: surface.sessionDeny.map((name) => String(name)),
-    createdAt: Date.now(),
+    createdAt: opts.createdAt ?? Date.now(),
     updatedAt: Date.now(),
     lastHeartbeatAt: null,
     totalInputTokens: 0,

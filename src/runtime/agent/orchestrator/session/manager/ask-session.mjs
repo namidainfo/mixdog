@@ -19,6 +19,7 @@ import { armTurnDurability, claimTurnRuntime } from './ask-turn-open.mjs';
 import { prepareAskTurn, runAskAgentLoop } from './ask-turn-execute.mjs';
 import { commitAskTurn, publishAskTurn } from './ask-turn-settle.mjs';
 import { finalizeAskTurnFailure } from './ask-turn-failure.mjs';
+import { assignSessionTitlePrefix } from '../store/title-sequence.mjs';
 
 export { _api_call_with_interrupt } from './ask-call-interrupt.mjs';
 export {
@@ -204,6 +205,7 @@ export async function askSession(sessionId, prompt, context, onToolCall, cwdOver
       crashRecoveryChecked = true;
       sessionStartEmitted = true;
       askGeneration = claimed.askGeneration;
+      if (!input.promptSource) assignSessionTitlePrefix(claimed.preSession);
       const opened = {
         ...claimed,
         ...armTurnDurability({ sessionId, ...claimed, pendingEntries: input.pendingEntries }),

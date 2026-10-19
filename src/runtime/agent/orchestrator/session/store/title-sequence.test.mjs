@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { reserveSessionTitle } from './title-sequence.mjs';
+import { assignSessionTitlePrefix, reserveSessionTitle } from './title-sequence.mjs';
 import { sessionTitleDateKey, sessionTitleDatePrefix, splitSessionTitleDatePrefix } from '../../../../shared/session-title-format.mjs';
 
 function fixture(t) {
@@ -82,6 +82,47 @@ test('internal agents do not consume numbers but root Lead sessions do', (t) => 
     id: 'sess_lead', agent: 'lead', ownerSessionId: 'sess_lead', visibility: 'agent-only', createdAt,
   }).prefix, '261012-000 | ');
   assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { 20261012: 1 });
+});
+
+test('first real input numbers the current local day once and preserves the reservation timestamp', (t) => {
+  const { path } = fixture(t);
+  const createdAt = new Date(2026, 9, 11, 23, 59).getTime();
+  const session = { createdAt, title: '[261011] [Bloom] 새 대화' };
+  assert.equal(existsSync(path), false);
+  assert.equal(assignSessionTitlePrefix(session, new Date(2026, 9, 12, 0, 1).getTime()), true);
+  assert.equal(session.createdAt, createdAt);
+  assert.equal(session.generatedTitlePrefix, '261012-000 | ');
+  assert.equal(session.title, '261012-000 | [Bloom] 새 대화');
+  assert.equal(assignSessionTitlePrefix(session, new Date(2026, 9, 13).getTime()), false);
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { 20261012: 1 });
+});
+
+test('existing numbers, closed sessions and internal agents do not allocate another number', (t) => {
+  const { path } = fixture(t);
+  for (const session of [
+    { generatedTitlePrefix: '261011-007 | ', title: 'Existing title' },
+    { closed: true },
+    { id: 'sess_child', owner: 'agent', parentSessionId: 'sess_parent', agent: 'worker' },
+    { id: 'sess_cycle', owner: 'agent', agent: 'cycle1-agent' },
+  ]) {
+    const before = structuredClone(session);
+    assert.equal(assignSessionTitlePrefix(session, new Date(2026, 9, 12).getTime()), false);
+    assert.deepEqual(session, before);
+  }
+  assert.equal(existsSync(path), false);
+});
+
+test('manual titles only gain a number when prefix preservation was explicitly requested', (t) => {
+  const { path } = fixture(t);
+  const numberedAt = new Date(2026, 9, 12).getTime();
+  const manual = { title: 'Custom title', titleLocked: true };
+  assert.equal(assignSessionTitlePrefix(manual, numberedAt), true);
+  assert.equal(manual.title, 'Custom title');
+  const pending = { title: 'softon_user | Work', titleLocked: true, titlePrefixPending: true };
+  assert.equal(assignSessionTitlePrefix(pending, numberedAt), true);
+  assert.equal(pending.title, '261012-001 | softon_user | Work');
+  assert.equal(pending.titlePrefixPending, undefined);
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { 20261012: 2 });
 });
 
 test('the thousandth boundary expands the number instead of wrapping it', (t) => {

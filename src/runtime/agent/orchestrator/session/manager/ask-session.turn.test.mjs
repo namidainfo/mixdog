@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -19,6 +19,7 @@ process.env.MIXDOG_AGENT_TRACE_DISABLE = '1';
 mkdirSync(process.env.MIXDOG_DATA_DIR, { recursive: true });
 const { createSession } = await import('./session-lifecycle.mjs');
 const { askSession } = await import('./ask-session.mjs');
+const { updateSessionManualTitle } = await import('./session-crud.mjs');
 const { deleteSession, loadSession } = await import('../store.mjs');
 const { enqueuePendingMessage } = await import('./pending-messages.mjs');
 const { renderShellCompletionEnvelope } = await import('../../../../shared/task-notification-envelope.mjs');
@@ -34,6 +35,13 @@ process.on('exit', () => {
     /* best-effort */
   }
 });
+
+function titleCounters() {
+  const path = join(process.env.MIXDOG_DATA_DIR, 'session-title-sequences.json');
+  return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {};
+}
+
+const allocatedTitles = (counters) => Object.values(counters).reduce((sum, value) => sum + value, 0);
 
 async function withAskHarness(t, run) {
   const sessions = [];
@@ -103,6 +111,63 @@ test('a turn returns the provider answer and commits user + assistant messages w
     assert.equal(tail[1].content, 'answer');
     assert.equal(stored.totalInputTokens, 10);
     assert.equal(stored.totalOutputTokens, 5);
+  });
+});
+
+test('empty asks and synthetic turns do not number a session; its first real input does once', async (t) => {
+  await withAskHarness(t, async ({ session, askSession, loadSession, sends }) => {
+    const before = titleCounters();
+    assert.equal(session.generatedTitlePrefix, undefined);
+    await askSession(session.id, '', null, null, null, null, {});
+    assert.equal(sends.length, 0);
+    for (const promptSource of ['task-notification', 'goal-continuation', 'goal-closeout']) {
+      await askSession(session.id, 'Runtime notification', null, null, null, null, { promptSource });
+      assert.equal(loadSession(session.id).generatedTitlePrefix, undefined);
+      assert.deepEqual(titleCounters(), before);
+    }
+    await askSession(
+      session.id, [{ type: 'text', text: 'First actual task' }], null, null, null, null, {},
+    );
+    const stored = loadSession(session.id);
+    const prefix = stored.generatedTitlePrefix;
+    assert.match(prefix, /^\d{6}-\d{3,} \| $/);
+    assert.equal(stored.title, `${prefix}First actual task`);
+    const afterFirstInput = titleCounters();
+    assert.equal(allocatedTitles(afterFirstInput), allocatedTitles(before) + 1);
+    await askSession(session.id, 'Second actual task', null, null, null, null, {});
+    assert.equal(loadSession(session.id).generatedTitlePrefix, prefix);
+    assert.deepEqual(titleCounters(), afterFirstInput);
+  });
+});
+
+test('a prefix-preserving manual name is numbered only by its first actual input', async (t) => {
+  await withAskHarness(t, async ({ session, askSession, loadSession }) => {
+    const before = titleCounters();
+    const title = 'softon_user | Requested work';
+    assert.equal(await updateSessionManualTitle(session.id, title, { preservePrefix: true }), true);
+    assert.equal(loadSession(session.id).title, title);
+    assert.equal(loadSession(session.id).titlePrefixPending, true);
+    assert.deepEqual(titleCounters(), before);
+    await askSession(session.id, 'Start the requested work', null, null, null, null, {});
+    const stored = loadSession(session.id);
+    assert.match(stored.generatedTitlePrefix, /^\d{6}-\d{3,} \| $/);
+    assert.equal(stored.title, `${stored.generatedTitlePrefix}${title}`);
+    assert.equal(stored.titleLocked, true);
+    assert.equal(stored.titlePrefixPending, undefined);
+    assert.equal(allocatedTitles(titleCounters()), allocatedTitles(before) + 1);
+  });
+});
+
+test('concurrent first asks for one session allocate only one conversation number', async (t) => {
+  await withAskHarness(t, async ({ session, askSession, loadSession, sends }) => {
+    const before = titleCounters();
+    await Promise.all([
+      askSession(session.id, 'First queued task', null, null, null, null, {}),
+      askSession(session.id, 'Second queued task', null, null, null, null, {}),
+    ]);
+    assert.equal(sends.length, 2);
+    assert.match(loadSession(session.id).generatedTitlePrefix, /^\d{6}-\d{3,} \| $/);
+    assert.equal(allocatedTitles(titleCounters()), allocatedTitles(before) + 1);
   });
 });
 

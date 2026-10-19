@@ -44,8 +44,7 @@ export function sessionOptions(deps, coreMemoryContext) {
     ...(!agentOwned && rt.disallowDelegation ? ['agent'] : []),
   ];
   const sessionOpts = {
-    ...(rt.reservedSessionId ? { id: rt.reservedSessionId } : {}),
-    ...(rt.reservedSessionId && rt.reservedSessionTitle ? { titleReservation: rt.reservedSessionTitle } : {}),
+    ...(rt.reservedSessionId ? { id: rt.reservedSessionId, createdAt: rt.reservedSessionCreatedAt } : {}),
     provider: rt.route.provider,
     model: rt.route.model,
     preset: rt.route.preset || undefined,

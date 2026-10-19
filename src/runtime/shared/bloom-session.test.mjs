@@ -56,7 +56,7 @@ test('a provisional Bloom name is replaced by the first real request without loc
   assert.equal(value.cwd, 'C:/actual-work');
 });
 
-test('manual and non-Bloom titles remain untouched', () => {
+test('manual titles stay untouched and ordinary fallback titles keep their number without a Bloom label', () => {
   const manual = session({ title: 'My manual title', titleLocked: true, bloomTitlePending: true });
   assert.equal(initializeBloomSessionTitle(manual), false);
   assert.equal(backfillFallbackSessionTitle(manual, [{ role: 'user', content: 'Do not rename' }]), false);
@@ -64,7 +64,7 @@ test('manual and non-Bloom titles remain untouched', () => {
   const ordinary = session({ desktopSession: null });
   assert.equal(initializeBloomSessionTitle(ordinary), false);
   assert.equal(backfillFallbackSessionTitle(ordinary, [{ role: 'user', content: 'Normal title' }]), true);
-  assert.equal(ordinary.title, 'Normal title');
+  assert.equal(ordinary.title, '260102-007 | Normal title');
   assert.equal(bloomSessionTitle(ordinary, 'Unchanged'), 'Unchanged');
 });
 

@@ -93,15 +93,25 @@ export async function updateSessionGeneratedTitle(id, title, stage) {
   await saveSessionAsync(session, { expectedGeneration: session.generation });
   return true;
 }
-export async function updateSessionManualTitle(id, title) {
+export async function updateSessionManualTitle(id, title, options = {}) {
   const session = loadSession(id);
   if (!session || session.closed === true) return false;
-  const normalized = normalizeSessionTitle(title);
-  if (!normalized) return false;
-  if (session.title === normalized && session.titleLocked === true && session.titleSource === 'user') return false;
+  const body = normalizeSessionTitle(title);
+  if (!body) return false;
+  const preservePrefix = options.preservePrefix === true;
+  const normalized = `${preservePrefix ? session.generatedTitlePrefix || '' : ''}${body}`;
+  const prefixPending = preservePrefix && !session.generatedTitlePrefix;
+  if (
+    session.title === normalized &&
+    session.titleLocked === true &&
+    session.titleSource === 'user' &&
+    (session.titlePrefixPending === true) === prefixPending
+  ) return false;
   session.title = normalized;
   session.titleLocked = true;
   session.titleSource = 'user';
+  if (prefixPending) session.titlePrefixPending = true;
+  else delete session.titlePrefixPending;
   delete session.bloomTitlePending;
   session.titleUpdatedAt = Date.now();
   await saveSessionAsync(session, { expectedGeneration: session.generation });

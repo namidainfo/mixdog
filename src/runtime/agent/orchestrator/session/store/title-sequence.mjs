@@ -4,7 +4,11 @@ import { getPluginData } from '../../config.mjs';
 import { isHiddenAgent } from '../../internal-agents.mjs';
 import { isOrdinarySession } from '../store-summary-visibility.mjs';
 import { withFileLockSync, writeJsonAtomicSync } from '../../../../shared/atomic-file.mjs';
-import { sessionTitleDateKey, sessionTitleDatePrefix } from '../../../../shared/session-title-format.mjs';
+import {
+  sessionTitleDateKey,
+  sessionTitleDatePrefix,
+  splitSessionTitleDatePrefix,
+} from '../../../../shared/session-title-format.mjs';
 
 // Independent of the session catalog: deleting a session must not free its
 // number. The lock covers both the read and durable increment across processes.
@@ -32,4 +36,18 @@ export function reserveSessionTitle(session) {
     writeJsonAtomicSync(path, counters, { lock: false });
     return { createdAt, prefix: sessionTitleDatePrefix(createdAt, sequence) };
   });
+}
+
+// Called only when the ask queue admits a real user prompt, under its session
+// lock. Empty reservations and service-control reads never reach this boundary.
+export function assignSessionTitlePrefix(session, numberedAt = Date.now()) {
+  if (session.closed === true || session.generatedTitlePrefix) return false;
+  const reservation = reserveSessionTitle({ ...session, createdAt: numberedAt });
+  if (!reservation) return false;
+  session.generatedTitlePrefix = reservation.prefix;
+  if (session.title && (session.titleLocked !== true || session.titlePrefixPending === true)) {
+    session.title = `${reservation.prefix}${splitSessionTitleDatePrefix(session.title).title}`;
+  }
+  delete session.titlePrefixPending;
+  return true;
 }

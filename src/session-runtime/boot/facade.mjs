@@ -7,7 +7,6 @@ import { createRuntimeFacade } from '../runtime-facade.mjs';
 import { bootProfile } from '../boot-profile.mjs';
 import { assertAdmissionOpen, bindSessionAddress } from '../session-address.mjs';
 import { dataDirOf, workflowHelpers } from './shared.mjs';
-import { reserveSessionTitle } from '../../runtime/agent/orchestrator/session/store/title-sequence.mjs';
 import { saveSessionAsync } from '../../runtime/agent/orchestrator/session/store.mjs';
 import { normalizeSlackExecutionPolicy } from '../../runtime/shared/slack-execution-policy.mjs';
 import path from 'node:path';
@@ -92,13 +91,7 @@ function reserveSessionId(boot, id) {
   assertAdmissionOpen(rt);
   bindSessionAddress(rt, id);
   if (!rt.session?.id && rt.reservedSessionId !== id) {
-    const profile = rt.sessionProfile || {};
-    rt.reservedSessionTitle = reserveSessionTitle({
-      ...profile,
-      id,
-      visibility: profile.owner === 'agent' ? 'agent-only' : profile.visibility,
-      createdAt: Date.now(),
-    });
+    rt.reservedSessionCreatedAt = Date.now();
   }
   if (!rt.session?.id) rt.reservedSessionId = id;
   boot.bindRuntimeNotificationSession(id);
@@ -145,14 +138,12 @@ function facadeGetters(boot) {
     getContextStatusForSession: boot.computeContextStatusForSession,
     renameSessionTitle: async (sessionId, title, options = {}) => {
       if (options.preservePrefix !== true) return mgr.updateSessionManualTitle(sessionId, title);
-      // Naming a reserved session materializes its existing address and number,
-      // without submitting a prompt or starting a model response.
+      // Naming a reservation materializes its address, not a conversation
+      // number. Prefix-preserving names gain that number on the first input.
       if (sessionId === rt.reservedSessionId && !rt.session?.id) {
         await boot.createCurrentSession('reservation');
       }
-      const session = mgr.getSession(sessionId);
-      if (!session?.generatedTitlePrefix) return false;
-      return mgr.updateSessionManualTitle(sessionId, `${session.generatedTitlePrefix}${title}`);
+      return mgr.updateSessionManualTitle(sessionId, title, { preservePrefix: true });
     },
   };
 }

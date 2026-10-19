@@ -72,7 +72,7 @@ export function fallbackTitleFromMessages(messages) {
 export function applyFallbackSessionTitle(session, title) {
   if (!session || !isUsableTitle(title) || (isUsableTitle(session.title) && !hasPendingBloomTitle(session))) return false;
   if (session.titleLocked === true || session.generatedTitleStage) return false;
-  session.title = bloomSessionTitle(session, title);
+  session.title = bloomSessionTitle(session, `${session.generatedTitlePrefix || ''}${title}`);
   delete session.bloomTitlePending;
   session.titleUpdatedAt = Date.now();
   return true;
