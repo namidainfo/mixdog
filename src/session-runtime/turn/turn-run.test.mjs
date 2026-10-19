@@ -241,7 +241,7 @@ test('a first turn creates the session, folds MCP once, bridges the callbacks an
     'the review baseline begins once the session and its workspace are final'
   );
   assert.deepEqual(h.named('snapshot.complete'), [['snapshot.complete', 'sess_new']]);
-  assert.deepEqual(h.named('mcpGrace'), [['mcpGrace', 250]], 'the fresh session takes the first-turn MCP fold once');
+  assert.deepEqual(h.named('mcpGrace'), [['mcpGrace', undefined]], 'the fresh session waits within the startup budget');
   assert.equal(h.state.session.deferredInitialRefreshPending, false);
   assert.deepEqual(h.named('askSession')[0][1], {
     id: 'sess_new',
@@ -300,30 +300,90 @@ test('a first turn creates the session, folds MCP once, bridges the callbacks an
   );
 });
 
-test("an agent session's first turn waits for the initial MCP connect instead of the TTFT grace", async () => {
+for (const [label, ownership] of [
+  ['user', {}],
+  ['agent', { owner: 'agent' }],
+  ['agent-only', { visibility: 'agent-only' }],
+]) {
+  test(`a fresh ${label} session waits for the initial MCP connect, but later turns only get the TTFT grace`, async () => {
+    const h = makeHarness({
+      createCurrentSession: async () => {
+        const session = { id: `sess_${label}`, ...ownership, deferredInitialRefreshPending: true };
+        h.sessions.set(session.id, session);
+        h.state.session = session;
+        return session;
+      },
+    });
+    await h.runner.ask('use the MCP tools', {});
+    assert.deepEqual(
+      h.named('mcpGrace'),
+      [['mcpGrace', undefined]],
+      'an undefined cap bounds the wait by the server startup budget only'
+    );
+    assert.equal(h.state.session.deferredInitialRefreshPending, false);
+
+    const later = await h.runner.ask('again', {});
+    assert.equal(later.session.id, `sess_${label}`);
+    assert.deepEqual(
+      h.named('mcpGrace')[1],
+      ['mcpGrace', 250],
+      'later turns keep the late-tool path with the normal grace'
+    );
+  });
+}
+
+test('the first user prompt is not sent while initial MCP discovery is pending', async () => {
+  const entered = Promise.withResolvers();
+  const connected = Promise.withResolvers();
+  let waitCap = null;
   const h = makeHarness({
-    createCurrentSession: async () => {
-      const session = { id: 'sess_agent', owner: 'agent', deferredInitialRefreshPending: true };
-      h.sessions.set(session.id, session);
-      h.state.session = session;
-      return session;
+    mcpTurnGraceMs: 0,
+    awaitInitialMcpConnect: async (cap) => {
+      waitCap = cap;
+      entered.resolve();
+      await connected.promise;
     },
   });
-  await h.runner.ask('use the MCP tools', {});
-  assert.deepEqual(
-    h.named('mcpGrace'),
-    [['mcpGrace', undefined]],
-    'an undefined cap bounds the wait by the server startup budget only'
-  );
-  assert.equal(h.state.session.deferredInitialRefreshPending, false);
+  const turn = h.runner.ask('use the registered MCP tools', {});
+  await entered.promise;
+  assert.deepEqual(h.named('askSession'), []);
+  connected.resolve();
+  await turn;
+  assert.equal(waitCap, undefined, 'the zero TTFT grace must not bypass initial discovery');
+  assert.equal(h.named('askSession').length, 1);
+});
 
-  const later = await h.runner.ask('again', {});
-  assert.equal(later.session.id, 'sess_agent');
-  assert.deepEqual(
-    h.named('mcpGrace')[1],
-    ['mcpGrace', 250],
-    'later agent turns keep the late-tool path with the normal grace'
-  );
+test('an initial MCP connection failure does not block the first user prompt', async () => {
+  const h = makeHarness({
+    awaitInitialMcpConnect: async () => {
+      throw new Error('MCP startup failed');
+    },
+  });
+  await h.runner.ask('continue without the failed server', {});
+  assert.equal(h.named('askSession').length, 1);
+  assert.equal(h.state.session.deferredInitialRefreshPending, false);
+});
+
+test('a user can cancel the first turn while initial MCP discovery is pending', async () => {
+  const entered = Promise.withResolvers();
+  let controller;
+  const h = makeHarness({
+    registerActiveTurnController: (value) => {
+      controller = value;
+      return () => {};
+    },
+    awaitInitialMcpConnect: async () => {
+      entered.resolve();
+      await new Promise(() => {});
+    },
+  });
+  const turn = h.runner.ask('wait for MCP discovery', {});
+  const cancelled = assert.rejects(turn, { name: 'AbortError' });
+  await entered.promise;
+  controller.abort();
+  await cancelled;
+  assert.deepEqual(h.named('askSession'), []);
+  assert.equal(h.state.activeTurns, 0);
 });
 
 test('a later turn on an existing session skips creation, the first-turn fold and the one-shot warmups', async () => {
