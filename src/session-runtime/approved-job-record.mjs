@@ -56,7 +56,7 @@ export async function recordApprovedJob({ session, scopeId, input, execute, save
     const caseId = matches[0].case_id;
     await call('note_turn', {
       case_id: caseId, kind: input.status === 'completed' ? 'verified' : 'finding',
-      observed: `관리자 작업의 요청과 실제 결과\n\n요청자: ${requester}\n���인자: ${approvedBy}\n요청: ${goal}\n검증 기준: ${checks}\n실제 상태: ${input.status}\n관리자가 검토한 결과: ${summary}`,
+      observed: `관리자 작업의 요청과 실제 결과\n\n요청자: ${requester}\n승인자: ${approvedBy}\n요청: ${goal}\n검증 기준: ${checks}\n실제 상태: ${input.status}\n관리자가 검토한 결과: ${summary}`,
       conclusion: `관리자 작업 결과\n\n${input.status === 'completed' ? '관리자가 실행과 검증 결과를 확인했다.' : '요청과 실행 결과를 구분하며 성공으로 처리하지 않았다.'}`,
       next: '관리자가 후속 작업 필요 여부를 판단한다\n\n추가 변경·배포는 별도 승인 없이 수행하지 않는다.',
       owner: 'user', client: 'Mixdog Personal',
