@@ -17,6 +17,7 @@ import { normalizeAskUserAnswers } from '../../session-runtime/internal-tool-exe
 import { SLACK_PROJECT_CWD } from './project.mjs';
 import { projectHubState } from './hub/projection.mjs';
 import { HubFiles } from './hub/files.mjs';
+import { ApprovedJobRunner } from './approved-jobs.mjs';
 import { slackSessionOwners } from './identity.mjs';
 import { normalizeSlackExecutionPolicy, slackWorkspace, isPrivateSlackPath } from '../../runtime/shared/slack-execution-policy.mjs';
 
@@ -205,12 +206,21 @@ export class NativeSlackClient {
     if (origin?.startsWith('https:') && (!tlsKeyPath || !tlsCertPath)) throw new Error('Windows의 TLS 개인키·인증서 경로를 설정해 주세요.');
     const tls = origin?.startsWith('https:')
       ? { key: await fs.readFile(tlsKeyPath), cert: await fs.readFile(tlsCertPath) } : undefined;
+    const jobRunner = new ApprovedJobRunner({
+      createSession: (options) => this.createSession(options), options: this.options,
+      access: (person) => this.hubBridge.call('executionAccess', { principal: person }),
+    });
     const hub = await createSessionHub({
       origin, adminUsers, tls,
       documentsFile: documentsFile || path.join(os.homedir(), '.local/state/mixdog-slack-bridge/hub-documents.json'),
       store: { listConversations: () => this.hubBridge.call('conversations') },
       authorize: (message) => this.hubBridge.call('authorize', message),
       sendCode: (person, code) => this.hubBridge.call('sendCode', { person, code }),
+      jobRunner,
+      jobNotify: (job, event, inspect = false) => this.hubBridge.call('jobNotice', {
+        jobId: job.id, sessionId: job.sessionId, teamId: job.teamId, userId: job.userId,
+        event, inspect, summary: job.summary || '',
+      }),
       transport: { request: (method, input) => {
         if (!['hubSnapshot', 'hubFile'].includes(method)) throw new Error('허용되지 않은 공유실 조회입니다.');
         return this[method](input);
@@ -219,12 +229,15 @@ export class NativeSlackClient {
     });
     const url = await hub.start();
     this.hub = hub;
+    this.approvedJobRunner = jobRunner;
     return { origin: url };
   }
 
   async stopHub() {
     if (this.hub) await this.hub.close();
     this.hub = null;
+    if (this.approvedJobRunner) await this.approvedJobRunner.close();
+    this.approvedJobRunner = null;
     return { stopped: true };
   }
 

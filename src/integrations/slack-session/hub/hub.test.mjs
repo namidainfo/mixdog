@@ -204,7 +204,7 @@ test('corrupt storage is rejected without overwriting it and unexpected CloudWik
   assert.equal(await readFile(file, 'utf8'), '{"bad":true}');
 });
 
-async function serverHarness(t) {
+async function serverHarness(t, { jobRunner, jobNotify } = {}) {
   const directory = await temporary(t), sent = [], calls = [], approved = new Set(['U1', 'U2', 'UA']);
   const values = [
     { actorId: 'U1', userName: '사용자 1', teamId: 'T1', channelId: 'C1', threadTs: '1', nativeSessionId: 'a',
@@ -217,6 +217,7 @@ async function serverHarness(t) {
   const fileId = 'a'.repeat(64), sha256 = 'b'.repeat(64);
   const hub = await createSessionHub({
     origin: 'http://127.0.0.1:0', adminUsers: ['T1:UA'], documentsFile: path.join(directory, 'documents.json'),
+    jobRunner, jobNotify,
     store: { listConversations: async () => values.map((value, i) => [String(i), value]) },
     authorize: async (message) => message.team === 'T1' && approved.has(message.user),
     sendCode: async (person, code) => sent.push({ ...person, code }),
@@ -249,6 +250,55 @@ async function serverHarness(t) {
   };
   return { hub, request, login, approved, calls, fileId, sha256, origin, values };
 }
+
+test('job HTTP routes bind requester identity, require current administrator approval and protect reviewed results', async (t) => {
+  const directory = await temporary(t), calls = [];
+  let inspection = { status: 'running' };
+  const h = await serverHarness(t, {
+    jobRunner: {
+      prepare: async (job) => { calls.push(['prepare', job]); return { sessionId: 'admin-execution' }; },
+      submit: async (job) => { calls.push(['submit', job]); return { accepted: true }; },
+      inspect: async () => inspection, abort: async () => ({ aborted: true }),
+      record: async () => { throw new Error('recording unavailable'); },
+    },
+    jobNotify: async () => { throw new Error('notification unavailable'); },
+  });
+  const user = await h.login('U1'), admin = await h.login('UA'), other = await h.login('U2');
+  const userHeaders = { 'x-csrf-token': user.csrf }, adminHeaders = { 'x-csrf-token': admin.csrf };
+  const input = { goal: '계산 코드 작성', checks: 'factorial 독립 검증', userId: 'UA', teamId: 'T2', admin: true };
+  assert.equal((await h.request('/api/sessions/b/jobs', input, user.cookie, userHeaders)).status, 404);
+  const created = await h.request('/api/sessions/a/jobs', input, user.cookie, userHeaders);
+  assert.equal(created.status, 201);
+  const job = await created.json();
+  assert.equal(job.userId, 'U1'); assert.equal(job.teamId, 'T1');
+  assert.equal((await h.request(`/api/jobs/${job.id}`, undefined, other.cookie)).status, 404);
+  const approval = { revision: job.revision, confirm: true, projectPath: directory };
+  assert.equal((await h.request(`/api/jobs/${job.id}/approve`, approval, user.cookie, userHeaders)).status, 403);
+  assert.equal((await h.request(`/api/jobs/${job.id}/approve`, approval, admin.cookie)).status, 403);
+  assert.equal((await h.request(`/api/jobs/${job.id}/approve`, { ...approval, revision: -1 }, admin.cookie, adminHeaders)).status, 409);
+  const runningResponse = await h.request(`/api/jobs/${job.id}/approve`, approval, admin.cookie, adminHeaders);
+  assert.equal(runningResponse.status, 200);
+  assert.equal((await runningResponse.json()).executionSessionId, 'admin-execution');
+  assert.equal(calls.filter(([kind]) => kind === 'submit').length, 1);
+  assert.equal((await h.request(`/api/jobs/${job.id}/approve`, approval, admin.cookie, adminHeaders)).status, 409);
+  inspection = { status: 'review', result: { summary: '관리자만 볼 수 있는 실행 대화', files: [] } };
+  const publicList = await (await h.request('/api/jobs', undefined, user.cookie)).json();
+  assert.equal(publicList.jobs[0].status, 'review');
+  assert.equal(publicList.jobs[0].result, undefined);
+  assert.equal(publicList.jobs[0].projectPath, undefined);
+  const review = await (await h.request(`/api/jobs/${job.id}`, undefined, admin.cookie)).json();
+  assert.equal(review.result.summary, '관리자만 볼 수 있는 실행 대화');
+  const result = await h.request(`/api/jobs/${job.id}/complete`,
+    { revision: review.revision, confirm: true, summary: '검증한 결과만 공개', fileIds: [] }, admin.cookie, adminHeaders);
+  assert.equal(result.status, 200);
+  const done = await result.json();
+  assert.equal(done.status, 'completed');
+  assert.equal(done.recording.status, 'failed');
+  assert.equal(done.notification.status, 'uncertain');
+  const published = await (await h.request(`/api/jobs/${job.id}`, undefined, user.cookie)).json();
+  assert.equal(published.summary, '검증한 결과만 공개');
+  assert.equal(published.result, undefined);
+});
 
 test('approved CLI-JAW users can authenticate before creating any Mixdog session without exposing other workspaces', async (t) => {
   const h = await serverHarness(t);

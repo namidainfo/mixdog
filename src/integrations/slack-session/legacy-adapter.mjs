@@ -55,6 +55,7 @@ export async function createLegacySlackAdapter(deps) {
       return team !== hubTeamId || !config.jawAllowedUserIds.has(user);
     })) throw new Error('공유실 관리자는 같은 Slack 워크스페이스의 기존 승인 사용자여야 합니다.');
   const transport = new SlackWorkerTransport({ ...options, log, hubOptions, hubRequest: async (method, input) => {
+    if (method === 'jobNotice') return relay.jobNotice(input);
     if (method === 'executionAccess') {
       const person = input?.sessionId
         ? slackSessionOwners(store.listConversations().map(([, conversation]) => conversation))

@@ -3,6 +3,8 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { SLACK_HELP, approvalText, parseSlackControl, questionResponse, questionText, rotationReason, statusText } from './controls.mjs';
 import { SLACK_PROJECT_CWD } from './project.mjs';
 import { slackWorkspace } from '../../runtime/shared/slack-execution-policy.mjs';
+import { slackSessionOwners } from './identity.mjs';
+import { redactToolCallArgumentsValue } from '../../runtime/agent/orchestrator/session/compact/text-utils.mjs';
 
 export class SlackMixdogRelay {
   constructor({ config, store, transport, api, postMessage, authorize, extractPrompt, resolveIdentity, loadAttachments, chunkText, log = () => {}, now = Date.now }) {
@@ -381,6 +383,44 @@ export class SlackMixdogRelay {
     conversation.activeRequestId = null;
     await this.save(key, conversation);
     await this.pump(key, conversation);
+  }
+
+  async jobNotice(input) {
+    const labels = {
+      requested: '관리자 작업 요청이 접수됐습니다. 공유실에서 승인 대기 중입니다.',
+      running: '관리자 전용 실행 세션이 작업을 시작했습니다.',
+      uncertain: '실행 접수 상태가 불확실합니다. 자동 재실행하지 않습니다.',
+      review: '실행이 종료되어 관리자가 검증 결과와 공개 범위를 확인하고 있습니다.',
+      completed: '관리자가 검증 결과를 확인하여 작업을 완료했습니다.',
+      rejected: '관리자가 작업 요청을 거절했습니다.',
+      cancelled: '작업 취소가 확인됐습니다.',
+      cancelling: '중지를 요청했지만 실행 종료는 아직 확인되지 않았습니다.',
+      failed: '관리자 작업 실행에 실패했습니다. 공유실에서 상태를 확인해 주세요.',
+      access_revoked: '승인 상태가 변경되어 작업 중지를 요청했습니다. 공유실에서 종료 상태를 확인해 주세요.',
+    };
+    if (this.closed || !input || !/^[A-Za-z0-9_-]{1,100}$/u.test(input.jobId || '')
+      || !Object.hasOwn(labels, input.event)) throw new Error('허용되지 않은 작업 알림입니다.');
+    const owner = slackSessionOwners(this.store.listConversations().map(([, value]) => value))
+      .find((row) => row.id === input.sessionId && row.teamId === input.teamId && row.userId === input.userId);
+    if (!owner) throw new Error('작업 요청자의 세션을 확인하지 못했습니다.');
+    const entry = this.store.listConversations().find(([, row]) => row.teamId === owner.teamId
+      && row.actorId === owner.userId && row.channelId === owner.channelId && row.threadTs === owner.threadTs
+      && (row.nativeSessionId === owner.id || row.nativeSessionHistory?.includes(owner.id)));
+    if (!entry) throw new Error('작업 요청자의 대화를 확인하지 못했습니다.');
+    const [key] = entry;
+    return this.serial(key, async () => {
+      const conversation = this.store.getConversation(key);
+      if (!conversation || !await this.authorize({ team: owner.teamId, user: owner.userId, channel: owner.channelId })) {
+        throw new Error('작업 요청자의 승인이 해제됐습니다.');
+      }
+      const messageKey = `job:${input.jobId}:${input.event}`;
+      const summary = ['completed', 'rejected'].includes(input.event) && typeof input.summary === 'string'
+        ? `\n${redactToolCallArgumentsValue(input.summary).slice(0, 20_000)}` : '';
+      if (input.inspect !== true) await this.message(key, conversation, messageKey, `${labels[input.event]}\n작업 ID: ${input.jobId}${summary}`);
+      const delivery = this.store.getConversation(key).outbox.filter((item) => item.key.startsWith(`${messageKey}:`));
+      return { sent: delivery.length > 0 && delivery.every((item) => item.status === 'sent'),
+        queued: delivery.length > 0 && delivery.every((item) => ['pending', 'sent'].includes(item.status)) };
+    });
   }
 
   async message(key, conversation, messageKey, text) {

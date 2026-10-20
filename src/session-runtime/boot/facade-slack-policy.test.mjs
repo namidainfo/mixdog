@@ -34,4 +34,5 @@ test('a previously unrestricted session keeps its owner policy through disk save
   await assert.rejects(facade.setSlackExecutionPolicy({ ...policy, userId: 'U2' }), /소유자를 변경/u);
   await assert.rejects(facade.setSlackExecutionPolicy({ ...policy, root: path.dirname(directory) }), /현재 SOFTON/u);
   await assert.rejects(facade.setSlackExecutionPolicy(null), /유효한/u);
+  await assert.rejects(facade.recordApprovedJob({}), /관리자 실행 세션/u);
 });

@@ -1,4 +1,5 @@
 import { recordLabel, recordSide, recentRecords } from '../records.mjs';
+import { mountJobs } from './jobs.js';
 
 export function mountHub(document, request) {
   const $ = (selector) => document.querySelector(selector);
@@ -20,6 +21,7 @@ export function mountHub(document, request) {
     $('#viewer-name').textContent = '본인 인증 필요';
     $('#detail').replaceChildren(); $('#session-list').replaceChildren(); $('#flow-marks').replaceChildren();
     $('#wiki-dialog').close(); $('#file-dialog').close();
+    jobInbox.clear();
     $('#wiki-preview').textContent = ''; $('#file-content').textContent = ''; $('#login-code').value = '';
   }
   async function api(path, input, raw = false) {
@@ -240,6 +242,10 @@ export function mountHub(document, request) {
       panel.append(editor);
     }
   }
+  const jobInbox = mountJobs(document, {
+    api, currentUser: () => me, sourceSession: () => selected,
+    sourceSnapshot: () => snapshots.get(selected), announce,
+  });
   $('#challenge-form').addEventListener('submit', (event) => {
     event.preventDefault();
     void run(async () => {

@@ -38,6 +38,7 @@
           <label id="owner-label" hidden>세션 소유자<select id="owner-filter"><option value="all">모든 사용자</option></select></label>
         </div>
         <button id="reload-list" class="list-refresh">목록·스냅샷 갱신</button>
+        <button id="open-jobs" class="list-refresh">관리자 작업 요청함</button>
         <div id="session-list" class="session-list"></div>
         <section class="worktrail-flow" aria-labelledby="flow-heading">
           <div class="flow-heading"><h3 id="flow-heading">최근 기록 흐름</h3><span class="muted small">기록 순서 기준 · 최근 6개</span></div>
@@ -52,6 +53,13 @@
     </section>
     <p id="announcement" role="status" aria-live="polite"></p>
   </main>
+  <dialog id="jobs-dialog" aria-labelledby="jobs-heading">
+    <div class="dialog-head"><h2 id="jobs-heading">관리자 작업 요청함</h2><button data-close="jobs-dialog">닫기</button></div>
+    <p class="panel-lead">요청자에게 shell 권한을 부여하지 않습니다. 관리자가 전용 PC의 별도 세션에서 인수하며, 실행 결과는 검증·공개 확인 후 전달됩니다.</p>
+    <div class="actions"><button id="reload-jobs">작업 상태 갱신</button><button id="new-job">선택 세션의 새 인계 요청</button></div>
+    <div id="job-list" class="session-list"></div>
+    <section id="job-detail" class="panel" aria-live="polite"></section>
+  </dialog>
   <dialog id="file-dialog" aria-labelledby="file-heading">
     <div class="dialog-head"><h2 id="file-heading">파일 미리보기</h2><button data-close="file-dialog">닫기</button></div>
     <p class="panel-lead">텍스트 전용 미리보기입니다. HTML·SVG·스크립트를 실행하지 않습니다.</p><pre id="file-content" class="preview"></pre>

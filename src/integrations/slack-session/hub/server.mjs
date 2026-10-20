@@ -1,13 +1,17 @@
 import http from 'node:http';
 import https from 'node:https';
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import { HubAccess, allowedAddress } from './access.mjs';
 import { slackSessionOwners } from '../identity.mjs';
 import { createHubDocuments } from './documents.mjs';
+import { createHubJobs } from './jobs.mjs';
 import { redactToolCallArgumentsValue } from '../../../runtime/agent/orchestrator/session/compact/text-utils.mjs';
 const assets = new Map([
   ['/', ['public/index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['public/app.js', 'text/javascript; charset=utf-8']],
+  ['/jobs.js', ['public/jobs.js', 'text/javascript; charset=utf-8']],
+  ['/job-contract.mjs', ['job-contract.mjs', 'text/javascript; charset=utf-8']],
   ['/boot.js', ['public/boot.js', 'text/javascript; charset=utf-8']],
   ['/style.css', ['public/style.css', 'text/css; charset=utf-8']],
   ['/records.mjs', ['records.mjs', 'text/javascript; charset=utf-8']],
@@ -33,6 +37,7 @@ async function body(request) {
 }
 export async function createSessionHub({
   origin: address, tls, adminUsers, store, transport, authorize, sendCode, documentsFile, wiki,
+  jobRunner, jobNotify, jobsFile,
   now = Date.now, log = () => {},
 }) {
   let origin = new URL(address);
@@ -51,6 +56,10 @@ export async function createSessionHub({
   const isApproved = (person) => authorize({ team: person.teamId, user: person.userId });
   const access = new HubAccess({ authorize: isApproved, sendCode, now });
   const documents = await createHubDocuments({ file: documentsFile, wiki });
+  const jobs = await createHubJobs({
+    file: jobsFile || path.join(path.dirname(documentsFile), 'approved-jobs.json'),
+    runner: jobRunner, authorize: isApproved, admin, notify: jobNotify, now,
+  });
   const snapshots = new Map();
   const index = async () => slackSessionOwners(await conversations()).map((row) =>
     ({ ...row, title: redactToolCallArgumentsValue(row.title) }));
@@ -115,10 +124,32 @@ export async function createSessionHub({
         }
         json(response, 200, { sessions: rows }); return;
       }
-      const match = /^\/api\/sessions\/([A-Za-z0-9_-]+)(?:\/(snapshot|files|documents)(?:\/([A-Za-z0-9_-]+))?(?:\/(save|submit))?)?$/u.exec(url.pathname);
+      if (request.method === 'GET' && url.pathname === '/api/jobs') {
+        await jobs.refresh(); json(response, 200, { jobs: await jobs.list(person) }); return;
+      }
+      const jobRoute = /^\/api\/jobs\/([A-Za-z0-9_-]+)(?:\/(revise|approve|reject|cancel|tool-decision|complete|files)(?:\/([a-f0-9]{64}))?)?$/u.exec(url.pathname);
+      if (jobRoute) {
+        const [, id, action, fileId] = jobRoute;
+        if (request.method === 'GET' && !action) { json(response, 200, await jobs.get(person, id)); return; }
+        if (request.method === 'GET' && action === 'files' && fileId) {
+          const result = await jobs.file(person, id, fileId, url.searchParams.get('version'));
+          const data = Buffer.from(result.data, 'base64');
+          response.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': data.length,
+            'content-disposition': 'attachment' }); response.end(data); return;
+        }
+        if (request.method === 'POST' && action && action !== 'files' && !fileId) {
+          const operation = action === 'tool-decision' ? 'toolDecision' : action;
+          json(response, 200, await jobs[operation](person, id, await body(request))); return;
+        }
+        fail(404, '요청을 찾을 수 없습니다.');
+      }
+      const match = /^\/api\/sessions\/([A-Za-z0-9_-]+)(?:\/(snapshot|files|documents|jobs)(?:\/([A-Za-z0-9_-]+))?(?:\/(save|submit))?)?$/u.exec(url.pathname);
       if (!match) fail(404, '페이지를 찾을 수 없습니다.');
       const [, id, section, itemId, operation] = match;
-      await owned(person, id);
+      const owner = await owned(person, id);
+      if (request.method === 'POST' && section === 'jobs' && !itemId) {
+        json(response, 201, await jobs.create(person, owner, await body(request))); return;
+      }
       if (request.method === 'GET' && !section) { json(response, 200, await snapshot(person, id)); return; }
       if (request.method === 'POST' && section === 'snapshot' && !itemId) { await body(request); json(response, 200, await snapshot(person, id)); return; }
       if (request.method === 'GET' && section === 'files' && /^[a-f0-9]{64}$/u.test(itemId || '')) {
@@ -147,6 +178,7 @@ export async function createSessionHub({
     }
   };
   const server = origin.protocol === 'https:' ? https.createServer(tls, handler) : http.createServer(handler);
+  let poll = null, polling = null;
   server.requestTimeout = 30_000; server.headersTimeout = 15_000; server.maxConnections = 100;
   return { handler,
     async start() {
@@ -156,9 +188,18 @@ export async function createSessionHub({
           origin.hostname.replace(/^\[|\]$/gu, ''), () => { server.off('error', reject); resolve(); });
       });
       if (origin.port === '0') origin.port = String(server.address().port);
+      poll = setInterval(() => {
+        if (polling) return;
+        polling = jobs.refresh().catch(() => log('공유실 작업 상태를 저장·갱신하지 못했습니다. 자동 재실행하지 않습니다.'))
+          .finally(() => { polling = null; });
+      }, 2000);
+      poll.unref();
       log(`SOFTON 공유실: ${origin.origin} (사내망 + Slack 본인 인증)`); return origin.origin;
     },
     async close() {
+      clearInterval(poll);
+      await polling;
+      await jobs.idle();
       server.closeAllConnections();
       if (server.listening) await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     },

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 // Only these callbacks cross the private Windows-worker/Slack-bridge pipe.
-export const HUB_CALLBACKS = new Set(['conversations', 'authorize', 'sendCode', 'executionAccess']);
+export const HUB_CALLBACKS = new Set(['conversations', 'authorize', 'sendCode', 'executionAccess', 'jobNotice']);
 export class HubWorkerBridge {
   constructor(send, timeoutMs = 15_000) { this.send = send; this.timeoutMs = timeoutMs; this.pending = new Map(); this.closed = false; }
   call(method, params = {}) {

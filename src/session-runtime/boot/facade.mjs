@@ -9,6 +9,7 @@ import { assertAdmissionOpen, bindSessionAddress } from '../session-address.mjs'
 import { dataDirOf, workflowHelpers } from './shared.mjs';
 import { saveSessionAsync } from '../../runtime/agent/orchestrator/session/store.mjs';
 import { normalizeSlackExecutionPolicy } from '../../runtime/shared/slack-execution-policy.mjs';
+import { recordApprovedJob } from '../approved-job-record.mjs';
 import path from 'node:path';
 
 export function buildFacade(boot) {
@@ -31,6 +32,11 @@ export function buildFacade(boot) {
       ...boot.modelRouteApi,
       ...boot.workflowAgentsApi,
       ...boot.sessionTurnApi,
+      recordApprovedJob: (input) => recordApprovedJob({
+        session: rt.session, scopeId: rt.mcpScopeId, input,
+        execute: (...args) => boot.mcpClient.executeMcpTool(...args),
+        save: saveSessionAsync,
+      }),
       setSlackExecutionPolicy: async (value) => {
         const policy = normalizeSlackExecutionPolicy(value);
         if (rt.reservedSessionId && !rt.session?.id) await boot.createCurrentSession('reservation');

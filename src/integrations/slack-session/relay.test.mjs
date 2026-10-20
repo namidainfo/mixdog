@@ -112,6 +112,43 @@ function harness({ store = new MemoryStore(), transport = new FakeTransport(), m
   return { relay, store, transport, sent, message, conversation };
 }
 
+test('job notices use the original authenticated owner thread and do not resend completed deliveries', async (t) => {
+  const h = harness();
+  t.after(() => h.relay.close());
+  h.relay.authorize = (message) => message.team === 'T1' && ['U1', 'U2'].includes(message.user) && message.channel === 'C1';
+  await h.relay.handleMessage(h.message('first request', '1', 'one', { team: 'T1', user: 'U1', channel: 'C1' }), 'bot');
+  await h.relay.handleMessage(h.message('other request', '2', 'two', { team: 'T1', user: 'U2', channel: 'C1' }), 'bot');
+  const source = h.store.listConversations().find(([, row]) => row.actorId === 'U1')[1];
+  const input = { jobId: 'job-1', sessionId: source.nativeSessionId, teamId: 'T1', userId: 'U1', event: 'completed', summary: '검증한 공개 결과' };
+  assert.equal((await h.relay.jobNotice(input)).sent, true);
+  assert.equal((await h.relay.jobNotice({ ...input, inspect: true })).sent, true);
+  const delivered = h.sent.filter((message) => message.text.includes('작업 ID: job-1'));
+  assert.equal(delivered.length, 1);
+  assert.equal(delivered[0].thread_ts, 'one');
+  assert.equal(delivered[0].channel, 'C1');
+  assert.match(delivered[0].text, /검증한 공개 결과/);
+  await h.relay.jobNotice(input);
+  assert.equal(h.sent.filter((message) => message.text.includes('작업 ID: job-1')).length, 1);
+  await assert.rejects(h.relay.jobNotice({ ...input, userId: 'U2' }), /요청자/);
+  h.relay.authorize = () => false;
+  await assert.rejects(h.relay.jobNotice({ ...input, event: 'review' }), /승인/);
+});
+
+test('ambiguous job notice delivery remains uncertain and is not automatically resent', async (t) => {
+  let attempts = 0;
+  const h = harness({ post: async (message) => {
+    if (message.text.includes('작업 ID: job-2')) { attempts++; throw new Error('connection lost'); }
+  } });
+  t.after(() => h.relay.close());
+  h.relay.authorize = (message) => message.team === 'T1' && message.user === 'U1' && message.channel === 'C1';
+  await h.relay.handleMessage(h.message('request', '1', 'one', { team: 'T1', user: 'U1', channel: 'C1' }), 'bot');
+  const source = h.store.listConversations()[0][1];
+  const input = { jobId: 'job-2', sessionId: source.nativeSessionId, teamId: 'T1', userId: 'U1', event: 'completed', summary: '검증 완료' };
+  assert.deepEqual(await h.relay.jobNotice(input), { sent: false, queued: false });
+  assert.deepEqual(await h.relay.jobNotice(input), { sent: false, queued: false });
+  assert.equal(attempts, 1);
+});
+
 test('an idle logon retries the native connection after the daemon becomes ready without creating a request', async (t) => {
   const transport = new FakeTransport();
   let ready = false, attempts = 0;
