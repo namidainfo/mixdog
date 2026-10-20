@@ -14,20 +14,20 @@ function snapshot(id, userName = me.userName) {
     records: Array.from({ length: 8 }, (_, i) => ({ id: `${id}-${i}`, kind: i % 2 ? 'verified' : 'decision',
       title: `기록 ${id}-${i}`, body: `본문 ${id}-${i}`, conclusion: '판단', at: 1792110000000 + i, next: '검토', owner: 'user' })) };
 }
-async function harness(t, { admin = false, waitingFor = null } = {}) {
+async function harness(t, { admin = false, waitingFor = null, sessionIds = admin ? ['a', 'b'] : ['a'] } = {}) {
   const dom = new JSDOM(await readFile(new URL('public/index.html', import.meta.url), 'utf8'), { url: 'http://127.0.0.1' });
   t.after(() => dom.window.close());
   dom.window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
   dom.window.HTMLDialogElement.prototype.close = function () { this.open = false; };
   dom.window.HTMLElement.prototype.scrollIntoView = function () {};
-  const calls = [], docs = [], data = new Map([['a', snapshot('a')], ['b', snapshot('b', 'softon_김민지')]]);
+  const calls = [], docs = [], data = new Map([['a', snapshot('a')], ['b', snapshot('b', 'softon_김민지')], ['c', snapshot('c')]]);
   data.get('a').waitingFor = waitingFor;
   let failure = false, authenticated = true;
   const request = async (url, options = {}) => {
     calls.push({ url, options });
     if (!authenticated) return Response.json({ error: '로그인해 주세요.' }, { status: 401 });
     if (url === '/api/me') return Response.json({ ...me, admin });
-    if (url === '/api/sessions') return Response.json({ sessions: (admin ? ['a', 'b'] : ['a']).map((id) => ({
+    if (url === '/api/sessions') return Response.json({ sessions: sessionIds.map((id) => ({
       id, userName: data.get(id).userName, userId: data.get(id).userId, title: data.get(id).title,
     })) });
     const match = /^\/api\/sessions\/([^/]+)(.*)$/u.exec(url);
@@ -52,7 +52,7 @@ async function harness(t, { admin = false, waitingFor = null } = {}) {
     return Response.json({ error: 'not found' }, { status: 404 });
   };
   await mountHub(dom.window.document, request).ready;
-  return { dom, $: (selector) => dom.window.document.querySelector(selector), calls,
+  return { dom, $: (selector) => dom.window.document.querySelector(selector), calls, data,
     fail: () => { failure = true; }, expire: () => { authenticated = false; } };
 }
 
@@ -70,6 +70,58 @@ test('sidebar shows six ordered records and selecting a mark opens the actual re
   assert.equal(h.$('#file-content script'), null);
 });
 
+test('administrator record flow follows only the selected session, including sessions with the same owner', async (t) => {
+  const h = await harness(t, { admin: true, sessionIds: ['a', 'c', 'b'] });
+  const assertSelected = (id) => {
+    const marks = [...h.dom.window.document.querySelectorAll('.flow-mark')];
+    assert.equal(marks.length, 6);
+    for (const [index, mark] of marks.entries()) {
+      assert.equal(mark.getAttribute('aria-label').split(' · ')[1], `기록 ${id}-${index + 2}`);
+      assert.equal(mark.dataset.here, 'true');
+    }
+    assert.equal(h.$('.session-heading').textContent, h.data.get(id).title);
+  };
+  assertSelected('a');
+  h.dom.window.document.querySelectorAll('.session')[1].click(); assertSelected('c');
+  h.dom.window.document.querySelectorAll('.session')[2].click(); assertSelected('b');
+  h.dom.window.document.querySelectorAll('.session')[0].click(); assertSelected('a');
+});
+
+test('administrator empty and filtered selections never fall back to another session record', async (t) => {
+  const h = await harness(t, { admin: true });
+  h.data.get('b').records = [];
+  h.$('#reload-list').click(); await tick(); await tick();
+  h.dom.window.document.querySelectorAll('.session')[1].click();
+  assert.equal(h.$('.session-heading').textContent, h.data.get('b').title);
+  assert.equal(h.dom.window.document.querySelectorAll('.flow-mark').length, 0);
+  h.$('#search').value = '작업 a'; h.$('#search').dispatchEvent(new h.dom.window.Event('input'));
+  assert.equal(h.$('.session-heading').textContent, h.data.get('a').title);
+  assert.equal(h.dom.window.document.querySelectorAll('.flow-mark').length, 6);
+  h.$('#search').value = '없는 세션'; h.$('#search').dispatchEvent(new h.dom.window.Event('input'));
+  assert.equal(h.dom.window.document.querySelectorAll('.session').length, 0);
+  assert.equal(h.dom.window.document.querySelectorAll('.flow-mark').length, 0);
+});
+
+test('ordinary users load only accessible session records and discard records removed from the sidebar', async (t) => {
+  const sessionIds = ['a', 'c'], h = await harness(t, { sessionIds });
+  const marks = [...h.dom.window.document.querySelectorAll('.flow-mark')];
+  assert.equal(h.dom.window.document.querySelectorAll('.session').length, 2);
+  assert.deepEqual(marks.map((mark) => mark.getAttribute('aria-label').split(' · ')[1]),
+    ['기록 a-5', '기록 c-5', '기록 a-6', '기록 c-6', '기록 a-7', '기록 c-7']);
+  assert.equal(h.calls.some((call) => call.url.startsWith('/api/sessions/b')), false);
+  marks[1].click(); await tick();
+  assert.equal(h.$('.session-heading').textContent, h.data.get('c').title);
+  assert.match(h.$('.record[data-selected="true"]').textContent, /기록 c-5/u);
+  sessionIds.pop();
+  h.$('#reload-list').click(); await tick(); await tick();
+  assert.equal(h.dom.window.document.querySelectorAll('.session').length, 1);
+  assert.equal(h.$('.session-heading').textContent, h.data.get('a').title);
+  assert.deepEqual([...h.dom.window.document.querySelectorAll('.flow-mark')]
+    .map((mark) => mark.getAttribute('aria-label').split(' · ')[1]),
+  ['기록 a-2', '기록 a-3', '기록 a-4', '기록 a-5', '기록 a-6', '기록 a-7']);
+  assert.equal(h.calls.some((call) => call.url.startsWith('/api/sessions/b')), false);
+});
+
 test('refresh failures preserve the exact previous snapshot and authentication expiry clears private content', async (t) => {
   const h = await harness(t), previous = h.$('.session-heading').textContent;
   h.fail(); h.$('#refresh').click(); await tick(); await tick();
@@ -85,6 +137,7 @@ test('administrator owner filters also constrain the recent record flow', async 
   assert.equal(h.$('#owner-label').hidden, false);
   h.$('#owner-filter').value = 'U2'; h.$('#owner-filter').dispatchEvent(new h.dom.window.Event('change'));
   assert.equal(h.dom.window.document.querySelectorAll('.session').length, 1);
+  assert.equal(h.dom.window.document.querySelectorAll('.flow-mark').length, 6);
   for (const mark of h.dom.window.document.querySelectorAll('.flow-mark')) assert.match(mark.getAttribute('aria-label'), /softon_김민지/u);
 });
 

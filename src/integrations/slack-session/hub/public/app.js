@@ -78,7 +78,8 @@ export function mountHub(document, request) {
       : '조회 범위 내 스냅샷을 갱신했습니다. 실행 명령은 보내지 않았습니다.');
   }
   function renderFlow(filtered) {
-    const records = filtered.flatMap((row) => (snapshots.get(row.id)?.records || []).map((record) =>
+    const scope = me.admin ? filtered.filter((row) => row.id === selected) : filtered;
+    const records = scope.flatMap((row) => (snapshots.get(row.id)?.records || []).map((record) =>
       ({ ...record, sessionId: row.id, sessionTitle: snapshots.get(row.id)?.title || row.title })))
       .sort((a, b) => Number(a.at || 0) - Number(b.at || 0));
     const recent = recentRecords(records);

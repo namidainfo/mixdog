@@ -222,7 +222,11 @@ async function serverHarness(t) {
     sendCode: async (person, code) => sent.push({ ...person, code }),
     transport: { request: async (method, input) => {
       calls.push({ method, input });
-      if (method === 'hubSnapshot') return { id: input.sessionId, title: `제목 ${input.sessionId}`, state: 'done', messages: [], records: [], files: [{ id: fileId, sha256, path: 'result.md' }] };
+      if (method === 'hubSnapshot') return {
+        id: input.sessionId, title: `제목 ${input.sessionId}`, state: 'done', messages: [],
+        records: [{ id: `record-${input.sessionId}`, kind: 'verified', title: `기록 ${input.sessionId}`, body: `본문 ${input.sessionId}` }],
+        files: [{ id: fileId, sha256, path: 'result.md' }],
+      };
       if (method === 'hubFile') return { data: Buffer.from('파일 내용').toString('base64') };
       throw new Error('unexpected operation');
     } },
@@ -272,7 +276,14 @@ test('HTTP routes enforce login, owner isolation including rotation history, adm
     assert.equal((await h.request(endpoint, undefined, user.cookie)).status, 404);
   }
   assert.equal(h.calls.length, 0);
-  assert.equal((await h.request('/api/sessions/b', undefined, admin.cookie)).status, 200);
+  for (const id of ['a', 'old-a']) {
+    const response = await h.request(`/api/sessions/${id}`, undefined, user.cookie);
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).records.map((record) => record.id), [`record-${id}`]);
+  }
+  const adminSnapshot = await h.request('/api/sessions/b', undefined, admin.cookie);
+  assert.equal(adminSnapshot.status, 200);
+  assert.deepEqual((await adminSnapshot.json()).records.map((record) => record.id), ['record-b']);
   h.approved.delete('U1');
   assert.equal((await h.request('/api/sessions', undefined, user.cookie)).status, 401);
   assert.equal((await h.request('/api/sessions/a', undefined, admin.cookie)).status, 404);
