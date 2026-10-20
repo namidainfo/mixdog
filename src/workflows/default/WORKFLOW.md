@@ -27,13 +27,18 @@ only; retain the approval rules above for other changes. Exclude greetings and
 conversations with no work outcome. Never copy the entire conversation.
 
 At task start, discover the Worktrail MCP tools and call list_threads with the
-actual absolute worktree path. For a Windows client using a WSL stdio Worktrail
-server, translate Windows paths with wslpath in the configured distro and user
-before recording; reuse that WSL path for the task. Verify the returned
+actual absolute worktree path. Pass the native Windows path unchanged when
+running on Windows: the trusted MCP runtime performs any configured WSL path
+conversion. Never call shell or WSL merely to prepare a work-record request.
+Verify the returned
 repository/worktree against the real project. Never substitute the server's cwd
 or a fabricated project path. Resume a matching task or open_thread for a new
 objective. List existing topics and reuse a matching one; create one only when
 none fits. Keep the returned case_id.
+
+For a SOFTON administrator-approved job, the runtime records the reviewed job
+outcome separately. Never grant the requester host shell or general Worktrail
+access, or treat a failed record as a successful save.
 
 After meaningful changes, findings or checks, use note_turn with observed,
 conclusion, kind, next and owner. Use a short owner handle such as mixdog, and
